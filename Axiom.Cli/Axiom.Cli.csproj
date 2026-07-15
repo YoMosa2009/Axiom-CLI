@@ -15,7 +15,6 @@
     <Nullable>enable</Nullable>
     <AssemblyName>axiom</AssemblyName>
     <RootNamespace>Axiom.Cli</RootNamespace>
-    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
   </PropertyGroup>
 
 </Project>
