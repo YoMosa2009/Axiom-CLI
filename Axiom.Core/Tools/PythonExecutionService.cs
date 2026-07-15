@@ -98,6 +98,13 @@ def axiom_now_iso():
                     {
                         Runtime.PythonDLL = runtime.SharedLibraryPath;
                         PythonEngine.Initialize();
+                        // Initialize() leaves the calling thread holding the GIL implicitly.
+                        // Without releasing it here, Py.GIL() from any other thread pool thread
+                        // (ExecuteInternal always runs on a fresh Task.Run) blocks forever — this
+                        // was a latent bug inherited from the WPF app that only ever manifested
+                        // under real thread-pool contention (confirmed by CI, not reproducible in
+                        // ad hoc local runs where the same thread happened to be reused).
+                        PythonEngine.BeginAllowThreads();
                     }, token).ConfigureAwait(false);
                     _pythonEngineInitialized = true;
                 }

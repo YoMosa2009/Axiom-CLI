@@ -160,6 +160,46 @@ namespace Axiom.Core.Tools
                         .Where(path => !string.Equals(Path.GetFileName(path), "python3.dll", StringComparison.OrdinalIgnoreCase)));
                 }
             }
+            else
+            {
+                // Homebrew and apt-installed Pythons frequently report empty/unhelpful
+                // INSTSONAME+LDLIBRARY too (confirmed against a Homebrew 3.14 install in CI),
+                // and Linux .so files often carry a soname suffix (libpython3.11.so.1.0) that a
+                // plain "libpythonX.Y.so" guess won't match — so fall back to a directory scan.
+                string[] versionParts = version.Split('.');
+                string majorMinor = versionParts.Length >= 2 ? $"{versionParts[0]}.{versionParts[1]}" : string.Empty;
+                string extension = OperatingSystem.IsMacOS() ? "dylib" : "so";
+
+                var libDirs = new[] { libDir, Path.Combine(basePrefix, "lib") }
+                    .Where(dir => !string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
+                if (majorMinor.Length > 0)
+                {
+                    foreach (string dir in libDirs)
+                    {
+                        candidatePaths.Add(Path.Combine(dir, $"libpython{majorMinor}.{extension}"));
+                        // Legacy "wide unicode"/pymalloc ABI flag some distros still use.
+                        candidatePaths.Add(Path.Combine(dir, $"libpython{majorMinor}m.{extension}"));
+                    }
+                }
+
+                foreach (string dir in libDirs)
+                {
+                    candidatePaths.AddRange(Directory.EnumerateFiles(dir, "libpython3*")
+                        .Where(path => path.Contains('.' + extension, StringComparison.OrdinalIgnoreCase)));
+                }
+
+                // python.org / some Homebrew macOS builds are framework layouts: the loadable
+                // image is the extensionless "Python" binary directly inside Versions/X.Y/.
+                if (OperatingSystem.IsMacOS())
+                {
+                    candidatePaths.Add(Path.Combine(basePrefix, "Python"));
+                    if (!string.IsNullOrWhiteSpace(executableDir))
+                        candidatePaths.Add(Path.GetFullPath(Path.Combine(executableDir, "..", "Python")));
+                }
+            }
 
             return candidatePaths.FirstOrDefault(File.Exists);
         }
