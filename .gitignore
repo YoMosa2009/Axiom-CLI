@@ -1,0 +1,7 @@
+bin/
+obj/
+*.user
+.vs/
+publish/
+axiom-cli-*.zip
+axiom-cli-*.tar.gz

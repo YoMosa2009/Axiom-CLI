@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-latest
+            archive: zip
+          - rid: linux-x64
+            os: ubuntu-latest
+            archive: tar
+          - rid: osx-x64
+            os: macos-latest
+            archive: tar
+          - rid: osx-arm64
+            os: macos-latest
+            archive: tar
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Derive version from tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        run: >
+          dotnet publish Axiom.Cli/Axiom.Cli.csproj
+          -r ${{ matrix.rid }}
+          --self-contained
+          -p:PublishSingleFile=true
+          -p:Version=${{ steps.version.outputs.version }}
+          -c Release
+          -o publish/${{ matrix.rid }}
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path publish/${{ matrix.rid }}/* -DestinationPath axiom-cli-${{ matrix.rid }}.zip
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: tar -czf axiom-cli-${{ matrix.rid }}.tar.gz -C publish/${{ matrix.rid }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axiom-cli-${{ matrix.rid }}
+          path: axiom-cli-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
