@@ -44,9 +44,17 @@ when a newer version is available.
 | Command | What it does |
 |---|---|
 | `axiom config` | Store your OpenRouter API key (encrypted at rest) |
-| `axiom chat` | Interactive chat. `/tools` toggles calculator/web-search/sandbox, `/clear` resets the conversation |
-| `axiom code "<task>"` | Connects the current directory, runs the Architect → Builder → Critic council, shows a diff, and asks before applying |
+| `axiom chat [--model <id>]` | Interactive chat. `/tools` toggles calculator/web-search/sandbox, `/model` switches between Eidos 1 and Hepha 1, `/clear` resets the conversation |
+| `axiom code [--model <id>] "<task>"` | Connects the current directory, runs the Architect → Builder → Critic council, shows a diff, and asks before applying |
 | `axiom update` | Downloads and installs the latest release over the current one |
+
+Available models: `eidos` (Eidos 1, general-purpose reasoning) and `hepha` (Hepha 1,
+code-specialized) — the same aliases as the desktop app. `axiom code` uses the desktop app's
+Workplace Council default model unless `--model` is given.
+
+The terminal UI uses the same color palette as the desktop app — the warm dark "notebook" theme
+with the gold accent, and the same per-role colors (Architect/Builder/Critic) in `axiom code`'s
+council output.
 
 ## How the council works
 

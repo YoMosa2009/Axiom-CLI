@@ -6,6 +6,7 @@ namespace Axiom.Cli.Ui;
 
 // Renders CouncilEvent progress to the terminal — the CLI's equivalent of the WPF app's
 // AppendChat/LogActivity sinks, which the orchestrator was deliberately built not to depend on.
+// Role panels use the exact accent colors the GUI's Council chat cards use (WorkplaceChatMessage.cs).
 internal static class CouncilConsoleRenderer
 {
     // Progress<T> marshals callbacks through the captured SynchronizationContext/thread pool,
@@ -26,32 +27,45 @@ internal static class CouncilConsoleRenderer
         switch (evt.Kind)
         {
             case CouncilEventKind.Status:
-                AnsiConsole.MarkupLineInterpolated($"[grey]· {evt.Message}[/]");
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]· {evt.Message.EscapeMarkup()}[/]");
                 break;
             case CouncilEventKind.ArchitectOutput:
-                AnsiConsole.Write(new Panel(evt.Message.EscapeMarkup()).Header("[cyan1]Architect[/]").RoundedBorder());
+                WriteRolePanel("Architect", AxiomTheme.Architect, evt.Message);
                 break;
             case CouncilEventKind.BuilderOutput:
-                AnsiConsole.Write(new Panel(Truncate(evt.Message)).Header("[yellow]Builder[/]").RoundedBorder());
+                WriteRolePanel("Builder", AxiomTheme.Builder, evt.Message);
                 break;
             case CouncilEventKind.CriticOutput:
-                AnsiConsole.Write(new Panel(Truncate(evt.Message)).Header("[magenta1]Critic[/]").RoundedBorder());
+                WriteRolePanel("Critic", AxiomTheme.Critic, evt.Message);
                 break;
             case CouncilEventKind.Warning:
-                AnsiConsole.MarkupLineInterpolated($"[yellow]⚠ {evt.Message}[/]");
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Warning)}]⚠ {evt.Message.EscapeMarkup()}[/]");
                 break;
             case CouncilEventKind.Completed:
-                AnsiConsole.MarkupLineInterpolated($"[green]✓ {evt.Message}[/]");
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]✓ {evt.Message.EscapeMarkup()}[/]");
                 break;
             case CouncilEventKind.Failed:
-                AnsiConsole.MarkupLineInterpolated($"[red]✗ {evt.Message}[/]");
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]✗ {evt.Message.EscapeMarkup()}[/]");
                 break;
         }
+    }
+
+    private static void WriteRolePanel(string role, Color accent, string message)
+    {
+        var panel = new Panel(Truncate(message))
+            .Header($"[bold {AxiomTheme.Hex(accent)}]{role}[/]")
+            .RoundedBorder()
+            .BorderColor(accent)
+            .Padding(1, 0, 1, 0);
+        AnsiConsole.WriteLine();
+        AnsiConsole.Write(panel);
     }
 
     private static string Truncate(string text)
     {
         string escaped = (text ?? string.Empty).EscapeMarkup();
-        return escaped.Length > 1200 ? escaped[..1200] + "\n[grey]...truncated...[/]" : escaped;
+        return escaped.Length > 1200
+            ? escaped[..1200] + $"\n[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]...truncated...[/]"
+            : escaped;
     }
 }
