@@ -24,9 +24,36 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        bool ownedFlag = args.Any(a => a.Equals("--owned", StringComparison.OrdinalIgnoreCase));
+        args = args.Where(a => !a.Equals("--owned", StringComparison.OrdinalIgnoreCase)).ToArray();
+
         string? modelOverride = ExtractModelFlag(ref args);
         string command = args.Length > 0 ? args[0].ToLowerInvariant() : "chat";
         UpdateInstaller.CleanupPendingBackups();
+        ConsoleUi.ConfigureConsole();
+
+        // Interactive chat opens in a dedicated full console window (Windows). The child is
+        // marked --owned / AXIOM_CLI_OWNED so it does not re-spawn.
+        if (command == "chat" && !ownedFlag && !SessionLauncher.IsOwnedSession)
+        {
+            // Rebuild the arg list the child should see (including --model if present).
+            var launchArgs = new List<string>(args);
+            if (!string.IsNullOrWhiteSpace(modelOverride))
+            {
+                launchArgs.Add("--model");
+                launchArgs.Add(modelOverride);
+            }
+
+            if (SessionLauncher.TryLaunchOwnedChatWindow(launchArgs))
+            {
+                AnsiConsole.MarkupLine(
+                    $"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Opened Axiom in a new window.[/]");
+                return 0;
+            }
+        }
+
+        if (ownedFlag || SessionLauncher.IsOwnedSession)
+            SessionLauncher.PrepareOwnedConsole();
 
         try
         {
@@ -77,12 +104,13 @@ internal static class Program
         AnsiConsole.MarkupLine($"[bold]axiom[/] [{muted}]— Axiom CLI (cloud mode)[/]");
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom chat[/] [[--model <id>]]     Start an interactive cloud chat session (default)");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom chat[/] [[--model <id>]]     Start chat in a dedicated window (Windows)");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--model <id>]] <task>   Run the Architect/Builder/Critic council against the current directory");
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
         AnsiConsole.MarkupLine($"  [{gold}]axiom help[/]                    Show this help");
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine($"[{muted}]Models: eidos (Eidos 1, general-purpose) · hepha (Hepha 1, code-specialized)[/]");
+        AnsiConsole.MarkupLine($"[{muted}]In chat: type / for the tool & command menu (↑↓ + Enter).[/]");
         return 0;
     }
 
@@ -142,7 +170,7 @@ internal static class Program
             AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]An API key is already configured (ending in ...{Last4(existing)}).[/]");
 
         AnsiConsole.Markup($"Enter your [{AxiomTheme.Hex(AxiomTheme.Gold)}]OpenRouter API key[/] (from openrouter.ai/keys): ");
-        string apiKey = ReadLine(secret: true) ?? string.Empty;
+        string apiKey = ReadLineSecret() ?? string.Empty;
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -157,17 +185,20 @@ internal static class Program
 
     private static string Last4(string value) => value.Length <= 4 ? value : value[^4..];
 
-    // Spectre's interactive prompts refuse redirected/piped stdin outright ("non-interactive
-    // mode"), which breaks scripting and CI use. Fall back to a plain Console.ReadLine() in that
-    // case; only use Spectre's masked-input prompt on a real interactive terminal.
-    private static string? ReadLine(bool secret)
+    private static string? ReadLineSecret()
     {
         if (Console.IsInputRedirected)
             return Console.ReadLine();
 
-        return secret
-            ? AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).Secret())
-            : AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).AllowEmpty());
+        return AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).Secret());
+    }
+
+    private static string? ReadLinePlain()
+    {
+        if (Console.IsInputRedirected)
+            return Console.ReadLine();
+
+        return AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).AllowEmpty());
     }
 
     private sealed class ChatSession
@@ -205,11 +236,14 @@ internal static class Program
         int turnCount = 0;
         while (true)
         {
-            ConsoleUi.PromptDivider();
-            AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.Gold)}]❯[/] ");
-            string? input = ReadLine(secret: false);
+            AnsiConsole.WriteLine();
+            string? input = ChatInput.ReadLine(
+                session.Tools,
+                () => ChatInput.BuildDefaultItems(session.Tools, ModelCatalog),
+                result => HandleMenuAction(result, session));
+
             if (input == null)
-                break; // stdin closed (EOF) — exit cleanly instead of looping forever
+                break; // stdin closed (EOF)
             if (string.IsNullOrWhiteSpace(input))
                 continue;
             if (input.Equals("exit", StringComparison.OrdinalIgnoreCase) || input.Equals("quit", StringComparison.OrdinalIgnoreCase))
@@ -219,29 +253,23 @@ internal static class Program
                 continue;
 
             string userMessage = await AugmentWithToolResultsAsync(input, session.Tools);
-
             var request = new ChatPipelineRequest(FoundationSystemPrompt.Text, userMessage, session.History);
 
             var thinking = new ConsoleUi.ThinkingIndicator();
-            bool firstToken = true;
+            var stream = new ConsoleUi.TokenStream();
             try
             {
                 ChatPipelineResult result = await session.Pipeline.ExecuteAsync(
                     request,
                     onToken: token =>
                     {
-                        if (firstToken)
-                        {
-                            thinking.Stop();
-                            AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]axiom›[/] ");
-                            firstToken = false;
-                        }
-                        Console.Write(token);
+                        thinking.Stop();
+                        stream.WriteToken(token);
                     },
                     CancellationToken.None);
 
                 thinking.Stop();
-                Console.WriteLine();
+                stream.Complete();
                 session.History.Add(new OpenRouterMessage("user", input));
                 session.History.Add(new OpenRouterMessage("assistant", result.ResponseText));
                 turnCount++;
@@ -250,12 +278,25 @@ internal static class Program
             catch (Exception ex)
             {
                 thinking.Stop();
-                Console.WriteLine();
+                stream.Complete();
                 AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Error:[/] {ex.Message.EscapeMarkup()}");
+            }
+            finally
+            {
+                thinking.Dispose();
+                stream.Dispose();
             }
         }
 
         return 0;
+    }
+
+    private static void HandleMenuAction(ChatInput.SlashResult result, ChatSession session)
+    {
+        // Tool toggles update session state immediately; the slash menu redraws with new ●/○.
+        // Avoid printing extra lines here — that would fight the in-place editor redraw.
+        if (result.Kind == "toggle-tool" && !string.IsNullOrWhiteSpace(result.ToolName))
+            session.Tools.TryToggle(result.ToolName, out _);
     }
 
     private static (string Id, string Label) ResolveInitialModel(string? modelOverride)
@@ -285,7 +326,7 @@ internal static class Program
         }
 
         // The council stays on one model for the whole task rather than falling back mid-run — a
-        // silent model swap leaves the replacement unable to continue what the first model
+        // silent model swap leaves the replacement model unable to continue what the first model
         // started (see the WPF app's changelog for the incident this fixed). --model overrides
         // the council's usual default; otherwise it keeps using the GUI app's council default.
         string councilModelId = OpenRouterChatService.WorkplaceCouncilDefaultModelId;
@@ -340,7 +381,7 @@ internal static class Program
         }
 
         AnsiConsole.Markup($"Apply these changes? [{AxiomTheme.Hex(AxiomTheme.Success)}]y[/]/[{AxiomTheme.Hex(AxiomTheme.Error)}]n[/]: ");
-        string? answer = ReadLine(secret: false);
+        string? answer = ReadLinePlain();
         if (!string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
         {
             AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Discarded — no files were changed.[/]");
@@ -398,7 +439,8 @@ internal static class Program
                 return true;
 
             case "/help":
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Gold)}]/tools[/], [{AxiomTheme.Hex(AxiomTheme.Gold)}]/model[/], [{AxiomTheme.Hex(AxiomTheme.Gold)}]/clear[/], [{AxiomTheme.Hex(AxiomTheme.Gold)}]exit[/]");
+                AnsiConsole.MarkupLine(
+                    $"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Press [/][{AxiomTheme.Hex(AxiomTheme.Gold)}]/[/][{AxiomTheme.Hex(AxiomTheme.SystemMuted)}] for tools & models. Commands: /tools, /model, /clear, exit[/]");
                 return true;
 
             default:

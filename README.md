@@ -32,7 +32,7 @@ Both scripts detect your OS/architecture, download the matching release from
 
 ```sh
 axiom config              # paste in an OpenRouter API key (openrouter.ai/keys)
-axiom chat                # interactive cloud chat with calculator/web-search/sandbox tools
+axiom chat                # opens a dedicated chat window (Windows) with tools & slash menu
 axiom code "add input validation to the signup form"   # coding agent, run inside a repo
 ```
 
@@ -44,7 +44,7 @@ when a newer version is available.
 | Command | What it does |
 |---|---|
 | `axiom config` | Store your OpenRouter API key (encrypted at rest) |
-| `axiom chat [--model <id>]` | Interactive chat. `/tools` toggles calculator/web-search/sandbox, `/model` switches between Eidos 1 and Hepha 1, `/clear` resets the conversation |
+| `axiom chat [--model <id>]` | Interactive chat in a dedicated window (Windows). Press `/` for tools & models (↑↓ + Enter), or use `/tools`, `/model`, `/clear` |
 | `axiom code [--model <id>] "<task>"` | Connects the current directory, runs the Architect → Builder → Critic council, shows a diff, and asks before applying |
 | `axiom update` | Downloads and installs the latest release over the current one |
 
@@ -52,9 +52,9 @@ Available models: `eidos` (Eidos 1, general-purpose reasoning) and `hepha` (Heph
 code-specialized) — the same aliases as the desktop app. `axiom code` uses the desktop app's
 Workplace Council default model unless `--model` is given.
 
-The terminal UI uses the same color palette as the desktop app — the warm dark "notebook" theme
-with the gold accent, and the same per-role colors (Architect/Builder/Critic) in `axiom code`'s
-council output.
+In chat, type `/` to open a compact dropdown of tools (calculator, web-search, sandbox) and
+commands; arrow keys select, Enter toggles or runs. The terminal UI uses the same warm dark
+"notebook" palette as the desktop app, with full-width layout and an in-place thinking spinner.
 
 ## How the council works
 

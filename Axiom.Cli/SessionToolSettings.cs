@@ -39,4 +39,30 @@ internal sealed class SessionToolSettings
                 return false;
         }
     }
+
+    public bool TryToggle(string name, out bool nowEnabled)
+    {
+        nowEnabled = false;
+        switch (name.ToLowerInvariant())
+        {
+            case "calc":
+            case "calculator":
+                CalculatorEnabled = !CalculatorEnabled;
+                nowEnabled = CalculatorEnabled;
+                return true;
+            case "web":
+            case "web-search":
+            case "websearch":
+                WebSearchEnabled = !WebSearchEnabled;
+                nowEnabled = WebSearchEnabled;
+                return true;
+            case "sandbox":
+            case "python":
+                SandboxEnabled = !SandboxEnabled;
+                nowEnabled = SandboxEnabled;
+                return true;
+            default:
+                return false;
+        }
+    }
 }
