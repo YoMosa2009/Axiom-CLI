@@ -222,6 +222,7 @@ internal static class ConsoleUi
 
     private static (string Name, bool Enabled, string Description)[] ToolDescriptions(SessionToolSettings tools) =>
     [
+        ("council", tools.CouncilEnabled, "Architect → Builder → Critic multi-agent pipeline"),
         ("calculator", tools.CalculatorEnabled, "Math expressions and unit conversions"),
         ("web-search", tools.WebSearchEnabled, "Live information lookup"),
         ("sandbox", tools.SandboxEnabled, "Local Python execution (off by default)")

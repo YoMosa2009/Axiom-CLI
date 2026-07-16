@@ -9,10 +9,11 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Axiom.Core.Chat;
+using Axiom.Core.Tools;
 
 namespace Axiom.Core.Agent
 {
-    // Executes agent tool calls (shell, files, download) inside the user-attached workspaces.
+    // Executes agent tool calls (shell, files, download, web search) inside the user-attached workspaces.
     public sealed class AgentToolExecutor
     {
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
@@ -20,17 +21,21 @@ namespace Axiom.Core.Agent
         private const int DefaultShellTimeoutSeconds = 120;
 
         private readonly WorkspaceSession _workspace;
+        private readonly WebSearchService _webSearch = new();
 
         public AgentToolExecutor(WorkspaceSession workspace)
         {
             _workspace = workspace;
         }
 
-        public static IReadOnlyList<OpenRouterToolDefinition> GetToolDefinitions()
+        /// <summary>When false, web_search is omitted from the tool list and rejected if called.</summary>
+        public bool WebSearchEnabled { get; set; } = true;
+
+        public IReadOnlyList<OpenRouterToolDefinition> GetToolDefinitions()
         {
-            return
-            [
-                new OpenRouterToolDefinition(
+            var tools = new List<OpenRouterToolDefinition>
+            {
+                new(
                     "run_shell",
                     "Run a shell command in the workspace (build, install, git, scripts, tests, etc.).",
                     Schema(new JsonObject
@@ -40,7 +45,7 @@ namespace Axiom.Core.Agent
                         ["timeout_seconds"] = Prop("integer", "Optional timeout (default 120, max 300)")
                     }, required: ["command"])),
 
-                new OpenRouterToolDefinition(
+                new(
                     "read_file",
                     "Read a text file from an attached workspace.",
                     Schema(new JsonObject
@@ -48,7 +53,7 @@ namespace Axiom.Core.Agent
                         ["path"] = Prop("string", "File path relative to primary workspace or absolute under an attached root")
                     }, required: ["path"])),
 
-                new OpenRouterToolDefinition(
+                new(
                     "write_file",
                     "Create or overwrite a text file inside an attached workspace.",
                     Schema(new JsonObject
@@ -57,7 +62,7 @@ namespace Axiom.Core.Agent
                         ["content"] = Prop("string", "Full file contents to write")
                     }, required: ["path", "content"])),
 
-                new OpenRouterToolDefinition(
+                new(
                     "list_dir",
                     "List files and folders in a directory under an attached workspace.",
                     Schema(new JsonObject
@@ -66,7 +71,7 @@ namespace Axiom.Core.Agent
                         ["recursive"] = Prop("boolean", "If true, list nested entries (capped)")
                     }, required: [])),
 
-                new OpenRouterToolDefinition(
+                new(
                     "download_file",
                     "Download a URL into a path under an attached workspace.",
                     Schema(new JsonObject
@@ -75,7 +80,7 @@ namespace Axiom.Core.Agent
                         ["path"] = Prop("string", "Destination file path inside the workspace")
                     }, required: ["url", "path"])),
 
-                new OpenRouterToolDefinition(
+                new(
                     "search_files",
                     "Search for a text pattern across files in an attached workspace directory.",
                     Schema(new JsonObject
@@ -84,7 +89,20 @@ namespace Axiom.Core.Agent
                         ["path"] = Prop("string", "Directory to search (default: primary workspace)"),
                         ["glob"] = Prop("string", "Optional file extension filter e.g. *.cs")
                     }, required: ["query"]))
-            ];
+            };
+
+            if (WebSearchEnabled)
+            {
+                tools.Add(new(
+                    "web_search",
+                    "Search the live web for current information, docs, news, or facts. Use when the answer needs up-to-date external data.",
+                    Schema(new JsonObject
+                    {
+                        ["query"] = Prop("string", "Search query in natural language")
+                    }, required: ["query"])));
+            }
+
+            return tools;
         }
 
         public async Task<string> ExecuteAsync(string toolName, string argumentsJson, CancellationToken token)
@@ -102,6 +120,7 @@ namespace Axiom.Core.Agent
                     "list_dir" => ListDir(root),
                     "download_file" => await DownloadAsync(root, token),
                     "search_files" => SearchFiles(root),
+                    "web_search" => await WebSearchAsync(root, token),
                     _ => $"Unknown tool: {toolName}"
                 };
             }
@@ -109,6 +128,21 @@ namespace Axiom.Core.Agent
             {
                 return $"Tool error ({toolName}): {ex.Message}";
             }
+        }
+
+        private async Task<string> WebSearchAsync(JsonElement root, CancellationToken token)
+        {
+            if (!WebSearchEnabled)
+                return "Error: web search is disabled. Enable it with /tools web-search on.";
+
+            string query = GetString(root, "query");
+            if (string.IsNullOrWhiteSpace(query))
+                return "Error: query is required.";
+
+            string results = await _webSearch.SearchTopSnippetsForNormalChatAsync(query, token);
+            return string.IsNullOrWhiteSpace(results)
+                ? "No web results found for that query."
+                : results;
         }
 
         private async Task<string> RunShellAsync(JsonElement root, CancellationToken token)

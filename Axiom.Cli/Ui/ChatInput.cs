@@ -802,10 +802,12 @@ internal static class ChatInput
     {
         var items = new List<MenuItem>
         {
+            new("council", "council", "Architect → Builder → Critic multi-agent", true, tools.CouncilEnabled, "slash"),
             new("calculator", "calculator", "Math & unit conversion", true, tools.CalculatorEnabled, "slash"),
             new("web-search", "web-search", "Live web lookup", true, tools.WebSearchEnabled, "slash"),
             new("sandbox", "sandbox", "Local Python execution", true, tools.SandboxEnabled, "slash"),
             new("workspace", "workspace", "Show / lock work folder", false, null, "slash"),
+            new("browse", "browse", "Open folder picker (file explorer)", false, null, "slash"),
             new("sessions", "sessions", "List saved chat sessions", false, null, "slash"),
         };
 
@@ -820,7 +822,12 @@ internal static class ChatInput
 
     public static IReadOnlyList<MenuItem> BuildFolderItems(IReadOnlyList<string> recentFolders)
     {
-        var items = new List<MenuItem>();
+        var items = new List<MenuItem>
+        {
+            // Always first: opens the native OS folder browser (Explorer / Finder / file dialog).
+            new("__browse__", "Browse…", "Open file explorer and pick a folder", false, null, "folder")
+        };
+
         foreach (string path in recentFolders)
         {
             string name;
@@ -835,7 +842,7 @@ internal static class ChatInput
             string name;
             try { name = new System.IO.DirectoryInfo(cwd).Name; }
             catch { name = cwd; }
-            items.Insert(0, new(cwd, $"{name}  —  {cwd}  (cwd)", "Lock to current directory", false, null, "folder"));
+            items.Add(new(cwd, $"{name}  —  {cwd}  (cwd)", "Lock to current directory", false, null, "folder"));
         }
 
         return items;

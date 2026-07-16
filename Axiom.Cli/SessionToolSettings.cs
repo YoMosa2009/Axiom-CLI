@@ -2,17 +2,20 @@ using System.Collections.Generic;
 
 namespace Axiom.Cli;
 
-// Manual tool enablement for the current chat session. Calculator is always safe (pure math);
-// web search leaves the machine (network calls, no side effects) so it defaults on; the Python
-// sandbox executes arbitrary code locally, so it defaults off until the user opts in with /tools.
+// Manual tool enablement for the current chat session.
+// Council defaults on (main multi-agent feature from the desktop app).
+// Calculator is always safe; web search leaves the machine (defaults on);
+// Python sandbox defaults off until the user opts in.
 internal sealed class SessionToolSettings
 {
     public bool CalculatorEnabled { get; set; } = true;
     public bool WebSearchEnabled { get; set; } = true;
     public bool SandboxEnabled { get; set; }
+    public bool CouncilEnabled { get; set; } = true;
 
     public IEnumerable<(string Name, bool Enabled)> AsList()
     {
+        yield return ("council", CouncilEnabled);
         yield return ("calculator", CalculatorEnabled);
         yield return ("web-search", WebSearchEnabled);
         yield return ("sandbox", SandboxEnabled);
@@ -34,6 +37,11 @@ internal sealed class SessionToolSettings
             case "sandbox":
             case "python":
                 SandboxEnabled = enabled;
+                return true;
+            case "council":
+            case "multi":
+            case "agents":
+                CouncilEnabled = enabled;
                 return true;
             default:
                 return false;
@@ -60,6 +68,12 @@ internal sealed class SessionToolSettings
             case "python":
                 SandboxEnabled = !SandboxEnabled;
                 nowEnabled = SandboxEnabled;
+                return true;
+            case "council":
+            case "multi":
+            case "agents":
+                CouncilEnabled = !CouncilEnabled;
+                nowEnabled = CouncilEnabled;
                 return true;
             default:
                 return false;

@@ -16,7 +16,18 @@ internal sealed class ChatSession
     public required WorkspaceSession Workspace { get; init; }
     public required AgentToolExecutor ToolExecutor { get; init; }
 
-    public AgentLoop CreateAgent() => new(ChatService, ToolExecutor, Workspace, ModelId);
+    public AgentLoop CreateAgent()
+    {
+        ToolExecutor.WebSearchEnabled = Tools.WebSearchEnabled;
+        return new AgentLoop(ChatService, ToolExecutor, Workspace, ModelId);
+    }
+
+    public CouncilOrchestrator CreateCouncil()
+    {
+        // Council uses the same cloud pipeline abstraction as the desktop Workplace council.
+        var pipeline = new CloudChatPipeline(ChatService, ModelId);
+        return new CouncilOrchestrator(pipeline, ModelId);
+    }
 
     public (int Used, int Max) EstimateContext()
     {

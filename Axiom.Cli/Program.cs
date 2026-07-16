@@ -203,15 +203,11 @@ internal static class Program
 
         using var db = new DatabaseService();
         string? apiKey = db.IsReady ? db.LoadOpenRouterApiKey() : null;
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Warning)}]No OpenRouter API key configured.[/] Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom config[/] first.");
-            return 1;
-        }
 
         (string modelId, string modelLabel) = ResolveInitialModel(modelOverride);
         var chatService = new OpenRouterChatService();
-        chatService.SetApiKey(apiKey);
+        if (!string.IsNullOrWhiteSpace(apiKey))
+            chatService.SetApiKey(apiKey);
 
         var recent = new RecentFoldersStore();
         var workspace = new WorkspaceSession(recent);
@@ -226,6 +222,7 @@ internal static class Program
         };
 
         // Full-window alternate-screen TUI — host scrollbar is not part of the UX.
+        // Missing API keys are collected via an in-TUI popup on first run.
         using var tui = new ChatTui();
         return await tui.RunAsync(
             session,
@@ -236,7 +233,14 @@ internal static class Program
                 return Task.CompletedTask;
             },
             augmentTools: async (input, s) => await AugmentWithToolResultsAsync(input, s.Tools),
-            attachPaths: AttachPathsMentionedInMessage);
+            attachPaths: AttachPathsMentionedInMessage,
+            saveApiKey: key =>
+            {
+                if (!db.IsReady)
+                    return false;
+                db.SaveOpenRouterApiKey(key);
+                return true;
+            });
     }
 
     private static void AttachPathsMentionedInMessage(string input, ChatSession session)
@@ -393,11 +397,23 @@ internal static class Program
                     Say($"  {(m.Label == session.ModelLabel ? "●" : "○")} {m.Label} — {m.Description}");
                 return true;
 
+            case "/browse":
+            case "/folder":
+            case "/open":
+                // Open native file explorer / folder dialog.
+                tui.BrowseWorkspaceFolder();
+                return true;
+
             case "/workspace":
             case "/ws":
                 if (parts.Length >= 2)
                 {
                     string sub = parts[1].ToLowerInvariant();
+                    if (sub is "pick" or "browse" or "open")
+                    {
+                        tui.BrowseWorkspaceFolder();
+                        return true;
+                    }
                     if ((sub is "set" or "lock" or "use") && parts.Length >= 3)
                     {
                         string path = string.Join(' ', parts.Skip(2)).Trim().Trim('"');
@@ -430,7 +446,8 @@ internal static class Program
                 Say(session.Workspace.IsExclusive ? "Workspace (exclusive lock):" : "Workspace roots:");
                 foreach (string root in session.Workspace.Roots)
                     Say($"  • {root}");
-                Say("Change folder:  @ (pick recent)  ·  /workspace <path>  ·  /workspace set <path>  ·  /workspace cwd");
+                Say("Pick folder:  /browse  ·  @ then Browse…  ·  /workspace pick");
+                Say("Or type a path:  /workspace <path>  ·  /workspace cwd");
                 Say("The agent cannot read/write/run outside the locked folder.");
                 return true;
 
@@ -488,18 +505,19 @@ internal static class Program
             case "/?":
                 Say("Commands:");
                 Say("  /help                 Show this help");
-                Say("  /tools [name on|off]  Toggle calculator / web-search / sandbox");
+                Say("  /tools [name on|off]  Toggle council / calculator / web-search / sandbox");
                 Say("  /model [eidos|hepha]  Switch cloud model");
+                Say("  /browse               Open file explorer and pick a work folder");
                 Say("  /workspace [path]     Show or lock the agent work folder");
-                Say("  /workspace set <path> Lock agent exclusively to a folder");
-                Say("  /workspace cwd        Lock to the current directory");
-                Say("  @                     Pick a recent folder and lock workspace");
+                Say("  /workspace pick       Same as /browse");
+                Say("  @                     Recent folders + Browse… (native picker)");
                 Say("  /sessions             List auto-saved sessions");
                 Say("  /session load <n|id>  Resume a saved session");
                 Say("  /session delete <n|id> Delete a saved session");
                 Say("  /clear                Clear the current chat transcript");
                 Say("  PgUp/PgDn             Scroll chat history");
                 Say("  exit                  Leave chat");
+                Say("Tools: council (Architect/Builder/Critic) · web-search · calculator · sandbox");
                 return true;
 
             default:

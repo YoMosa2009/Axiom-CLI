@@ -63,7 +63,7 @@ namespace Axiom.Core.Agent
                 new("user", effectiveUser, PreserveFullText: true)
             };
 
-            IReadOnlyList<OpenRouterToolDefinition> toolDefs = AgentToolExecutor.GetToolDefinitions();
+            IReadOnlyList<OpenRouterToolDefinition> toolDefs = _tools.GetToolDefinitions();
             int contextWindow = _chat.GetApproximateContextWindowTokens(_modelId);
             int promptTokens = _chat.EstimateConversationTokens(turnMessages, system);
             string finalText = string.Empty;

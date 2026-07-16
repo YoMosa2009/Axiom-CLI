@@ -10,6 +10,7 @@ using Axiom.Core.Chat;
 using Axiom.Core.Council;
 using Axiom.Core.Memory;
 using Axiom.Core.Tools;
+using Axiom.Core.Workspace;
 
 namespace Axiom.Cli.Ui;
 
@@ -132,7 +133,8 @@ internal sealed class ChatTui : IDisposable
         (string Id, string Label, string Description)[] models,
         Func<string, ChatSession, Task> handleSlash,
         Func<string, ChatSession, Task<string>> augmentTools,
-        Action<string, ChatSession> attachPaths)
+        Action<string, ChatSession> attachPaths,
+        Func<string, bool>? saveApiKey = null)
     {
         _session = session;
         _models = models;
@@ -141,7 +143,26 @@ internal sealed class ChatTui : IDisposable
         _attachPaths = attachPaths;
 
         _screen.Enter();
-        PushSystem($"Axiom ready · {session.ModelLabel} · /help · @ lock folder · /sessions · PgUp/PgDn scroll");
+
+        // First-run: popup to paste OpenRouter API key (Enter to submit).
+        if (!session.ChatService.HasValidKey)
+        {
+            string? key = await PromptApiKeyModalAsync();
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                _screen.Leave();
+                return 1;
+            }
+
+            if (saveApiKey != null && !saveApiKey(key))
+            {
+                PushError("Could not save API key to local database.");
+            }
+            session.ChatService.SetApiKey(key.Trim());
+            PushSystem("OpenRouter API key saved.");
+        }
+
+        PushSystem($"Axiom ready · {session.ModelLabel} · council {(session.Tools.CouncilEnabled ? "on" : "off")} · /help · @ or /browse for folders");
 
         using var animCts = new CancellationTokenSource();
         var animTask = AnimateLoopAsync(animCts.Token);
@@ -154,7 +175,6 @@ internal sealed class ChatTui : IDisposable
                 if (!Console.KeyAvailable)
                 {
                     await Task.Delay(16);
-                    // resize check
                     if (Console.WindowWidth != _screen.Width || Console.WindowHeight != _screen.Height)
                         Paint(force: true);
                     continue;
@@ -173,6 +193,105 @@ internal sealed class ChatTui : IDisposable
         }
 
         return 0;
+    }
+
+    // Centered modal: paste OpenRouter API key, Enter submits, Esc cancels.
+    private async Task<string?> PromptApiKeyModalAsync()
+    {
+        var buffer = new StringBuilder();
+        while (true)
+        {
+            PaintApiKeyModal(buffer.ToString());
+            while (!Console.KeyAvailable)
+                await Task.Delay(16);
+
+            ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                string value = buffer.ToString().Trim();
+                if (value.Length > 10)
+                    return value;
+                // Too short — keep prompting.
+                continue;
+            }
+            if (key.Key == ConsoleKey.Escape)
+                return null;
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (buffer.Length > 0)
+                    buffer.Remove(buffer.Length - 1, 1);
+                continue;
+            }
+            if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar))
+                buffer.Append(key.KeyChar);
+        }
+    }
+
+    private void PaintApiKeyModal(string typed)
+    {
+        _screen.RefreshSize();
+        int w = _screen.Width;
+        int h = _screen.Height;
+        var rows = new string[h];
+        for (int i = 0; i < h; i++)
+            rows[i] = Ansi.Fg(AxiomTheme.Background) + new string(' ', w) + Ansi.Reset;
+
+        string title = "OpenRouter API key";
+        string hint = "Paste your key from openrouter.ai/keys  ·  Enter save  ·  Esc quit";
+        string masked = typed.Length == 0
+            ? "sk-or-v1-…"
+            : new string('•', Math.Min(typed.Length, Math.Max(12, w / 3)));
+
+        int boxW = Math.Min(w - 6, 64);
+        int boxH = 9;
+        int top = Math.Max(1, (h - boxH) / 2);
+        int left = Math.Max(2, (w - boxW) / 2);
+
+        // Draw box rows as full-width strings for reliability.
+        string border = Ansi.Fg(AxiomTheme.Border);
+        string gold = Ansi.Fg(AxiomTheme.Gold);
+        string muted = Ansi.Fg(AxiomTheme.SystemMuted);
+        string primary = Ansi.Fg(AxiomTheme.TextPrimary);
+
+        for (int r = 0; r < h; r++)
+            rows[r] = new string(' ', w);
+
+        rows[top] = PadCenter(w, "╭" + new string('─', boxW - 2) + "╮", border);
+        rows[top + 1] = PadCenter(w, "│" + CenterIn(boxW - 2, title) + "│", gold + Ansi.Bold);
+        rows[top + 2] = PadCenter(w, "│" + new string(' ', boxW - 2) + "│", border);
+        rows[top + 3] = PadCenter(w, "│" + CenterIn(boxW - 2, "Paste key, then press Enter") + "│", muted);
+        rows[top + 4] = PadCenter(w, "│" + new string(' ', boxW - 2) + "│", border);
+        // Input field line
+        string field = "  " + (typed.Length == 0 ? masked : (typed.Length <= boxW - 6 ? typed : "…" + typed[^(boxW - 7)..]));
+        if (field.Length > boxW - 2) field = field[..(boxW - 2)];
+        field = field.PadRight(boxW - 2);
+        rows[top + 5] = PadCenter(w, "│" + field + "│", primary);
+        rows[top + 6] = PadCenter(w, "│" + new string(' ', boxW - 2) + "│", border);
+        rows[top + 7] = PadCenter(w, "│" + CenterIn(boxW - 2, "Enter · submit     Esc · quit") + "│", muted);
+        rows[top + 8] = PadCenter(w, "╰" + new string('─', boxW - 2) + "╯", border);
+        rows[Math.Min(h - 1, top + 10)] = PadCenter(w, hint, muted);
+
+        _ = left;
+        _screen.Paint(rows);
+        // Cursor inside the field (ShowCursorAt is 1-based).
+        int col = Math.Min(w, (w - boxW) / 2 + 3 + Math.Min(typed.Length, boxW - 8));
+        _screen.ShowCursorAt(top + 6, Math.Max(1, col)); // row: top(0-based)+5 content → +6 in 1-based for field line top+5 → 1-based top+6
+    }
+
+    private static string CenterIn(int width, string text)
+    {
+        if (text.Length >= width) return text[..width];
+        int pad = (width - text.Length) / 2;
+        return new string(' ', pad) + text + new string(' ', width - pad - text.Length);
+    }
+
+    private static string PadCenter(int width, string content, string colorPrefix)
+    {
+        // content includes box characters already at natural width; center the whole content string
+        if (content.Length >= width)
+            return colorPrefix + content[..width] + Ansi.Reset;
+        int pad = (width - content.Length) / 2;
+        return colorPrefix + new string(' ', pad) + content + new string(' ', width - pad - content.Length) + Ansi.Reset;
     }
 
     private async Task AnimateLoopAsync(CancellationToken token)
@@ -366,64 +485,57 @@ internal sealed class ChatTui : IDisposable
                 ? await _augmentTools(input, _session)
                 : input;
 
-            AgentLoop agent = _session.CreateAgent();
-            var collected = new StringBuilder();
-
-            Task<AgentTurnResult> agentTask = agent.RunAsync(
-                grounded,
-                _session.History,
-                onToken: token =>
-                {
-                    collected.Append(token);
-                    lock (_gate)
-                    {
-                        if (assistantIndex < 0)
-                        {
-                            _messages.Add(new Msg { Role = Role.Assistant, Text = collected.ToString() });
-                            assistantIndex = _messages.Count - 1;
-                        }
-                        else
-                        {
-                            _messages[assistantIndex].Text = collected.ToString();
-                        }
-                    }
-                    SetActivity(ActivityStatus.Generating);
-                    ThrottledPaint();
-                },
-                onStatus: status =>
-                {
-                    SetActivity(status);
-                    Paint();
-                },
-                CancellationToken.None);
-
-            // Keep the TUI responsive: allow scrolling while the model/tools run.
-            while (!agentTask.IsCompleted)
+            if (_session.Tools.CouncilEnabled)
             {
-                while (Console.KeyAvailable)
-                {
-                    ConsoleKeyInfo k = Console.ReadKey(intercept: true);
-                    if (k.Key == ConsoleKey.PageUp || (k.Key == ConsoleKey.UpArrow && k.Modifiers.HasFlag(ConsoleModifiers.Control)))
-                        _scrollFromBottom = Math.Min(_scrollFromBottom + Math.Max(3, ViewportHeight() / 3), MaxScroll());
-                    else if (k.Key == ConsoleKey.PageDown || (k.Key == ConsoleKey.DownArrow && k.Modifiers.HasFlag(ConsoleModifiers.Control)))
-                        _scrollFromBottom = Math.Max(0, _scrollFromBottom - Math.Max(3, ViewportHeight() / 3));
-                    else if (k.Key == ConsoleKey.End && k.Modifiers.HasFlag(ConsoleModifiers.Control))
-                        _scrollFromBottom = 0;
-                    Paint();
-                }
-                await Task.Delay(20);
+                await RunCouncilTurnAsync(grounded, sw);
+            }
+            else
+            {
+                AgentLoop agent = _session.CreateAgent();
+                var collected = new StringBuilder();
+
+                Task<AgentTurnResult> agentTask = agent.RunAsync(
+                    grounded,
+                    _session.History,
+                    onToken: token =>
+                    {
+                        collected.Append(token);
+                        lock (_gate)
+                        {
+                            if (assistantIndex < 0)
+                            {
+                                _messages.Add(new Msg { Role = Role.Assistant, Text = collected.ToString() });
+                                assistantIndex = _messages.Count - 1;
+                            }
+                            else
+                            {
+                                _messages[assistantIndex].Text = collected.ToString();
+                            }
+                        }
+                        SetActivity(ActivityStatus.Generating);
+                        ThrottledPaint();
+                    },
+                    onStatus: status =>
+                    {
+                        SetActivity(status);
+                        Paint();
+                    },
+                    CancellationToken.None);
+
+                await PumpScrollWhileAsync(agentTask);
+
+                AgentTurnResult result = await agentTask;
+                toolCalls = result.ToolCallCount;
+                sw.Stop();
+
+                if (assistantIndex < 0 && !string.IsNullOrEmpty(result.ResponseText))
+                    PushAssistant(result.ResponseText);
+                else if (assistantIndex >= 0)
+                    lock (_gate) _messages[assistantIndex].Text = result.ResponseText ?? collected.ToString();
+
+                PushStatus(ActivityStatus.SummarizeTurn(result.Elapsed, result.ToolCallCount, result.Failed));
             }
 
-            AgentTurnResult result = await agentTask;
-            toolCalls = result.ToolCallCount;
-            sw.Stop();
-
-            if (assistantIndex < 0 && !string.IsNullOrEmpty(result.ResponseText))
-                PushAssistant(result.ResponseText);
-            else if (assistantIndex >= 0)
-                lock (_gate) _messages[assistantIndex].Text = result.ResponseText ?? collected.ToString();
-
-            PushStatus(ActivityStatus.SummarizeTurn(result.Elapsed, result.ToolCallCount, result.Failed));
             _turnCount++;
             AutoSave();
         }
@@ -442,6 +554,106 @@ internal sealed class ChatTui : IDisposable
             Paint(force: true);
         }
     }
+
+    // Architect → Builder → Critic pipeline (mirrors desktop Workplace council control flow).
+    private async Task RunCouncilTurnAsync(string grounded, Stopwatch sw)
+    {
+        if (_session == null)
+            return;
+
+        SetActivity("Council · Architect planning");
+        Paint();
+
+        var progress = new Progress<CouncilEvent>(evt =>
+        {
+            switch (evt.Kind)
+            {
+                case CouncilEventKind.Status:
+                case CouncilEventKind.Warning:
+                    SetActivity(evt.Message);
+                    break;
+                case CouncilEventKind.ArchitectOutput:
+                    SetActivity("Council · Architect done");
+                    PushSystem("Architect plan\n" + Truncate(evt.Message, 1200));
+                    break;
+                case CouncilEventKind.BuilderOutput:
+                    SetActivity("Council · Builder working");
+                    break;
+                case CouncilEventKind.CriticOutput:
+                    SetActivity("Council · Critic reviewing");
+                    PushSystem("Critic review\n" + Truncate(evt.Message, 800));
+                    break;
+                case CouncilEventKind.Completed:
+                    SetActivity("Council · Finished");
+                    break;
+                case CouncilEventKind.Failed:
+                    SetActivity("Council · Failed");
+                    break;
+            }
+            Paint();
+        });
+
+        ConnectedWorkspaceState? wsState = null;
+        if (_session.Workspace.Roots.Count > 0)
+        {
+            wsState = new ConnectedWorkspaceState
+            {
+                CodebaseEditAccessEnabled = true,
+                RootPath = _session.Workspace.PrimaryRoot
+            };
+        }
+
+        CouncilOrchestrator council = _session.CreateCouncil();
+        Task<CouncilResult> task = council.RunAsync(
+            new CouncilRequest(grounded, wsState),
+            progress,
+            CancellationToken.None);
+
+        await PumpScrollWhileAsync(task);
+        CouncilResult result = await task;
+        sw.Stop();
+
+        string final = result.FinalText ?? string.Empty;
+        if (result.Patch != null)
+        {
+            // Surface patch text for the user; applying still goes through axiom code for review,
+            // but chat council can still propose structured output.
+            final = string.IsNullOrWhiteSpace(final) ? result.Patch.RawText : final;
+        }
+
+        PushAssistant(string.IsNullOrWhiteSpace(final) ? "(Council produced no text.)" : final);
+        _session.History.Add(new OpenRouterMessage("user", grounded));
+        _session.History.Add(new OpenRouterMessage("assistant", final));
+
+        string summary = result.Success
+            ? ActivityStatus.SummarizeTurn(sw.Elapsed, 3) // three roles
+            : ActivityStatus.SummarizeTurn(sw.Elapsed, 3, failed: true);
+        if (result.FinalCriticReport != null && result.FinalCriticReport.HasIssues)
+            summary += $" · Critic: {result.FinalCriticReport.FindingsCount} issue(s)";
+        PushStatus("Council · " + summary);
+    }
+
+    private async Task PumpScrollWhileAsync(Task task)
+    {
+        while (!task.IsCompleted)
+        {
+            while (Console.KeyAvailable)
+            {
+                ConsoleKeyInfo k = Console.ReadKey(intercept: true);
+                if (k.Key == ConsoleKey.PageUp || (k.Key == ConsoleKey.UpArrow && k.Modifiers.HasFlag(ConsoleModifiers.Control)))
+                    _scrollFromBottom = Math.Min(_scrollFromBottom + Math.Max(3, ViewportHeight() / 3), MaxScroll());
+                else if (k.Key == ConsoleKey.PageDown || (k.Key == ConsoleKey.DownArrow && k.Modifiers.HasFlag(ConsoleModifiers.Control)))
+                    _scrollFromBottom = Math.Max(0, _scrollFromBottom - Math.Max(3, ViewportHeight() / 3));
+                else if (k.Key == ConsoleKey.End && k.Modifiers.HasFlag(ConsoleModifiers.Control))
+                    _scrollFromBottom = 0;
+                Paint();
+            }
+            await Task.Delay(20);
+        }
+    }
+
+    private static string Truncate(string s, int max)
+        => string.IsNullOrEmpty(s) ? string.Empty : (s.Length <= max ? s : s[..(max - 1)] + "…");
 
     private void AutoSave()
     {
@@ -804,10 +1016,11 @@ internal sealed class ChatTui : IDisposable
     {
         head = head.ToLowerInvariant();
         return head is "/" or "/tools" or "/model" or "/clear" or "/help" or "/workspace" or "/ws"
-            or "/sessions" or "/session"
+            or "/sessions" or "/session" or "/browse" or "/folder" or "/open"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
-            || head.StartsWith("/w");
+            || head.StartsWith("/w") || head.StartsWith("/b") || head.StartsWith("/f")
+            || head.StartsWith("/o");
     }
 
     private IReadOnlyList<ChatInput.MenuItem> GetMenuItems(MenuMode mode)
@@ -854,14 +1067,22 @@ internal sealed class ChatTui : IDisposable
 
         if (mode == MenuMode.At || pick.Kind == "folder")
         {
+            if (TryGetAtToken(_input, _cursor, out int start, out int end, out _))
+            {
+                _input = _input.Remove(start, end - start);
+                _cursor = start;
+            }
+
+            // Browse… opens the native OS folder dialog (Explorer / Finder / zenity).
+            if (pick.Id == "__browse__")
+            {
+                PickAndLockFolder();
+                return null;
+            }
+
             // Explicit folder choice locks the agent exclusively to that tree.
             if (_session.Workspace.TrySetExclusive(pick.Id))
             {
-                if (TryGetAtToken(_input, _cursor, out int start, out int end, out _))
-                {
-                    _input = _input.Remove(start, end - start);
-                    _cursor = start;
-                }
                 PushSystem($"Workspace locked to: {pick.Id}");
                 AutoSave();
             }
@@ -888,13 +1109,50 @@ internal sealed class ChatTui : IDisposable
         }
 
         // Commands that should run immediately (this was the /help bug: it only filled the buffer).
-        if (pick.Id is "clear" or "help" or "workspace" or "sessions")
+        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse")
             return "/" + pick.Id;
 
         if (pick.Id.StartsWith("model:", StringComparison.Ordinal))
             return "/model " + pick.Id["model:".Length..];
 
         return null;
+    }
+
+    public void BrowseWorkspaceFolder() => PickAndLockFolder();
+
+    private void PickAndLockFolder()
+    {
+        if (_session == null)
+            return;
+
+        // Leave alt-screen briefly so native dialogs paint correctly (esp. Windows Forms).
+        _screen.Leave();
+        string? path = null;
+        try
+        {
+            path = NativeFolderPicker.PickFolder(_session.Workspace.PrimaryRoot);
+        }
+        finally
+        {
+            _screen.Enter();
+            Paint(force: true);
+        }
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            PushSystem("Folder picker cancelled.");
+            return;
+        }
+
+        if (_session.Workspace.TrySetExclusive(path))
+        {
+            PushSystem($"Workspace locked to: {path}");
+            AutoSave();
+        }
+        else
+        {
+            PushError($"Could not lock workspace: {path}");
+        }
     }
 
     private static string ShortName(string path)
