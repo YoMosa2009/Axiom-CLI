@@ -6,9 +6,14 @@ using Spectre.Console;
 
 namespace Axiom.Cli.Ui;
 
-// Line editor with two palettes:
-//   /  → tools & commands
-//   @  → recent / attachable folders
+// Full-width input panel that tracks the console width. Layout:
+//
+//   ╭──────────────────────────────────────────────────────────╮
+//   │  prompt text wraps across the box…                       │
+//   ╰──────────────────────────────────────────────────────────╯
+//    Model  Eidos 1  ·  1.2k / 131k  ·  / tools  @ folders
+//
+// Slash (/) and at (@) menus open above the box.
 internal static class ChatInput
 {
     public sealed record MenuItem(
@@ -17,18 +22,27 @@ internal static class ChatInput
         string Description,
         bool IsTool,
         bool? Enabled,
-        string Kind); // "slash" | "folder"
+        string Kind);
 
     public sealed class MenuResult
     {
-        public required string Kind { get; init; } // "toggle-tool" | "command" | "attach-folder"
+        public required string Kind { get; init; }
         public string? ToolName { get; init; }
         public string? Command { get; init; }
         public string? FolderPath { get; init; }
     }
 
+    public sealed class InputChrome
+    {
+        public required string ModelLabel { get; init; }
+        public required int UsedTokens { get; init; }
+        public required int ContextWindowTokens { get; init; }
+        public string? Placeholder { get; init; }
+    }
+
     public static string? ReadLine(
         SessionToolSettings tools,
+        InputChrome chrome,
         Func<IReadOnlyList<MenuItem>> buildSlashItems,
         Func<IReadOnlyList<MenuItem>> buildFolderItems,
         Action<MenuResult> onMenuAction)
@@ -42,7 +56,7 @@ internal static class ChatInput
         int blockStartTop = SafeCursorTop();
         int blockHeight = 1;
 
-        DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+        DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
 
         while (true)
         {
@@ -59,7 +73,7 @@ internal static class ChatInput
                     {
                         MenuItem pick = items[Math.Clamp(selected, 0, items.Count - 1)];
                         string? submit = ApplySelection(pick, onMenuAction, buffer, ref cursor, ref selected, mode);
-                        DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                        DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                         if (submit != null)
                         {
                             FinishBlock(ref blockStartTop, ref blockHeight);
@@ -79,7 +93,6 @@ internal static class ChatInput
             {
                 if (GetMenuMode(buffer.ToString(), cursor) != MenuMode.None)
                 {
-                    // Close active token only.
                     if (GetMenuMode(buffer.ToString(), cursor) == MenuMode.Slash && buffer.ToString().TrimStart().StartsWith('/'))
                     {
                         buffer.Clear();
@@ -90,7 +103,7 @@ internal static class ChatInput
                         RemoveActiveAtToken(buffer, ref cursor);
                     }
                     selected = 0;
-                    DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                    DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 }
                 continue;
             }
@@ -103,7 +116,7 @@ internal static class ChatInput
                     cursor--;
                 }
                 selected = 0;
-                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
@@ -112,7 +125,7 @@ internal static class ChatInput
                 if (cursor < buffer.Length)
                     buffer.Remove(cursor, 1);
                 selected = 0;
-                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
@@ -120,7 +133,7 @@ internal static class ChatInput
             {
                 if (cursor > 0) cursor--;
                 selected = 0;
-                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
@@ -128,21 +141,21 @@ internal static class ChatInput
             {
                 if (cursor < buffer.Length) cursor++;
                 selected = 0;
-                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
             if (key.Key == ConsoleKey.Home)
             {
                 cursor = 0;
-                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
             if (key.Key == ConsoleKey.End)
             {
                 cursor = buffer.Length;
-                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
@@ -159,7 +172,7 @@ internal static class ChatInput
                 selected = key.Key == ConsoleKey.UpArrow
                     ? (selected - 1 + items.Count) % items.Count
                     : (selected + 1) % items.Count;
-                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
@@ -169,7 +182,7 @@ internal static class ChatInput
             buffer.Insert(cursor, key.KeyChar);
             cursor++;
             selected = 0;
-            DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
+            DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
         }
     }
 
@@ -180,15 +193,12 @@ internal static class ChatInput
         if (string.IsNullOrEmpty(text))
             return MenuMode.None;
 
-        // Slash menu: buffer is a slash command (starts with / and no newline)
         if (text.StartsWith('/') && !text.Contains('\n'))
         {
-            // Still slash-mode while typing command tokens.
             if (!text.Contains(' ') || IsKnownSlashHead(text.Split(' ', 2)[0]))
                 return MenuMode.Slash;
         }
 
-        // @ menu: active when cursor sits in an @token
         if (TryGetAtToken(text, cursor, out _, out _, out _))
             return MenuMode.At;
 
@@ -210,14 +220,12 @@ internal static class ChatInput
         token = string.Empty;
         int i = Math.Clamp(cursor, 0, text.Length);
 
-        // Find '@' before cursor with no whitespace between.
         int at = -1;
         for (int p = i - 1; p >= 0; p--)
         {
             char c = text[p];
             if (c == '@')
             {
-                // Start of token if at beginning or preceded by whitespace
                 if (p == 0 || char.IsWhiteSpace(text[p - 1]))
                 {
                     at = p;
@@ -236,7 +244,6 @@ internal static class ChatInput
         while (end < text.Length && !char.IsWhiteSpace(text[end]))
             end++;
 
-        // Cursor must be inside the token
         if (cursor < at || cursor > end)
             return false;
 
@@ -268,7 +275,6 @@ internal static class ChatInput
                 filter = filter["model ".Length..];
             else if (filter.StartsWith("tools", StringComparison.OrdinalIgnoreCase))
                 filter = filter.Length > 5 ? filter[5..].TrimStart() : string.Empty;
-
             return Filter(buildSlashItems(), filter);
         }
 
@@ -303,7 +309,6 @@ internal static class ChatInput
         if (mode == MenuMode.At || pick.Kind == "folder")
         {
             onMenuAction(new MenuResult { Kind = "attach-folder", FolderPath = pick.Id });
-            // Replace @token with the path (quoted if spaces)
             string text = buffer.ToString();
             if (TryGetAtToken(text, cursor, out int start, out int end, out _))
             {
@@ -345,6 +350,7 @@ internal static class ChatInput
         StringBuilder buffer,
         int cursor,
         int selected,
+        InputChrome chrome,
         Func<IReadOnlyList<MenuItem>> buildSlashItems,
         Func<IReadOnlyList<MenuItem>> buildFolderItems,
         ref int blockStartTop,
@@ -356,15 +362,17 @@ internal static class ChatInput
             ? Array.Empty<MenuItem>()
             : GetFilteredItems(text, cursor, mode, buildSlashItems, buildFolderItems);
 
-        int width = SafeWidth();
+        int width = Math.Max(40, ConsoleUi.SafeWidth());
+        int inner = Math.Max(20, width - 4); // "│ " + content + " │"
         var lines = new List<string>();
 
+        // Optional dropdown above the box.
         if (mode != MenuMode.None)
         {
             string hint = mode == MenuMode.At
-                ? "  ↑↓ folders  ·  enter attach  ·  esc cancel"
-                : "  ↑↓ navigate  ·  enter select  ·  esc clear";
-            lines.Add(hint);
+                ? "↑↓ folders  ·  enter attach  ·  esc cancel"
+                : "↑↓ navigate  ·  enter select  ·  esc clear";
+            lines.Add("  " + hint);
 
             if (items.Count == 0)
             {
@@ -389,9 +397,48 @@ internal static class ChatInput
                     lines.Add(line);
                 }
             }
+            lines.Add(string.Empty);
         }
 
-        lines.Add("❯ " + text);
+        // Full-width prompt box.
+        string top = "╭" + new string('─', Math.Max(2, width - 3)) + "╮";
+        string bottom = "╰" + new string('─', Math.Max(2, width - 3)) + "╯";
+        lines.Add(top);
+
+        string display = string.IsNullOrEmpty(text)
+            ? (chrome.Placeholder ?? "Message Axiom…  (/ tools · @ folders)")
+            : text;
+
+        // Word-wrap content into the box.
+        List<string> contentLines = Wrap(display, inner);
+        if (contentLines.Count == 0)
+            contentLines.Add(string.Empty);
+
+        // Minimum 2 content rows so the box feels like a real field.
+        while (contentLines.Count < 2)
+            contentLines.Add(string.Empty);
+
+        bool placeholder = string.IsNullOrEmpty(text);
+        for (int i = 0; i < contentLines.Count; i++)
+        {
+            string body = contentLines[i];
+            if (body.Length < inner)
+                body = body + new string(' ', inner - body.Length);
+            else if (body.Length > inner)
+                body = body[..inner];
+            lines.Add("│ " + body + " │");
+        }
+
+        lines.Add(bottom);
+
+        // Seamless model line under the box (sits on the border edge).
+        string context = ConsoleUi.FormatContext(chrome.UsedTokens, chrome.ContextWindowTokens);
+        string modelLine = ConsoleUi.LayoutThree(
+            $"  Model  {chrome.ModelLabel}",
+            "",
+            context + "  ",
+            width - 1);
+        lines.Add(modelLine);
 
         try
         {
@@ -399,7 +446,7 @@ internal static class ChatInput
             Console.SetCursorPosition(0, blockStartTop);
             for (int i = 0; i < clearRows; i++)
             {
-                Console.Write(new string(' ', width - 1));
+                Console.Write(new string(' ', Math.Max(1, width - 1)));
                 if (i < clearRows - 1)
                 {
                     if (blockStartTop + i + 1 >= Console.BufferHeight - 1)
@@ -418,30 +465,41 @@ internal static class ChatInput
                 neededBottom = blockStartTop + lines.Count;
             }
 
+            int menuOffset = 0;
+            if (mode != MenuMode.None)
+            {
+                // hint + items + blank
+                menuOffset = 1 + Math.Max(1, items.Count == 0 ? 1 : items.Count) + 1;
+            }
+
             for (int i = 0; i < lines.Count; i++)
             {
                 Console.SetCursorPosition(0, blockStartTop + i);
-                bool isPrompt = i == lines.Count - 1;
-                bool isHint = mode != MenuMode.None && i == 0;
-                bool isActive = mode != MenuMode.None && items.Count > 0 && i == selected + 1;
+                bool inMenu = mode != MenuMode.None && i < menuOffset;
+                bool isActiveMenu = inMenu && items.Count > 0 && i == selected + 1;
+                bool isBoxBorder = !inMenu && (lines[i].StartsWith('╭') || lines[i].StartsWith('╰') || lines[i].StartsWith('│'));
+                bool isModelLine = i == lines.Count - 1;
 
-                if (isPrompt)
-                {
-                    WriteGold("❯ ");
-                    Console.Write(text);
-                }
-                else if (isActive)
+                if (isActiveMenu)
                     WriteGold(lines[i]);
-                else if (isHint)
+                else if (inMenu && i == 0)
                     WriteMuted(lines[i]);
+                else if (inMenu)
+                    WriteSecondary(lines[i]);
+                else if (isModelLine)
+                    WriteModelLine(chrome.ModelLabel, context, width);
+                else if (isBoxBorder && lines[i].StartsWith('│') && placeholder && i == menuOffset + 1)
+                    WritePlaceholderRow(lines[i]);
+                else if (isBoxBorder)
+                    WriteBorder(lines[i]);
                 else
                     WriteSecondary(lines[i]);
             }
 
             blockHeight = lines.Count;
-            int promptCol = 2 + cursor;
-            int promptTop = blockStartTop + lines.Count - 1;
-            Console.SetCursorPosition(Math.Min(promptCol, width - 1), promptTop);
+
+            // Cursor inside the box content area.
+            PlaceCursor(text, cursor, inner, blockStartTop, menuOffset, placeholder);
         }
         catch
         {
@@ -450,6 +508,186 @@ internal static class ChatInput
             Console.Write(text);
             blockHeight = 1;
         }
+    }
+
+    private static void WriteModelLine(string modelLabel, string context, int width)
+    {
+        string gold = AxiomTheme.Hex(AxiomTheme.Gold);
+        string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
+        string primary = AxiomTheme.Hex(AxiomTheme.TextPrimary);
+        string line = ConsoleUi.LayoutThree($"  Model  {modelLabel}", "", context + "  ", width - 1);
+        // Color "Model" muted, model name gold, context muted.
+        try
+        {
+            string prefix = "  Model  ";
+            if (line.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                AnsiConsole.Markup($"[{muted}]{prefix.EscapeMarkup()}[/]");
+                string after = line[prefix.Length..];
+                int ctxIdx = after.LastIndexOf(context, StringComparison.Ordinal);
+                if (ctxIdx >= 0)
+                {
+                    AnsiConsole.Markup($"[bold {gold}]{after[..ctxIdx].TrimEnd().EscapeMarkup()}[/]");
+                    AnsiConsole.Markup($"[{muted}]{after[ctxIdx..].EscapeMarkup()}[/]");
+                }
+                else
+                {
+                    AnsiConsole.Markup($"[{primary}]{after.EscapeMarkup()}[/]");
+                }
+            }
+            else
+            {
+                AnsiConsole.Markup($"[{muted}]{line.EscapeMarkup()}[/]");
+            }
+        }
+        catch
+        {
+            Console.Write(line);
+        }
+    }
+
+    private static void WritePlaceholderRow(string row)
+    {
+        // row is like "│ placeholder…     │"
+        string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
+        string border = AxiomTheme.Hex(AxiomTheme.Border);
+        if (row.Length >= 4 && row.StartsWith('│') && row.EndsWith('│'))
+        {
+            string body = row[2..^2];
+            AnsiConsole.Markup($"[{border}]│ [/]");
+            AnsiConsole.Markup($"[{muted}]{body.EscapeMarkup()}[/]");
+            AnsiConsole.Markup($"[{border}] │[/]");
+        }
+        else
+        {
+            WriteBorder(row);
+        }
+    }
+
+    private static void WriteBorder(string row)
+    {
+        string border = AxiomTheme.Hex(AxiomTheme.Border);
+        string primary = AxiomTheme.Hex(AxiomTheme.TextPrimary);
+        if (row.StartsWith('│') && row.EndsWith('│') && row.Length >= 4)
+        {
+            string body = row[2..^2];
+            AnsiConsole.Markup($"[{border}]│ [/]");
+            AnsiConsole.Markup($"[{primary}]{body.EscapeMarkup()}[/]");
+            AnsiConsole.Markup($"[{border}] │[/]");
+        }
+        else
+        {
+            AnsiConsole.Markup($"[{border}]{row.EscapeMarkup()}[/]");
+        }
+    }
+
+    private static void PlaceCursor(string text, int cursor, int inner, int blockStartTop, int menuOffset, bool placeholder)
+    {
+        if (placeholder)
+        {
+            // Start of content area.
+            Console.SetCursorPosition(2, blockStartTop + menuOffset + 1);
+            return;
+        }
+
+        // Map linear cursor into wrapped lines.
+        List<string> contentLines = Wrap(text, inner);
+        if (contentLines.Count == 0)
+            contentLines.Add(string.Empty);
+
+        int remaining = cursor;
+        int row = 0;
+        int col = 0;
+        for (int i = 0; i < contentLines.Count; i++)
+        {
+            int len = contentLines[i].Length;
+            // Wrap() may not include trailing spaces from original; approximate by character walk.
+            if (remaining <= len || i == contentLines.Count - 1)
+            {
+                row = i;
+                col = Math.Min(remaining, len);
+                break;
+            }
+            remaining -= len;
+            // Account for the break (space consumed).
+            // Best-effort: if next char in original was space, wrap consumed it.
+        }
+
+        // Safer: recompute col by walking original string with wrap width.
+        (row, col) = CursorToRowCol(text, cursor, inner);
+
+        int top = blockStartTop + menuOffset + 1 + row; // +1 past top border
+        int left = 2 + col;
+        try
+        {
+            if (top < Console.BufferHeight && left < Console.BufferWidth)
+                Console.SetCursorPosition(left, top);
+        }
+        catch { /* ignore */ }
+    }
+
+    private static (int row, int col) CursorToRowCol(string text, int cursor, int inner)
+    {
+        if (string.IsNullOrEmpty(text) || cursor <= 0)
+            return (0, 0);
+
+        int row = 0;
+        int col = 0;
+        int lineStart = 0;
+        for (int i = 0; i < text.Length && i < cursor; i++)
+        {
+            col++;
+            if (col >= inner)
+            {
+                row++;
+                col = 0;
+                lineStart = i + 1;
+            }
+            else if (text[i] == '\n')
+            {
+                row++;
+                col = 0;
+                lineStart = i + 1;
+            }
+        }
+        return (row, col);
+    }
+
+    private static List<string> Wrap(string text, int width)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrEmpty(text))
+        {
+            result.Add(string.Empty);
+            return result;
+        }
+
+        foreach (string paragraph in text.Replace("\r\n", "\n").Split('\n'))
+        {
+            if (paragraph.Length == 0)
+            {
+                result.Add(string.Empty);
+                continue;
+            }
+
+            int i = 0;
+            while (i < paragraph.Length)
+            {
+                int take = Math.Min(width, paragraph.Length - i);
+                if (take < paragraph.Length - i)
+                {
+                    int sp = paragraph.LastIndexOf(' ', i + take - 1, take);
+                    if (sp >= i)
+                        take = Math.Max(1, sp - i + 1);
+                }
+                result.Add(paragraph.Substring(i, take).TrimEnd());
+                i += take;
+            }
+        }
+
+        if (result.Count == 0)
+            result.Add(string.Empty);
+        return result;
     }
 
     private static void FinishBlock(ref int blockStartTop, ref int blockHeight)
@@ -470,12 +708,6 @@ internal static class ChatInput
 
     private static void WriteSecondary(string text)
         => AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.TextSecondary)}]{text.EscapeMarkup()}[/]");
-
-    private static int SafeWidth()
-    {
-        try { return Math.Max(40, Console.WindowWidth); }
-        catch { return 80; }
-    }
 
     private static int SafeCursorTop()
     {
@@ -509,23 +741,12 @@ internal static class ChatInput
         var items = new List<MenuItem>();
         foreach (string path in recentFolders)
         {
-            string label;
-            try { label = path; }
-            catch { label = path; }
-
-            string desc;
-            try { desc = new System.IO.DirectoryInfo(path).Name; }
-            catch { desc = path; }
-
-            // Show folder name as label, full path as description if space.
             string name;
             try { name = new System.IO.DirectoryInfo(path).Name; }
             catch { name = path; }
-
             items.Add(new(path, $"{name}  —  {path}", "Attach workspace", false, null, "folder"));
         }
 
-        // Always offer the current directory.
         string cwd = Environment.CurrentDirectory;
         if (!items.Any(i => string.Equals(i.Id, cwd, StringComparison.OrdinalIgnoreCase)))
         {

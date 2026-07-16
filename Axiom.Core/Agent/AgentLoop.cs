@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Axiom.Core.Chat;
@@ -14,7 +15,8 @@ namespace Axiom.Core.Agent
         TimeSpan Elapsed,
         int ToolCallCount,
         int EstimatedPromptTokens,
-        int ContextWindowTokens);
+        int ContextWindowTokens,
+        bool Failed = false);
 
     // Multi-step tool-using chat turn: model may call shell/file/download tools repeatedly
     // (bounded) before producing a final user-facing answer.
@@ -48,6 +50,7 @@ namespace Axiom.Core.Agent
         {
             var sw = Stopwatch.StartNew();
             int toolCalls = 0;
+            bool failed = false;
 
             string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt());
             string workspaceBlock = _workspace.BuildContextBlock();
@@ -65,60 +68,72 @@ namespace Axiom.Core.Agent
             int promptTokens = _chat.EstimateConversationTokens(turnMessages, system);
             string finalText = string.Empty;
 
-            for (int round = 0; round <= MaxToolRounds; round++)
+            try
             {
-                promptTokens = _chat.EstimateConversationTokens(turnMessages, system);
-                onStatus?.Invoke(round == 0 ? "Thinking..." : $"Agent step {round + 1}...");
-
-                // Buffer tokens until we know whether this round ends in tool calls or final prose.
-                var collected = new StringBuilder();
-                OpenRouterChatResponse response = await _chat.SendConversationStreamAsync(
-                    turnMessages,
-                    system,
-                    thinkingEnabled: false,
-                    modelId: _modelId,
-                    tools: toolDefs,
-                    onToken: token => collected.Append(token),
-                    cancellationToken);
-
-                IReadOnlyList<OpenRouterToolCall> calls = response.ToolCalls ?? Array.Empty<OpenRouterToolCall>();
-                finalText = !string.IsNullOrEmpty(response.Text) ? response.Text : collected.ToString();
-
-                if (calls.Count == 0)
+                for (int round = 0; round <= MaxToolRounds; round++)
                 {
-                    if (!string.IsNullOrEmpty(finalText))
-                        onToken?.Invoke(finalText);
-                    break;
-                }
+                    promptTokens = _chat.EstimateConversationTokens(turnMessages, system);
+                    onStatus?.Invoke(round == 0 ? "Thinking" : round == 1 ? "Working" : $"Working · step {round + 1}");
 
-                turnMessages.Add(new OpenRouterMessage(
-                    "assistant",
-                    finalText,
-                    ToolCalls: calls,
-                    PreserveFullText: true));
+                    var collected = new StringBuilder();
+                    OpenRouterChatResponse response = await _chat.SendConversationStreamAsync(
+                        turnMessages,
+                        system,
+                        thinkingEnabled: false,
+                        modelId: _modelId,
+                        tools: toolDefs,
+                        onToken: token => collected.Append(token),
+                        cancellationToken);
 
-                foreach (OpenRouterToolCall call in calls)
-                {
-                    toolCalls++;
-                    onStatus?.Invoke($"⚙ {call.Name}");
-                    string result = await _tools.ExecuteAsync(call.Name, call.ArgumentsJson, cancellationToken);
-                    onStatus?.Invoke($"✓ {call.Name}");
+                    IReadOnlyList<OpenRouterToolCall> calls = response.ToolCalls ?? Array.Empty<OpenRouterToolCall>();
+                    finalText = !string.IsNullOrEmpty(response.Text) ? response.Text : collected.ToString();
+
+                    if (calls.Count == 0)
+                    {
+                        onStatus?.Invoke("Generating response");
+                        if (!string.IsNullOrEmpty(finalText))
+                            onToken?.Invoke(finalText);
+                        break;
+                    }
+
                     turnMessages.Add(new OpenRouterMessage(
-                        "tool",
-                        result,
-                        ToolCallId: call.Id,
+                        "assistant",
+                        finalText,
+                        ToolCalls: calls,
                         PreserveFullText: true));
-                }
 
-                if (round == MaxToolRounds)
-                {
-                    if (!string.IsNullOrEmpty(finalText))
-                        onToken?.Invoke(finalText);
-                    break;
+                    foreach (OpenRouterToolCall call in calls)
+                    {
+                        toolCalls++;
+                        onStatus?.Invoke(DescribeToolStart(call));
+                        string result = await _tools.ExecuteAsync(call.Name, call.ArgumentsJson, cancellationToken);
+                        onStatus?.Invoke(DescribeToolDone(call, result));
+                        turnMessages.Add(new OpenRouterMessage(
+                            "tool",
+                            result,
+                            ToolCallId: call.Id,
+                            PreserveFullText: true));
+                    }
+
+                    if (round == MaxToolRounds)
+                    {
+                        onStatus?.Invoke("Stopped");
+                        if (!string.IsNullOrEmpty(finalText))
+                            onToken?.Invoke(finalText);
+                        break;
+                    }
                 }
             }
-
-            sw.Stop();
+            catch
+            {
+                failed = true;
+                onStatus?.Invoke("Failed");
+                throw;
+            }
+            finally
+            {
+                sw.Stop();
+            }
 
             history.Add(new OpenRouterMessage("user", userMessage));
             history.Add(new OpenRouterMessage("assistant", finalText));
@@ -128,8 +143,77 @@ namespace Axiom.Core.Agent
                 sw.Elapsed,
                 toolCalls,
                 promptTokens,
-                contextWindow);
+                contextWindow,
+                failed);
         }
+
+        private static string DescribeToolStart(OpenRouterToolCall call)
+        {
+            string name = call.Name ?? string.Empty;
+            string detail = ExtractDetail(name, call.ArgumentsJson);
+            return name.ToLowerInvariant() switch
+            {
+                "run_shell" => string.IsNullOrWhiteSpace(detail) ? "Running command" : $"Running · {Truncate(detail, 48)}",
+                "read_file" => string.IsNullOrWhiteSpace(detail) ? "Reading files" : $"Reading · {Truncate(detail, 48)}",
+                "write_file" => string.IsNullOrWhiteSpace(detail) ? "Writing files" : $"Writing · {Truncate(detail, 48)}",
+                "list_dir" => string.IsNullOrWhiteSpace(detail) ? "Listing files" : $"Listing · {Truncate(detail, 48)}",
+                "download_file" => string.IsNullOrWhiteSpace(detail) ? "Downloading" : $"Downloading · {Truncate(detail, 48)}",
+                "search_files" => string.IsNullOrWhiteSpace(detail) ? "Searching" : $"Searching · {Truncate(detail, 48)}",
+                _ => $"Working · {name}"
+            };
+        }
+
+        private static string DescribeToolDone(OpenRouterToolCall call, string result)
+        {
+            bool error = (result ?? string.Empty).StartsWith("Error", StringComparison.OrdinalIgnoreCase)
+                || (result ?? string.Empty).Contains("exit_code: ", StringComparison.Ordinal)
+                   && !(result ?? string.Empty).Contains("exit_code: 0", StringComparison.Ordinal);
+
+            string name = call.Name ?? "tool";
+            if (error)
+                return $"Retrying · {name.Replace('_', ' ')} issue";
+
+            return name.ToLowerInvariant() switch
+            {
+                "run_shell" => "Command finished",
+                "read_file" => "Read complete",
+                "write_file" => "Write complete",
+                "list_dir" => "Listing complete",
+                "download_file" => "Download complete",
+                "search_files" => "Search complete",
+                _ => "Tool finished"
+            };
+        }
+
+        private static string ExtractDetail(string toolName, string? argsJson)
+        {
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(argsJson) ? "{}" : argsJson);
+                JsonElement root = doc.RootElement;
+                return toolName.ToLowerInvariant() switch
+                {
+                    "run_shell" => GetProp(root, "command"),
+                    "read_file" or "write_file" => GetProp(root, "path"),
+                    "list_dir" => GetProp(root, "path"),
+                    "download_file" => GetProp(root, "url"),
+                    "search_files" => GetProp(root, "query"),
+                    _ => string.Empty
+                };
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static string GetProp(JsonElement root, string name)
+            => root.TryGetProperty(name, out JsonElement el) && el.ValueKind == JsonValueKind.String
+                ? el.GetString() ?? string.Empty
+                : string.Empty;
+
+        private static string Truncate(string s, int max)
+            => s.Length <= max ? s : s[..(max - 1)] + "…";
 
         private static string BuildAgentSystemPrompt()
         {

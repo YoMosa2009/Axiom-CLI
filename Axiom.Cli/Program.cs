@@ -255,6 +255,13 @@ internal static class Program
             AnsiConsole.WriteLine();
             string? input = ChatInput.ReadLine(
                 session.Tools,
+                new ChatInput.InputChrome
+                {
+                    ModelLabel = session.ModelLabel,
+                    UsedTokens = used,
+                    ContextWindowTokens = max,
+                    Placeholder = "Message Axiom…  (/ tools · @ folders · Enter to send)"
+                },
                 () => ChatInput.BuildSlashItems(session.Tools, ModelCatalog),
                 () => ChatInput.BuildFolderItems(session.Workspace.Recent.GetRecent()),
                 result => HandleMenuAction(result, session));
@@ -269,11 +276,14 @@ internal static class Program
             if (TryHandleSlashCommand(input, session))
                 continue;
 
+            // GUI-style transcript: user bubble, then assistant reply beneath it.
+            ConsoleUi.WriteUserMessage(input);
             AttachPathsMentionedInMessage(input, session);
 
             string grounded = await AugmentWithToolResultsAsync(input, session.Tools);
-            var thinking = new ConsoleUi.ThinkingIndicator();
+            var thinking = new ConsoleUi.ThinkingIndicator(ActivityStatus.Thinking);
             var stream = new ConsoleUi.TokenStream();
+            bool failed = false;
 
             try
             {
@@ -286,12 +296,13 @@ internal static class Program
                         thinking.Stop();
                         stream.WriteToken(token);
                     },
-                    onStatus: status => thinking.SetLabel(status.TrimStart('⚙', '✓', ' ')),
+                    onStatus: status => thinking.SetLabel(status),
                     CancellationToken.None);
 
                 thinking.Stop();
                 stream.Complete();
-                ConsoleUi.WriteWorkedFor(result.Elapsed, result.ToolCallCount);
+                ConsoleUi.WriteTurnSummary(
+                    ActivityStatus.SummarizeTurn(result.Elapsed, result.ToolCallCount, result.Failed));
 
                 turnCount++;
                 (used, max) = session.EstimateContext();
@@ -299,14 +310,17 @@ internal static class Program
             }
             catch (Exception ex)
             {
+                failed = true;
                 thinking.Stop();
                 stream.Complete();
+                ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(TimeSpan.Zero, 0, failed: true));
                 AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Error:[/] {ex.Message.EscapeMarkup()}");
             }
             finally
             {
                 thinking.Dispose();
                 stream.Dispose();
+                _ = failed;
             }
         }
 
@@ -412,11 +426,11 @@ internal static class Program
             AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]The council could not produce an applyable patch.[/]");
             if (!string.IsNullOrWhiteSpace(result.FinalText))
             {
-                ConsoleUi.WriteAssistantPrefix();
+                ConsoleUi.WriteAssistantHeader();
                 LinkText.WriteWithLinks(result.FinalText);
                 Console.WriteLine();
             }
-            ConsoleUi.WriteWorkedFor(sw.Elapsed);
+            ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, 0, failed: true));
             return 1;
         }
 
@@ -432,7 +446,7 @@ internal static class Program
             AnsiConsole.WriteLine();
         }
 
-        ConsoleUi.WriteWorkedFor(sw.Elapsed);
+        ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, 0));
         AnsiConsole.Markup($"Apply these changes? [{AxiomTheme.Hex(AxiomTheme.Success)}]y[/]/[{AxiomTheme.Hex(AxiomTheme.Error)}]n[/]: ");
         string? answer = ReadLinePlain();
         if (!string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
