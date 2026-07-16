@@ -58,7 +58,6 @@ In chat:
 - The agent can run shell commands, edit files, search, build, and download inside attached dirs
 - Assistant links are clickable (OSC-8); header shows `used / context` tokens; each reply shows **Worked for …**
 
-Startup shows a Gargantua black-hole frame that clears on the first message.
 
 ## How the council works
 

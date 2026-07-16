@@ -245,11 +245,6 @@ internal static class Program
             ToolExecutor = toolExecutor
         };
 
-        // Startup frame — Gargantua — cleared on the first real chat turn.
-        bool showArt = !Console.IsOutputRedirected;
-        if (showArt)
-            GargantuaArt.Render();
-
         (int used, int max) = session.EstimateContext();
         ConsoleUi.ShowWelcome(session.ModelLabel, session.Tools, used, max, session.Workspace.Roots);
 
@@ -273,15 +268,6 @@ internal static class Program
 
             if (TryHandleSlashCommand(input, session))
                 continue;
-
-            // First message clears the startup black-hole art.
-            if (showArt)
-            {
-                GargantuaArt.Clear();
-                showArt = false;
-                (used, max) = session.EstimateContext();
-                ConsoleUi.ShowWelcome(session.ModelLabel, session.Tools, used, max, session.Workspace.Roots);
-            }
 
             AttachPathsMentionedInMessage(input, session);
 
