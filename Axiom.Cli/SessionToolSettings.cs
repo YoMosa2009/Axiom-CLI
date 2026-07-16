@@ -5,7 +5,8 @@ namespace Axiom.Cli;
 // Manual tool enablement for the current chat session.
 // Council defaults on (main multi-agent feature from the desktop app).
 // Calculator is always safe; web search leaves the machine (defaults on);
-// Python sandbox defaults off until the user opts in.
+// Python/Java sandbox defaults off until the user opts in — when on, council
+// Critic receives real sandbox logs (same rails as desktop Workplace).
 internal sealed class SessionToolSettings
 {
     public bool CalculatorEnabled { get; set; } = true;

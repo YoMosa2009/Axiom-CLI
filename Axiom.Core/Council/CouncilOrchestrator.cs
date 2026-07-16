@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Axiom.Core.Chat;
@@ -7,32 +9,34 @@ using Axiom.Core.Workspace;
 
 namespace Axiom.Core.Council
 {
-    // New orchestrator built from the verified shape of the WPF app's WorkplaceView.SendQueryAsync
-    // (Architect -> Builder -> Critic, confidence-routed revision) rather than extracted from it —
-    // that method is ~1,500 lines interleaved line-by-line with WPF UI calls across a 21k-line
-    // file, so this reproduces its control flow and prompt contracts as clean code instead. Scoped
-    // to what a CLI coding agent needs: general chat answers, and connected-workspace coding tasks
-    // that resolve to an [[AXIOM_CODEBASE_PATCH]] proposal via WorkspaceAccessService. The
-    // artifact-canvas/document/local-model-segmentation paths in the original are out of scope
-    // for v1 (see plan).
+    // Built from the verified shape of WorkplaceView.SendQueryAsync (Architect → Builder →
+    // Critic, confidence-routed revision) plus the pre-Critic rails the desktop app always runs:
+    // static validation, optional Python/Java sandbox execution, and injection of those findings
+    // into the Critic payload as PRE-FLAGGED ISSUES / SANDBOX OUTPUT.
     public sealed class CouncilOrchestrator
     {
-        // Matches WorkplaceView.xaml.cs's MaxBuilderRetryAttempts (confirmed by direct read of the
-        // WPF source): at most 2 repair passes before the council keeps its best output instead of
-        // looping indefinitely.
+        // Matches WorkplaceView.xaml.cs MaxBuilderRetryAttempts.
         private const int MaxBuilderRetryAttempts = 2;
         private const int TargetedPatchIssueCeiling = 2; // 1-2 issues => targeted patch
         private const int WorkspaceContextBudgetChars = 60_000;
+        private const int SandboxOutputCapChars = 16_000;
+        private const int BuilderForCriticCapChars = 96_000;
 
         private readonly IChatPipeline _pipeline;
         private readonly string _modelId;
         private readonly WorkspaceAccessService _workspace;
+        private readonly CouncilCodeSandbox _sandbox;
 
-        public CouncilOrchestrator(IChatPipeline pipeline, string modelId, WorkspaceAccessService? workspace = null)
+        public CouncilOrchestrator(
+            IChatPipeline pipeline,
+            string modelId,
+            WorkspaceAccessService? workspace = null,
+            CouncilCodeSandbox? sandbox = null)
         {
             _pipeline = pipeline ?? throw new ArgumentNullException(nameof(pipeline));
             _modelId = modelId;
             _workspace = workspace ?? new WorkspaceAccessService();
+            _sandbox = sandbox ?? new CouncilCodeSandbox();
         }
 
         public async Task<CouncilResult> RunAsync(
@@ -40,6 +44,7 @@ namespace Axiom.Core.Council
             IProgress<CouncilEvent>? progress,
             CancellationToken cancellationToken)
         {
+            CouncilToolOptions tools = request.Tools ?? CouncilToolOptions.Default;
             bool isWorkspaceTask = request.Workspace is { CodebaseEditAccessEnabled: true };
             string workspaceContext = string.Empty;
             IReadOnlyList<string> workspaceFilesRead = Array.Empty<string>();
@@ -87,18 +92,27 @@ namespace Axiom.Core.Council
                         Patch: null,
                         FinalCriticReport: new CriticReport { Status = "issues" });
                 }
+
+                builderOutput = patch.RawText ?? builderOutput;
             }
 
-            // ── Critic: review + confidence-routed revision ─────────────────────
+            // ── Critic: static validation + optional sandbox + review/revision ─
             int retries = 0;
             CriticReport report;
             while (true)
             {
+                // Deterministic rails before every Critic call (desktop Stage 2.5 / sandbox).
+                CriticEvidence evidence = await GatherCriticEvidenceAsync(
+                    builderOutput, isWorkspaceTask, tools, progress, cancellationToken);
+
                 Report(progress, CouncilEventKind.Status, "Critic is reviewing...");
-                string criticInput = BuildCriticInput(request.UserPrompt, isWorkspaceTask, builderOutput);
+                string criticInput = BuildCriticInput(request.UserPrompt, isWorkspaceTask, builderOutput, evidence);
                 string criticOutput = await CallRoleAsync(CriticSystemPrompt, criticInput, progress, cancellationToken);
                 Report(progress, CouncilEventKind.CriticOutput, criticOutput);
                 report = CriticContractParser.Parse(criticOutput);
+
+                // Deterministic findings force an issues status even if the LLM clean-passes.
+                report = MergeDeterministicFindings(report, evidence);
 
                 int issueCount = report.Issues?.Count ?? 0;
                 if (issueCount == 0)
@@ -116,7 +130,8 @@ namespace Axiom.Core.Council
                 }
 
                 retries++;
-                bool fullRevision = issueCount > TargetedPatchIssueCeiling;
+                bool fullRevision = issueCount > TargetedPatchIssueCeiling
+                    || evidence.SandboxFailed;
                 Report(progress, CouncilEventKind.Status,
                     fullRevision
                         ? $"Critic found {issueCount} issues — running full revision ({retries}/{MaxBuilderRetryAttempts})..."
@@ -126,7 +141,7 @@ namespace Axiom.Core.Council
                     ? builderSystem
                     : builderSystem + "\n" + TargetedPatchModeNote(isWorkspaceTask);
                 string revisionInput = BuildRevisionInput(
-                    request.UserPrompt, architectPlan, workspaceContext, builderOutput, criticOutput, fullRevision);
+                    request.UserPrompt, architectPlan, workspaceContext, builderOutput, criticOutput, fullRevision, evidence);
 
                 builderOutput = await CallRoleAsync(revisionSystem, revisionInput, progress, cancellationToken);
                 Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
@@ -136,14 +151,125 @@ namespace Axiom.Core.Council
                     patch = await ResolvePatchWithRetryAsync(
                         request, workspaceContext, architectPlan, builderSystem, builderOutput, progress, cancellationToken);
                     if (patch == null)
-                    {
                         return new CouncilResult(false, builderOutput, null, report);
-                    }
+
+                    builderOutput = patch.RawText ?? builderOutput;
                 }
             }
 
             Report(progress, CouncilEventKind.Completed, "Council run complete.");
             return new CouncilResult(true, builderOutput, patch, report);
+        }
+
+        private async Task<CriticEvidence> GatherCriticEvidenceAsync(
+            string builderOutput,
+            bool isWorkspaceTask,
+            CouncilToolOptions tools,
+            IProgress<CouncilEvent>? progress,
+            CancellationToken cancellationToken)
+        {
+            var findings = new List<string>();
+            string sandboxLogs = string.Empty;
+            bool sandboxFailed = false;
+            string language = StaticValidation.DetectLanguage(builderOutput);
+
+            // Always run deterministic checks on Builder output (GUI Stage 2.5). Pure prose
+            // yields no findings; structure/call checks only fire when the text looks code-like.
+            // Workspace patches are analyzed via REPLACE bodies inside StaticValidation.Run.
+            if (!string.IsNullOrWhiteSpace(builderOutput))
+            {
+                Report(progress, CouncilEventKind.Status, "Running static validation...");
+                findings.AddRange(StaticValidation.Run(builderOutput));
+                if (findings.Count > 0)
+                {
+                    Report(progress, CouncilEventKind.Status,
+                        $"Static validation: {findings.Count} issue(s) pre-flagged for Critic.");
+                }
+            }
+
+            bool runSandbox = tools.SandboxEnabled
+                && !isWorkspaceTask
+                && StaticValidation.IsSandboxLanguage(language)
+                && !string.IsNullOrWhiteSpace(builderOutput);
+
+            if (runSandbox)
+            {
+                Report(progress, CouncilEventKind.Status, $"Running {language} sandbox...");
+                CouncilSandboxResult sandbox = await _sandbox.ExecuteAsync(builderOutput, language, cancellationToken);
+                if (sandbox.HasOutput)
+                {
+                    sandboxLogs = sandbox.Output;
+                    var runtimeErrors = StaticValidation.DetectSandboxErrors(sandbox.Output);
+                    if (runtimeErrors.Count > 0 || !sandbox.Succeeded || sandbox.TimedOut)
+                    {
+                        sandboxFailed = true;
+                        findings.AddRange(runtimeErrors);
+                        if (runtimeErrors.Count == 0)
+                            findings.Add("[CRITICAL — RUNTIME ERROR] Sandbox execution failed without a parseable stack trace.");
+                        Report(progress, CouncilEventKind.Warning,
+                            $"Sandbox: {runtimeErrors.Count} runtime issue(s) pre-flagged for Critic.");
+                    }
+                    else
+                    {
+                        Report(progress, CouncilEventKind.Status, "Sandbox execution succeeded.");
+                    }
+                }
+            }
+
+            findings = findings.Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToList();
+            return new CriticEvidence(findings, sandboxLogs, sandboxFailed, language);
+        }
+
+        private static CriticReport MergeDeterministicFindings(CriticReport report, CriticEvidence evidence)
+        {
+            report.Issues ??= new List<CriticIssue>();
+
+            // When the LLM says ok but static/sandbox found hard failures, promote to issues.
+            var hardFindings = evidence.Findings
+                .Where(f => f.Contains("CRITICAL", StringComparison.OrdinalIgnoreCase)
+                    || f.Contains("RUNTIME", StringComparison.OrdinalIgnoreCase)
+                    || f.Contains("Mismatched", StringComparison.OrdinalIgnoreCase)
+                    || f.Contains("truncated", StringComparison.OrdinalIgnoreCase)
+                    || f.Contains("not defined", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (hardFindings.Count == 0)
+            {
+                // Soft static notes stay as evidence in the prompt; only hard ones force status.
+                report.FindingsCount = report.Issues.Count;
+                report.HasIssues = report.Issues.Count > 0
+                    && !string.Equals(report.Status, "ok", StringComparison.OrdinalIgnoreCase);
+                return report;
+            }
+
+            var existing = new HashSet<string>(
+                report.Issues.Select(i => i.Summary ?? string.Empty),
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (string finding in hardFindings)
+            {
+                string summary = finding.Trim();
+                if (summary.StartsWith("RUNTIME:", StringComparison.OrdinalIgnoreCase))
+                    summary = summary["RUNTIME:".Length..].Trim();
+                if (existing.Contains(summary))
+                    continue;
+
+                report.Issues.Add(new CriticIssue
+                {
+                    Severity = finding.Contains("CRITICAL", StringComparison.OrdinalIgnoreCase) || finding.Contains("RUNTIME", StringComparison.OrdinalIgnoreCase)
+                        ? "critical"
+                        : "high",
+                    Summary = summary.Length > 240 ? summary[..240] : summary,
+                    Evidence = "Deterministic static validation / sandbox",
+                    SuggestedFix = "Fix the reported structural or runtime failure before shipping."
+                });
+                existing.Add(summary);
+            }
+
+            report.Status = "issues";
+            report.FindingsCount = report.Issues.Count;
+            report.HasIssues = report.Issues.Count > 0;
+            return report;
         }
 
         private async Task<WorkspacePatchProposal?> ResolvePatchWithRetryAsync(
@@ -198,9 +324,6 @@ namespace Axiom.Core.Council
                 : role);
         }
 
-        // The exact patch envelope contract is already embedded in WorkspaceAccessService's
-        // context packet (BuildContextPacket), so this only needs to point the Builder at it —
-        // duplicating the format instructions here would risk the two drifting apart.
         private const string WorkspacePatchModeNote =
             "This is a connected-codebase task. Follow the patch envelope format given in the " +
             "workspace context exactly. Output ONLY the [[AXIOM_CODEBASE_PATCH]] envelope — no " +
@@ -216,7 +339,10 @@ namespace Axiom.Core.Council
         private static string CriticSystemPrompt => FoundationSystemPrompt.Apply(
             "You are the Critic. Review the Builder's output against the original request for " +
             "correctness, completeness, and whether it actually implements what was asked. " +
-            "Be specific and evidence-based." + "\n" + CriticContractParser.ContractInstruction);
+            "Be specific and evidence-based. When PRE-FLAGGED ISSUES or SANDBOX OUTPUT are " +
+            "present, confirm each finding and check for additional problems. Treat CRITICAL " +
+            "and RUNTIME findings as must-fix unless the sandbox output clearly shows they " +
+            "are false positives." + "\n" + CriticContractParser.ContractInstruction);
 
         private static string BuildContextualInput(string userPrompt, string workspaceContext)
         {
@@ -227,7 +353,7 @@ namespace Axiom.Core.Council
 
         private static string BuildBuilderInput(string userPrompt, string architectPlan, string workspaceContext)
         {
-            var sb = new System.Text.StringBuilder();
+            var sb = new StringBuilder();
             sb.AppendLine("[ORIGINAL REQUEST]").AppendLine(userPrompt).AppendLine();
             sb.AppendLine("[ARCHITECT PLAN]").AppendLine(architectPlan);
             if (!string.IsNullOrWhiteSpace(workspaceContext))
@@ -235,12 +361,42 @@ namespace Axiom.Core.Council
             return sb.ToString();
         }
 
-        private static string BuildCriticInput(string userPrompt, bool isWorkspaceTask, string builderOutput)
+        private static string BuildCriticInput(
+            string userPrompt,
+            bool isWorkspaceTask,
+            string builderOutput,
+            CriticEvidence evidence)
         {
-            var sb = new System.Text.StringBuilder();
+            var sb = new StringBuilder();
+
+            if (evidence.Findings.Count > 0)
+            {
+                sb.AppendLine("[PRE-FLAGGED ISSUES]");
+                sb.AppendLine("The following issues were detected automatically. Confirm each one and check for additional problems:");
+                for (int i = 0; i < evidence.Findings.Count; i++)
+                    sb.AppendLine($"{i + 1}. {evidence.Findings[i]}");
+                sb.AppendLine();
+            }
+
+            if (!string.IsNullOrWhiteSpace(evidence.SandboxLogs))
+            {
+                string sandbox = evidence.SandboxLogs.Length > SandboxOutputCapChars
+                    ? evidence.SandboxLogs[..SandboxOutputCapChars] + "\n[...truncated]"
+                    : evidence.SandboxLogs;
+                sb.AppendLine("[SANDBOX OUTPUT]").AppendLine(sandbox).AppendLine();
+            }
+
             sb.AppendLine("[ORIGINAL REQUEST]").AppendLine(userPrompt).AppendLine();
             sb.AppendLine(isWorkspaceTask ? "[BUILDER PATCH PROPOSAL]" : "[BUILDER OUTPUT]");
-            sb.AppendLine(builderOutput);
+            string builderText = builderOutput;
+            if (builderText.Length > BuilderForCriticCapChars)
+            {
+                builderText = builderText[..64_000]
+                    + "\n[...middle section truncated for context budget...]\n"
+                    + builderText[^32_000..];
+            }
+
+            sb.AppendLine(builderText);
             return sb.ToString();
         }
 
@@ -250,14 +406,31 @@ namespace Axiom.Core.Council
             string workspaceContext,
             string builderOutput,
             string criticOutput,
-            bool fullRevision)
+            bool fullRevision,
+            CriticEvidence evidence)
         {
-            var sb = new System.Text.StringBuilder();
+            var sb = new StringBuilder();
             sb.AppendLine("[ORIGINAL REQUEST]").AppendLine(userPrompt).AppendLine();
             if (fullRevision)
                 sb.AppendLine("[ARCHITECT PLAN]").AppendLine(architectPlan).AppendLine();
             sb.AppendLine("[PREVIOUS BUILDER OUTPUT]").AppendLine(builderOutput).AppendLine();
             sb.AppendLine("[CRITIC FINDINGS]").AppendLine(criticOutput);
+
+            if (evidence.Findings.Count > 0)
+            {
+                sb.AppendLine().AppendLine("[PRE-FLAGGED ISSUES — must address]");
+                foreach (string f in evidence.Findings)
+                    sb.AppendLine("- " + f);
+            }
+
+            if (!string.IsNullOrWhiteSpace(evidence.SandboxLogs))
+            {
+                string sandbox = evidence.SandboxLogs.Length > 4000
+                    ? evidence.SandboxLogs[..4000] + "\n[...truncated]"
+                    : evidence.SandboxLogs;
+                sb.AppendLine().AppendLine("[SANDBOX OUTPUT]").AppendLine(sandbox);
+            }
+
             if (!string.IsNullOrWhiteSpace(workspaceContext))
                 sb.AppendLine().AppendLine(workspaceContext);
             return sb.ToString();
@@ -265,5 +438,11 @@ namespace Axiom.Core.Council
 
         private static void Report(IProgress<CouncilEvent>? progress, CouncilEventKind kind, string message)
             => progress?.Report(new CouncilEvent(kind, message));
+
+        private sealed record CriticEvidence(
+            IReadOnlyList<string> Findings,
+            string SandboxLogs,
+            bool SandboxFailed,
+            string Language);
     }
 }

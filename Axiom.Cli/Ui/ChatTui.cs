@@ -605,7 +605,7 @@ internal sealed class ChatTui : IDisposable
 
         CouncilOrchestrator council = _session.CreateCouncil();
         Task<CouncilResult> task = council.RunAsync(
-            new CouncilRequest(grounded, wsState),
+            new CouncilRequest(grounded, wsState, _session.CouncilTools()),
             progress,
             CancellationToken.None);
 

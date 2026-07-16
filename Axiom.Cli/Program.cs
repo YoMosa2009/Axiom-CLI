@@ -306,8 +306,10 @@ internal static class Program
         };
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
+        // axiom code path: sandbox on so Critic gets runtime evidence for coding tasks.
+        var codeTools = new CouncilToolOptions(SandboxEnabled: true);
         CouncilResult result = await orchestrator.RunAsync(
-            new CouncilRequest(task, workspaceState),
+            new CouncilRequest(task, workspaceState, codeTools),
             CouncilConsoleRenderer.Create(),
             CancellationToken.None);
         sw.Stop();
@@ -517,7 +519,8 @@ internal static class Program
                 Say("  /clear                Clear the current chat transcript");
                 Say("  PgUp/PgDn             Scroll chat history");
                 Say("  exit                  Leave chat");
-                Say("Tools: council (Architect/Builder/Critic) · web-search · calculator · sandbox");
+                Say("Tools: council (Architect/Builder/Critic + static validation) · web-search · calculator · sandbox");
+                Say("  When sandbox is on, council Critic receives Python/Java execution logs.");
                 return true;
 
             default:

@@ -24,10 +24,16 @@ internal sealed class ChatSession
 
     public CouncilOrchestrator CreateCouncil()
     {
-        // Council uses the same cloud pipeline abstraction as the desktop Workplace council.
+        // Council uses the same cloud pipeline abstraction as the desktop Workplace council,
+        // plus Core sandbox services for Critic pre-flagged evidence when sandbox is enabled.
         var pipeline = new CloudChatPipeline(ChatService, ModelId);
         return new CouncilOrchestrator(pipeline, ModelId);
     }
+
+    public CouncilToolOptions CouncilTools() => new(
+        SandboxEnabled: Tools.SandboxEnabled,
+        CalculatorEnabled: Tools.CalculatorEnabled,
+        WebSearchEnabled: Tools.WebSearchEnabled);
 
     public (int Used, int Max) EstimateContext()
     {
