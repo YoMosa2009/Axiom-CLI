@@ -232,7 +232,7 @@ internal static class Program
             ModelCatalog,
             handleSlash: (input, s) =>
             {
-                TryHandleSlashCommand(input, s, tui.Notify, tui.ClearTranscript);
+                TryHandleSlashCommand(input, s, tui);
                 return Task.CompletedTask;
             },
             augmentTools: async (input, s) => await AugmentWithToolResultsAsync(input, s.Tools),
@@ -241,14 +241,11 @@ internal static class Program
 
     private static void AttachPathsMentionedInMessage(string input, ChatSession session)
     {
+        // Paths pasted in chat messages lock the sandbox exclusively when they are real folders.
         foreach (Match match in PathInMessageRegex.Matches(input))
         {
             string path = match.Groups["path"].Value;
-            if (session.Workspace.TryAttach(path))
-            {
-                // Feedback is surfaced by ChatTui when attach is used via @; path-in-message
-                // attaches quietly so the transcript stays clean.
-            }
+            session.Workspace.TrySetExclusive(path);
         }
     }
 
@@ -350,25 +347,17 @@ internal static class Program
         return 0;
     }
 
-    private static bool TryHandleSlashCommand(
-        string input,
-        ChatSession session,
-        Action<string>? notify = null,
-        Action? clearTranscript = null)
+    private static bool TryHandleSlashCommand(string input, ChatSession session, ChatTui tui)
     {
         if (!input.StartsWith('/'))
             return false;
 
-        void Say(string msg)
-        {
-            if (notify != null)
-                notify(msg);
-            else
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]{msg.EscapeMarkup()}[/]");
-        }
+        void Say(string msg) => tui.Notify(msg);
 
         string[] parts = input.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        switch (parts[0].ToLowerInvariant())
+        string cmd = parts[0].ToLowerInvariant();
+
+        switch (cmd)
         {
             case "/tools":
                 if (parts.Length >= 3 && bool.TryParse(
@@ -406,24 +395,115 @@ internal static class Program
 
             case "/workspace":
             case "/ws":
-                Say("Attached workspaces:");
+                if (parts.Length >= 2)
+                {
+                    string sub = parts[1].ToLowerInvariant();
+                    if ((sub is "set" or "lock" or "use") && parts.Length >= 3)
+                    {
+                        string path = string.Join(' ', parts.Skip(2)).Trim().Trim('"');
+                        if (session.Workspace.TrySetExclusive(path))
+                            Say($"Workspace locked to: {session.Workspace.PrimaryRoot}");
+                        else
+                            Say($"Could not lock workspace (folder missing?): {path}");
+                        return true;
+                    }
+                    if (sub is "cwd" or ".")
+                    {
+                        session.Workspace.TrySetExclusive(Environment.CurrentDirectory);
+                        Say($"Workspace locked to cwd: {session.Workspace.PrimaryRoot}");
+                        return true;
+                    }
+                    if (sub is "clear" or "reset")
+                    {
+                        session.Workspace.ClearToCwd();
+                        Say($"Workspace reset to cwd: {session.Workspace.PrimaryRoot}");
+                        return true;
+                    }
+                    // Treat remaining args as a path: /workspace C:\foo
+                    string direct = string.Join(' ', parts.Skip(1)).Trim().Trim('"');
+                    if (session.Workspace.TrySetExclusive(direct))
+                        Say($"Workspace locked to: {session.Workspace.PrimaryRoot}");
+                    else
+                        Say($"Could not lock workspace: {direct}");
+                    return true;
+                }
+                Say(session.Workspace.IsExclusive ? "Workspace (exclusive lock):" : "Workspace roots:");
                 foreach (string root in session.Workspace.Roots)
                     Say($"  • {root}");
-                Say("Tip: type @ to pick a recent folder, or paste a path in your message.");
+                Say("Change folder:  @ (pick recent)  ·  /workspace <path>  ·  /workspace set <path>  ·  /workspace cwd");
+                Say("The agent cannot read/write/run outside the locked folder.");
                 return true;
+
+            case "/sessions":
+            case "/session":
+            {
+                string action = parts.Length >= 2 ? parts[1].ToLowerInvariant() : "list";
+                if (action is "list" or "ls" || (parts.Length == 1 && cmd == "/sessions"))
+                {
+                    var list = tui.ListSessions();
+                    if (list.Count == 0)
+                    {
+                        Say("No saved sessions yet. Chats auto-save after each turn.");
+                        return true;
+                    }
+                    Say("Saved sessions (auto-saved):");
+                    int i = 1;
+                    foreach (var item in list)
+                    {
+                        Say($"  {i,2}. {item.Title}  ·  {item.UpdatedAt.ToLocalTime():g}  ·  {item.ModelLabel}  ·  id:{item.Id}");
+                        i++;
+                    }
+                    Say("Load: /session load <number|id>   Delete: /session delete <number|id>");
+                    return true;
+                }
+                if ((action is "load" or "open" or "resume") && parts.Length >= 3)
+                {
+                    string key = string.Join(' ', parts.Skip(2));
+                    if (tui.TryLoadSession(key, out string err))
+                        Say($"Loaded session.");
+                    else
+                        Say(err);
+                    return true;
+                }
+                if ((action is "delete" or "rm" or "remove") && parts.Length >= 3)
+                {
+                    string key = string.Join(' ', parts.Skip(2));
+                    if (tui.DeleteSession(key))
+                        Say($"Deleted session {key}.");
+                    else
+                        Say($"Could not delete session: {key}");
+                    return true;
+                }
+                Say("Usage: /sessions  ·  /session load <n|id>  ·  /session delete <n|id>");
+                return true;
+            }
 
             case "/clear":
                 session.History.Clear();
-                clearTranscript?.Invoke();
-                Say("Conversation cleared.");
+                tui.ClearTranscript();
+                Say("Conversation cleared. (Previous session file kept — use /session delete to remove.)");
                 return true;
 
             case "/help":
-                Say("/ tools  ·  @ folders  ·  /workspace  ·  /model  ·  /clear  ·  PgUp/PgDn scroll  ·  exit");
+            case "/?":
+                Say("Commands:");
+                Say("  /help                 Show this help");
+                Say("  /tools [name on|off]  Toggle calculator / web-search / sandbox");
+                Say("  /model [eidos|hepha]  Switch cloud model");
+                Say("  /workspace [path]     Show or lock the agent work folder");
+                Say("  /workspace set <path> Lock agent exclusively to a folder");
+                Say("  /workspace cwd        Lock to the current directory");
+                Say("  @                     Pick a recent folder and lock workspace");
+                Say("  /sessions             List auto-saved sessions");
+                Say("  /session load <n|id>  Resume a saved session");
+                Say("  /session delete <n|id> Delete a saved session");
+                Say("  /clear                Clear the current chat transcript");
+                Say("  PgUp/PgDn             Scroll chat history");
+                Say("  exit                  Leave chat");
                 return true;
 
             default:
-                Say($"Unknown command: {parts[0]}");
+                Say($"Unknown command: {parts[0]}  ·  type /help");
                 return true;
         }
     }

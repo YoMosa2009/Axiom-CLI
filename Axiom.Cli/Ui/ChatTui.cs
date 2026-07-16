@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Axiom.Core.Agent;
 using Axiom.Core.Chat;
 using Axiom.Core.Council;
+using Axiom.Core.Memory;
 using Axiom.Core.Tools;
 
 namespace Axiom.Cli.Ui;
@@ -32,6 +33,7 @@ internal sealed class ChatTui : IDisposable
     private readonly TerminalScreen _screen = new();
     private readonly List<Msg> _messages = new();
     private readonly object _gate = new();
+    private readonly SessionStore _sessionStore = new();
 
     private string _input = string.Empty;
     private int _cursor;
@@ -44,6 +46,8 @@ internal sealed class ChatTui : IDisposable
     private int _turnCount;
     private bool _running = true;
     private DateTime _lastPaint = DateTime.MinValue;
+    private string _sessionId = SessionStore.NewId();
+    private DateTime _sessionCreated = DateTime.UtcNow;
 
     // Session bindings
     private ChatSession? _session;
@@ -63,7 +67,65 @@ internal sealed class ChatTui : IDisposable
             _messages.Clear();
             _scrollFromBottom = 0;
         }
+        // New blank session id so the next auto-save doesn't overwrite the previous file.
+        _sessionId = SessionStore.NewId();
+        _sessionCreated = DateTime.UtcNow;
     }
+
+    public bool TryLoadSession(string idOrPrefix, out string error)
+    {
+        error = string.Empty;
+        StoredSession? stored = _sessionStore.Load(idOrPrefix);
+        if (stored == null)
+        {
+            error = $"Session not found: {idOrPrefix}";
+            return false;
+        }
+
+        if (_session == null)
+        {
+            error = "No active session.";
+            return false;
+        }
+
+        lock (_gate)
+        {
+            _messages.Clear();
+            foreach (StoredUiMessage m in stored.Messages ?? [])
+            {
+                Role role = m.Role?.ToLowerInvariant() switch
+                {
+                    "user" => Role.User,
+                    "assistant" => Role.Assistant,
+                    "status" => Role.Status,
+                    "error" => Role.Error,
+                    _ => Role.System
+                };
+                _messages.Add(new Msg { Role = role, Text = m.Text ?? string.Empty });
+            }
+            _scrollFromBottom = 0;
+        }
+
+        _sessionId = stored.Id;
+        _sessionCreated = stored.CreatedAt == default ? DateTime.UtcNow : stored.CreatedAt;
+        if (!string.IsNullOrWhiteSpace(stored.ModelId))
+            _session.ModelId = stored.ModelId;
+        if (!string.IsNullOrWhiteSpace(stored.ModelLabel))
+            _session.ModelLabel = stored.ModelLabel;
+
+        _session.History.Clear();
+        foreach (OpenRouterMessageDto h in stored.History ?? [])
+            _session.History.Add(new OpenRouterMessage(h.Role ?? "user", h.Text ?? string.Empty));
+
+        if (stored.WorkspaceRoots is { Count: > 0 })
+            _session.Workspace.SetRoots(stored.WorkspaceRoots, stored.WorkspaceExclusive);
+
+        return true;
+    }
+
+    public IReadOnlyList<SessionListItem> ListSessions() => _sessionStore.List();
+
+    public bool DeleteSession(string idOrPrefix) => _sessionStore.Delete(idOrPrefix);
 
     public async Task<int> RunAsync(
         ChatSession session,
@@ -79,7 +141,7 @@ internal sealed class ChatTui : IDisposable
         _attachPaths = attachPaths;
 
         _screen.Enter();
-        PushSystem($"Axiom ready · {session.ModelLabel} · / tools · @ folders · PgUp/PgDn scroll · exit to quit");
+        PushSystem($"Axiom ready · {session.ModelLabel} · /help · @ lock folder · /sessions · PgUp/PgDn scroll");
 
         using var animCts = new CancellationTokenSource();
         var animTask = AnimateLoopAsync(animCts.Token);
@@ -176,7 +238,14 @@ internal sealed class ChatTui : IDisposable
                 var items = GetMenuItems(mode);
                 if (items.Count > 0)
                 {
-                    ApplyMenuSelection(items[Math.Clamp(_menuIndex, 0, items.Count - 1)], mode);
+                    string? autoSubmit = ApplyMenuSelection(items[Math.Clamp(_menuIndex, 0, items.Count - 1)], mode);
+                    if (autoSubmit != null)
+                    {
+                        _input = string.Empty;
+                        _cursor = 0;
+                        _menuIndex = 0;
+                        await SubmitAsync(autoSubmit);
+                    }
                     return true;
                 }
             }
@@ -356,12 +425,14 @@ internal sealed class ChatTui : IDisposable
 
             PushStatus(ActivityStatus.SummarizeTurn(result.Elapsed, result.ToolCallCount, result.Failed));
             _turnCount++;
+            AutoSave();
         }
         catch (Exception ex)
         {
             sw.Stop();
             PushError(ex.Message);
             PushStatus(ActivityStatus.SummarizeTurn(sw.Elapsed, toolCalls, failed: true));
+            AutoSave();
         }
         finally
         {
@@ -369,6 +440,45 @@ internal sealed class ChatTui : IDisposable
             _activity = string.Empty;
             _scrollFromBottom = 0;
             Paint(force: true);
+        }
+    }
+
+    private void AutoSave()
+    {
+        if (_session == null)
+            return;
+        try
+        {
+            List<Msg> snap;
+            lock (_gate) snap = _messages.ToList();
+
+            string? firstUser = snap.FirstOrDefault(m => m.Role == Role.User)?.Text;
+            var stored = new StoredSession
+            {
+                Id = _sessionId,
+                Title = SessionStore.MakeTitle(firstUser),
+                CreatedAt = _sessionCreated,
+                UpdatedAt = DateTime.UtcNow,
+                ModelId = _session.ModelId,
+                ModelLabel = _session.ModelLabel,
+                WorkspaceRoots = _session.Workspace.Roots.ToList(),
+                WorkspaceExclusive = _session.Workspace.IsExclusive,
+                Messages = snap.Select(m => new StoredUiMessage
+                {
+                    Role = m.Role.ToString().ToLowerInvariant(),
+                    Text = m.Text
+                }).ToList(),
+                History = _session.History.Select(h => new OpenRouterMessageDto
+                {
+                    Role = h.Role,
+                    Text = h.Text
+                }).ToList()
+            };
+            _sessionStore.Save(stored);
+        }
+        catch
+        {
+            // Persistence must never break a chat turn.
         }
     }
 
@@ -434,12 +544,16 @@ internal sealed class ChatTui : IDisposable
         string tools = session != null ? ConsoleUi.ToolChipsPlain(session.Tools) : "";
         string model = session?.ModelLabel ?? "—";
         string ctx = ConsoleUi.FormatContext(used, max);
-        string brand = $"Axiom";
-        string header = ConsoleUi.LayoutThree(
-            $" {brand}  v{GetVersion()}  ·  {model}  ·  {tools}",
-            "",
-            $"{ctx} ",
-            w);
+        // Minimal mark top-left (◆) — small, non-disruptive brand anchor.
+        string mark = "◆";
+        string wsHint = session?.Workspace.Roots.Count > 0
+            ? ShortName(session.Workspace.PrimaryRoot)
+            : "no-folder";
+        string left = $" {mark} Axiom  v{GetVersion()}  ·  {model}  ·  {wsHint}";
+        string header = ConsoleUi.LayoutThree(left, tools, $"{ctx} ", w);
+        rows[0] = Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold + mark + Ansi.Reset
+            + Ansi.Fg(AxiomTheme.TextPrimary) + Ansi.ClipPad(header.Length > 1 ? header[1..] : header, Math.Max(1, w - 1)) + Ansi.Reset;
+        // Re-paint full header line cleanly (mark already included in left).
         rows[0] = Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold + Ansi.ClipPad(header, w) + Ansi.Reset;
         rows[1] = Ansi.Fg(AxiomTheme.Border) + new string('═', w) + Ansi.Reset;
 
@@ -485,7 +599,7 @@ internal sealed class ChatTui : IDisposable
         if (mode != MenuMode.None)
         {
             string hint = mode == MenuMode.At
-                ? " ↑↓ folders · Enter attach · Esc cancel"
+                ? " ↑↓ folders · Enter lock workspace · Esc cancel"
                 : " ↑↓ navigate · Enter select · Esc clear";
             rows[menuRow++] = Ansi.Fg(AxiomTheme.SystemMuted) + Ansi.ClipPad(hint, w) + Ansi.Reset;
             if (menuItems.Count == 0)
@@ -689,7 +803,8 @@ internal sealed class ChatTui : IDisposable
     private static bool IsKnownSlashHead(string head)
     {
         head = head.ToLowerInvariant();
-        return head is "/" or "/tools" or "/model" or "/clear" or "/help" or "/workspace"
+        return head is "/" or "/tools" or "/model" or "/clear" or "/help" or "/workspace" or "/ws"
+            or "/sessions" or "/session"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
             || head.StartsWith("/w");
@@ -731,60 +846,65 @@ internal sealed class ChatTui : IDisposable
             || i.Description.Contains(filter, StringComparison.OrdinalIgnoreCase)).ToList();
     }
 
-    private void ApplyMenuSelection(ChatInput.MenuItem pick, MenuMode mode)
+    // Returns a command to submit immediately, or null to stay in the editor.
+    private string? ApplyMenuSelection(ChatInput.MenuItem pick, MenuMode mode)
     {
         if (_session == null)
-            return;
+            return null;
 
         if (mode == MenuMode.At || pick.Kind == "folder")
         {
-            _session.Workspace.TryAttach(pick.Id);
-            if (TryGetAtToken(_input, _cursor, out int start, out int end, out _))
+            // Explicit folder choice locks the agent exclusively to that tree.
+            if (_session.Workspace.TrySetExclusive(pick.Id))
             {
-                string insert = pick.Id.Contains(' ') ? $"\"{pick.Id}\"" : pick.Id;
-                _input = _input.Remove(start, end - start).Insert(start, insert + " ");
-                _cursor = start + insert.Length + 1;
+                if (TryGetAtToken(_input, _cursor, out int start, out int end, out _))
+                {
+                    _input = _input.Remove(start, end - start);
+                    _cursor = start;
+                }
+                PushSystem($"Workspace locked to: {pick.Id}");
+                AutoSave();
             }
-            PushSystem($"Attached workspace: {pick.Id}");
-            return;
+            else
+            {
+                PushError($"Could not lock workspace: {pick.Id}");
+            }
+            return null;
         }
 
         if (pick.IsTool)
         {
-            _session.Tools.TryToggle(pick.Id, out _);
+            _session.Tools.TryToggle(pick.Id, out bool on);
+            PushSystem($"{pick.Id} → {(on ? "on" : "off")}");
             _input = "/";
             _cursor = 1;
-            return;
+            return null;
         }
 
         if (pick.Id == "exit")
         {
             _running = false;
-            return;
+            return null;
         }
-        if (pick.Id == "clear")
-        {
-            _input = "/clear";
-            _cursor = _input.Length;
-            return;
-        }
-        if (pick.Id == "help")
-        {
-            _input = "/help";
-            _cursor = _input.Length;
-            return;
-        }
-        if (pick.Id == "workspace")
-        {
-            _input = "/workspace";
-            _cursor = _input.Length;
-            return;
-        }
+
+        // Commands that should run immediately (this was the /help bug: it only filled the buffer).
+        if (pick.Id is "clear" or "help" or "workspace" or "sessions")
+            return "/" + pick.Id;
+
         if (pick.Id.StartsWith("model:", StringComparison.Ordinal))
+            return "/model " + pick.Id["model:".Length..];
+
+        return null;
+    }
+
+    private static string ShortName(string path)
+    {
+        try
         {
-            _input = "/model " + pick.Id["model:".Length..];
-            _cursor = _input.Length;
+            string n = new System.IO.DirectoryInfo(path).Name;
+            return string.IsNullOrWhiteSpace(n) ? path : n;
         }
+        catch { return path; }
     }
 
     private void RemoveAtToken()

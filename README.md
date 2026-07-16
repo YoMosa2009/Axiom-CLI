@@ -53,10 +53,11 @@ code-specialized) — the same aliases as the desktop app. `axiom code` uses the
 Workplace Council default model unless `--model` is given.
 
 In chat (`axiom chat` opens a self-drawn full-window TUI inside the terminal — not the host scrollbar):
-- Fixed header, app-managed scrollable transcript (PgUp/PgDn / Ctrl+↑↓), pinned prompt box at the bottom
-- GUI-style turns (You → Axiom) with live activity statuses (Thinking, Running, Building, Task completed, …)
-- Type `/` for tools & commands; type `@` for recent folders; model label + context under the prompt
-- Agent can run shell commands, edit files, search, build, and download inside attached workspaces
+- Fixed header (◆ Axiom mark), app-managed scrollable transcript (PgUp/PgDn), pinned prompt box at the bottom
+- GUI-style turns with live activity statuses
+- `/workspace <path>` or `@` locks the agent exclusively to a folder (sandbox cannot leave it)
+- Sessions auto-save after each turn; `/sessions`, `/session load`, `/session delete`
+- `/help` for the full command list
 
 
 ## How the council works

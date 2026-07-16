@@ -127,9 +127,14 @@ namespace Axiom.Core.Agent
             if (!Directory.Exists(cwd))
                 return $"Error: working directory does not exist: {cwd}";
 
+            if (!_workspace.TryValidateShellCommand(command, cwd, out string sandboxReason))
+                return $"Error: sandbox blocked command — {sandboxReason}";
+
             int timeout = GetInt(root, "timeout_seconds", DefaultShellTimeoutSeconds);
             timeout = Math.Clamp(timeout, 5, 300);
 
+            // Pin the process to the allowed cwd and force an in-sandbox start location so
+            // the model cannot inherit a host cwd outside the chosen workspace.
             var psi = new ProcessStartInfo
             {
                 WorkingDirectory = cwd,
@@ -141,17 +146,24 @@ namespace Axiom.Core.Agent
 
             if (OperatingSystem.IsWindows())
             {
+                string safeCwd = cwd.Replace("'", "''");
+                // Force location, then run user command. Set-Location overrides still validated above.
+                string wrapped =
+                    $"Set-Location -LiteralPath '{safeCwd}'; " +
+                    "$ErrorActionPreference = 'Continue'; " +
+                    command;
                 psi.FileName = "powershell.exe";
                 psi.ArgumentList.Add("-NoLogo");
                 psi.ArgumentList.Add("-NoProfile");
                 psi.ArgumentList.Add("-Command");
-                psi.ArgumentList.Add(command);
+                psi.ArgumentList.Add(wrapped);
             }
             else
             {
+                string safeCwd = cwd.Replace("'", "'\\''");
                 psi.FileName = "/bin/bash";
                 psi.ArgumentList.Add("-lc");
-                psi.ArgumentList.Add(command);
+                psi.ArgumentList.Add($"cd '{safeCwd}' && {command}");
             }
 
             using var process = new Process { StartInfo = psi };
@@ -193,7 +205,8 @@ namespace Axiom.Core.Agent
         private string ReadFile(JsonElement root)
         {
             string path = _workspace.ResolvePath(GetString(root, "path"));
-            if (!_workspace.IsPathAllowed(path))
+            // Re-normalize and re-check after full resolution so ".." cannot slip out.
+            if (!WorkspaceSession.TryNormalizePath(path, out path) || !_workspace.IsPathAllowed(path))
                 return $"Error: path outside attached workspaces: {path}";
             if (!File.Exists(path))
                 return $"Error: file not found: {path}";
@@ -207,10 +220,13 @@ namespace Axiom.Core.Agent
         private string WriteFile(JsonElement root)
         {
             string path = _workspace.ResolvePath(GetString(root, "path"));
-            if (!_workspace.IsPathAllowed(path))
+            if (!WorkspaceSession.TryNormalizePath(path, out path) || !_workspace.IsPathAllowed(path))
                 return $"Error: path outside attached workspaces: {path}";
 
+            // Parent directory must also stay inside the sandbox (blocks write via symlink tricks).
             string? dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(dir) && !_workspace.IsPathAllowed(dir))
+                return $"Error: parent directory outside attached workspaces: {dir}";
             if (!string.IsNullOrWhiteSpace(dir))
                 Directory.CreateDirectory(dir);
 

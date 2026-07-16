@@ -805,7 +805,8 @@ internal static class ChatInput
             new("calculator", "calculator", "Math & unit conversion", true, tools.CalculatorEnabled, "slash"),
             new("web-search", "web-search", "Live web lookup", true, tools.WebSearchEnabled, "slash"),
             new("sandbox", "sandbox", "Local Python execution", true, tools.SandboxEnabled, "slash"),
-            new("workspace", "workspace", "Show attached folders", false, null, "slash"),
+            new("workspace", "workspace", "Show / lock work folder", false, null, "slash"),
+            new("sessions", "sessions", "List saved chat sessions", false, null, "slash"),
         };
 
         foreach (var m in models)
@@ -825,7 +826,7 @@ internal static class ChatInput
             string name;
             try { name = new System.IO.DirectoryInfo(path).Name; }
             catch { name = path; }
-            items.Add(new(path, $"{name}  —  {path}", "Attach workspace", false, null, "folder"));
+            items.Add(new(path, $"{name}  —  {path}", "Lock workspace here", false, null, "folder"));
         }
 
         string cwd = Environment.CurrentDirectory;
@@ -834,7 +835,7 @@ internal static class ChatInput
             string name;
             try { name = new System.IO.DirectoryInfo(cwd).Name; }
             catch { name = cwd; }
-            items.Insert(0, new(cwd, $"{name}  —  {cwd}  (cwd)", "Current directory", false, null, "folder"));
+            items.Insert(0, new(cwd, $"{name}  —  {cwd}  (cwd)", "Lock to current directory", false, null, "folder"));
         }
 
         return items;
