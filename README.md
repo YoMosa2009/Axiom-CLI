@@ -52,12 +52,11 @@ Available models: `eidos` (Eidos 1, general-purpose reasoning) and `hepha` (Heph
 code-specialized) — the same aliases as the desktop app. `axiom code` uses the desktop app's
 Workplace Council default model unless `--model` is given.
 
-In chat:
-- Full-width layout with a dedicated multi-line prompt box and the active model labeled under it
-- Messages stack like a GUI chat (You → Axiom) with live activity statuses (Thinking, Running, Building, Task completed, …)
-- Type `/` for tools & commands (↑↓ + Enter); type `@` for recent folders to attach as agent workspaces
-- The agent can run shell commands, edit files, search, build, and download inside attached dirs
-- Assistant links are clickable (OSC-8); header shows `used / context` tokens across the full window
+In chat (`axiom chat` opens a self-drawn full-window TUI inside the terminal — not the host scrollbar):
+- Fixed header, app-managed scrollable transcript (PgUp/PgDn / Ctrl+↑↓), pinned prompt box at the bottom
+- GUI-style turns (You → Axiom) with live activity statuses (Thinking, Running, Building, Task completed, …)
+- Type `/` for tools & commands; type `@` for recent folders; model label + context under the prompt
+- Agent can run shell commands, edit files, search, build, and download inside attached workspaces
 
 
 ## How the council works

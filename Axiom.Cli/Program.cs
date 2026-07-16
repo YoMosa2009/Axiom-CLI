@@ -196,29 +196,9 @@ internal static class Program
         return AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).AllowEmpty());
     }
 
-    private sealed class ChatSession
-    {
-        public required OpenRouterChatService ChatService { get; init; }
-        public required string ModelId { get; set; }
-        public required string ModelLabel { get; set; }
-        public SessionToolSettings Tools { get; } = new();
-        public List<OpenRouterMessage> History { get; } = new();
-        public required WorkspaceSession Workspace { get; init; }
-        public required AgentToolExecutor ToolExecutor { get; init; }
-
-        public AgentLoop CreateAgent() => new(ChatService, ToolExecutor, Workspace, ModelId);
-
-        public (int Used, int Max) EstimateContext()
-        {
-            int max = ChatService.GetApproximateContextWindowTokens(ModelId);
-            string system = FoundationSystemPrompt.Apply("You are Axiom.");
-            int used = ChatService.EstimateConversationTokens(History, system);
-            return (used, max);
-        }
-    }
-
     private static async Task<int> RunChatAsync(string? modelOverride)
     {
+        // Update notice before entering the alt-screen TUI (so it isn't swallowed).
         await ShowUpdateNoticeIfAvailableAsync();
 
         using var db = new DatabaseService();
@@ -245,86 +225,18 @@ internal static class Program
             ToolExecutor = toolExecutor
         };
 
-        (int used, int max) = session.EstimateContext();
-        ConsoleUi.ShowWelcome(session.ModelLabel, session.Tools, used, max, session.Workspace.Roots);
-
-        int turnCount = 0;
-        while (true)
-        {
-            (used, max) = session.EstimateContext();
-            AnsiConsole.WriteLine();
-            string? input = ChatInput.ReadLine(
-                session.Tools,
-                new ChatInput.InputChrome
-                {
-                    ModelLabel = session.ModelLabel,
-                    UsedTokens = used,
-                    ContextWindowTokens = max,
-                    Placeholder = "Message Axiom…  (/ tools · @ folders · Enter to send)"
-                },
-                () => ChatInput.BuildSlashItems(session.Tools, ModelCatalog),
-                () => ChatInput.BuildFolderItems(session.Workspace.Recent.GetRecent()),
-                result => HandleMenuAction(result, session));
-
-            if (input == null)
-                break;
-            if (string.IsNullOrWhiteSpace(input))
-                continue;
-            if (input.Equals("exit", StringComparison.OrdinalIgnoreCase) || input.Equals("quit", StringComparison.OrdinalIgnoreCase))
-                break;
-
-            if (TryHandleSlashCommand(input, session))
-                continue;
-
-            // GUI-style transcript: user bubble, then assistant reply beneath it.
-            ConsoleUi.WriteUserMessage(input);
-            AttachPathsMentionedInMessage(input, session);
-
-            string grounded = await AugmentWithToolResultsAsync(input, session.Tools);
-            var thinking = new ConsoleUi.ThinkingIndicator(ActivityStatus.Thinking);
-            var stream = new ConsoleUi.TokenStream();
-            bool failed = false;
-
-            try
+        // Full-window alternate-screen TUI — host scrollbar is not part of the UX.
+        using var tui = new ChatTui();
+        return await tui.RunAsync(
+            session,
+            ModelCatalog,
+            handleSlash: (input, s) =>
             {
-                AgentLoop agent = session.CreateAgent();
-                AgentTurnResult result = await agent.RunAsync(
-                    grounded,
-                    session.History,
-                    onToken: token =>
-                    {
-                        thinking.Stop();
-                        stream.WriteToken(token);
-                    },
-                    onStatus: status => thinking.SetLabel(status),
-                    CancellationToken.None);
-
-                thinking.Stop();
-                stream.Complete();
-                ConsoleUi.WriteTurnSummary(
-                    ActivityStatus.SummarizeTurn(result.Elapsed, result.ToolCallCount, result.Failed));
-
-                turnCount++;
-                (used, max) = session.EstimateContext();
-                ConsoleUi.StatusFooter(session.ModelLabel, session.Tools, turnCount, used, max);
-            }
-            catch (Exception ex)
-            {
-                failed = true;
-                thinking.Stop();
-                stream.Complete();
-                ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(TimeSpan.Zero, 0, failed: true));
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Error:[/] {ex.Message.EscapeMarkup()}");
-            }
-            finally
-            {
-                thinking.Dispose();
-                stream.Dispose();
-                _ = failed;
-            }
-        }
-
-        return 0;
+                TryHandleSlashCommand(input, s, tui.Notify, tui.ClearTranscript);
+                return Task.CompletedTask;
+            },
+            augmentTools: async (input, s) => await AugmentWithToolResultsAsync(input, s.Tools),
+            attachPaths: AttachPathsMentionedInMessage);
     }
 
     private static void AttachPathsMentionedInMessage(string input, ChatSession session)
@@ -334,30 +246,8 @@ internal static class Program
             string path = match.Groups["path"].Value;
             if (session.Workspace.TryAttach(path))
             {
-                AnsiConsole.MarkupLine(
-                    $"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Attached workspace:[/] [{AxiomTheme.Hex(AxiomTheme.Gold)}]{path.EscapeMarkup()}[/]");
-            }
-        }
-    }
-
-    private static void HandleMenuAction(ChatInput.MenuResult result, ChatSession session)
-    {
-        if (result.Kind == "toggle-tool" && !string.IsNullOrWhiteSpace(result.ToolName))
-            session.Tools.TryToggle(result.ToolName, out _);
-
-        if (result.Kind == "attach-folder" && !string.IsNullOrWhiteSpace(result.FolderPath))
-        {
-            if (session.Workspace.TryAttach(result.FolderPath))
-            {
-                // Confirmation is visible via workspace header after art clear / next footer.
-                // Keep editor clean — a single soft status line:
-                try
-                {
-                    int top = Console.CursorTop;
-                    // Don't break the input block; remember silently + soft beep-free confirm after submit.
-                    _ = top;
-                }
-                catch { }
+                // Feedback is surfaced by ChatTui when attach is used via @; path-in-message
+                // attaches quietly so the transcript stays clean.
             }
         }
     }
@@ -460,10 +350,22 @@ internal static class Program
         return 0;
     }
 
-    private static bool TryHandleSlashCommand(string input, ChatSession session)
+    private static bool TryHandleSlashCommand(
+        string input,
+        ChatSession session,
+        Action<string>? notify = null,
+        Action? clearTranscript = null)
     {
         if (!input.StartsWith('/'))
             return false;
+
+        void Say(string msg)
+        {
+            if (notify != null)
+                notify(msg);
+            else
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]{msg.EscapeMarkup()}[/]");
+        }
 
         string[] parts = input.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         switch (parts[0].ToLowerInvariant())
@@ -475,11 +377,13 @@ internal static class Program
                         out bool enabled))
                 {
                     if (session.Tools.TrySet(parts[1], enabled))
-                        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]{parts[1]}[/] set to {(enabled ? "on" : "off")}.");
+                        Say($"{parts[1]} set to {(enabled ? "on" : "off")}.");
                     else
-                        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Unknown tool:[/] {parts[1].EscapeMarkup()}");
+                        Say($"Unknown tool: {parts[1]}");
                 }
-                ConsoleUi.ShowToolsPanel(session.Tools);
+                foreach ((string name, bool on) in session.Tools.AsList())
+                    Say($"  {(on ? "●" : "○")} {name}");
+                Say("Tip: type / then ↑↓ + Enter to toggle tools.");
                 return true;
 
             case "/model":
@@ -489,36 +393,37 @@ internal static class Program
                     {
                         session.ModelId = match.Id;
                         session.ModelLabel = match.Label;
-                        AnsiConsole.MarkupLine($"Switched to [{AxiomTheme.Hex(AxiomTheme.Gold)}]{match.Label}[/].");
+                        Say($"Switched to {match.Label}.");
                     }
                     else
                     {
-                        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Unknown model:[/] {parts[1].EscapeMarkup()}");
+                        Say($"Unknown model: {parts[1]}");
                     }
                 }
-                ConsoleUi.ShowModelPanel(session.ModelLabel, ModelCatalog);
+                foreach (var m in ModelCatalog)
+                    Say($"  {(m.Label == session.ModelLabel ? "●" : "○")} {m.Label} — {m.Description}");
                 return true;
 
             case "/workspace":
             case "/ws":
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.TextPrimary)}]Attached workspaces:[/]");
+                Say("Attached workspaces:");
                 foreach (string root in session.Workspace.Roots)
-                    AnsiConsole.MarkupLine($"  [{AxiomTheme.Hex(AxiomTheme.Gold)}]•[/] {root.EscapeMarkup()}");
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Tip: type @ to pick a recent folder, or paste a path in your message.[/]");
+                    Say($"  • {root}");
+                Say("Tip: type @ to pick a recent folder, or paste a path in your message.");
                 return true;
 
             case "/clear":
                 session.History.Clear();
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Conversation cleared.[/]");
+                clearTranscript?.Invoke();
+                Say("Conversation cleared.");
                 return true;
 
             case "/help":
-                AnsiConsole.MarkupLine(
-                    $"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}][/][{AxiomTheme.Hex(AxiomTheme.Gold)}]/[/][{AxiomTheme.Hex(AxiomTheme.SystemMuted)}] tools  [/][{AxiomTheme.Hex(AxiomTheme.Gold)}]@[/][{AxiomTheme.Hex(AxiomTheme.SystemMuted)}] folders  /workspace  /model  /clear  exit[/]");
+                Say("/ tools  ·  @ folders  ·  /workspace  ·  /model  ·  /clear  ·  PgUp/PgDn scroll  ·  exit");
                 return true;
 
             default:
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Unknown command:[/] {parts[0].EscapeMarkup()}");
+                Say($"Unknown command: {parts[0]}");
                 return true;
         }
     }
