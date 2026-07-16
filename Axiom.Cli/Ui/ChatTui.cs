@@ -20,7 +20,8 @@ namespace Axiom.Cli.Ui;
 //   [ activity line ]
 //   [ fixed prompt box + model line ]
 //
-// PgUp/PgDn / Ctrl+↑↓ / mouse wheel scroll the transcript. The prompt stays pinned.
+// Scroll: ↑↓ (empty input) · Shift+↑↓ · PgUp/PgDn · Ctrl+↑↓ · mouse wheel.
+// Transcript is app-managed (alt-screen); prompt stays pinned.
 internal sealed class ChatTui : IDisposable
 {
     private enum Role { User, Assistant, System, Status, Error }
@@ -311,33 +312,23 @@ internal sealed class ChatTui : IDisposable
 
     private async Task<bool> HandleKeyAsync(ConsoleKeyInfo key)
     {
-        // Mouse wheel (SGR / legacy) arrives as special keys on some hosts — treat as scroll when possible.
-        if (key.Key == ConsoleKey.PageUp || (key.Key == ConsoleKey.UpArrow && key.Modifiers.HasFlag(ConsoleModifiers.Control)))
+        MenuMode mode = GetMenuMode(_input, _cursor);
+
+        // Mouse wheel / incomplete ESC sequences (SGR mouse) when mouse tracking is on.
+        if (TryConsumeMouseWheel(key, out int wheelDelta))
         {
-            _scrollFromBottom = Math.Min(_scrollFromBottom + Math.Max(3, ViewportHeight() / 3), MaxScroll());
+            ScrollBy(wheelDelta);
             return true;
         }
-        if (key.Key == ConsoleKey.PageDown || (key.Key == ConsoleKey.DownArrow && key.Modifiers.HasFlag(ConsoleModifiers.Control)))
-        {
-            _scrollFromBottom = Math.Max(0, _scrollFromBottom - Math.Max(3, ViewportHeight() / 3));
+
+        // Transcript scroll — works while idle, typing (Shift), or generating.
+        if (TryHandleScrollKey(key, mode))
             return true;
-        }
-        if (key.Key == ConsoleKey.Home && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        {
-            _scrollFromBottom = MaxScroll();
-            return true;
-        }
-        if (key.Key == ConsoleKey.End && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        {
-            _scrollFromBottom = 0;
-            return true;
-        }
 
         if (_busy)
             return false; // ignore typing while generating (scroll still handled above)
 
-        // Slash / @ menu navigation
-        MenuMode mode = GetMenuMode(_input, _cursor);
+        // Slash / @ menu navigation (only when not scrolling)
         if (mode != MenuMode.None && key.Key is ConsoleKey.UpArrow or ConsoleKey.DownArrow)
         {
             var items = GetMenuItems(mode);
@@ -439,6 +430,141 @@ internal sealed class ChatTui : IDisposable
             _cursor++;
             _menuIndex = 0;
             return true;
+        }
+
+        return false;
+    }
+
+    private bool TryHandleScrollKey(ConsoleKeyInfo key, MenuMode mode)
+    {
+        bool shift = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
+        bool ctrl = key.Modifiers.HasFlag(ConsoleModifiers.Control);
+        bool alt = key.Modifiers.HasFlag(ConsoleModifiers.Alt);
+        bool emptyInput = string.IsNullOrEmpty(_input);
+        // Plain ↑↓ scroll when not in a menu and the input box is empty (or Shift/Alt always).
+        bool arrowScrollOk = mode == MenuMode.None && (emptyInput || shift || alt);
+
+        int lineStep = 1;
+        int blockStep = Math.Max(3, ViewportHeight() / 3);
+        int pageStep = Math.Max(5, ViewportHeight() * 2 / 3);
+
+        if (key.Key == ConsoleKey.PageUp
+            || (key.Key == ConsoleKey.UpArrow && ctrl)
+            || (key.Key == ConsoleKey.UpArrow && arrowScrollOk))
+        {
+            int step = key.Key == ConsoleKey.PageUp || ctrl ? pageStep
+                : shift || alt ? blockStep
+                : lineStep;
+            // Empty-input plain arrow: use a comfortable block so history is usable.
+            if (key.Key == ConsoleKey.UpArrow && emptyInput && !shift && !alt && !ctrl)
+                step = blockStep;
+            ScrollBy(step);
+            return true;
+        }
+
+        if (key.Key == ConsoleKey.PageDown
+            || (key.Key == ConsoleKey.DownArrow && ctrl)
+            || (key.Key == ConsoleKey.DownArrow && arrowScrollOk))
+        {
+            int step = key.Key == ConsoleKey.PageDown || ctrl ? pageStep
+                : shift || alt ? blockStep
+                : lineStep;
+            if (key.Key == ConsoleKey.DownArrow && emptyInput && !shift && !alt && !ctrl)
+                step = blockStep;
+            ScrollBy(-step);
+            return true;
+        }
+
+        if (key.Key == ConsoleKey.Home && ctrl)
+        {
+            _scrollFromBottom = MaxScroll();
+            return true;
+        }
+
+        if (key.Key == ConsoleKey.End && ctrl)
+        {
+            _scrollFromBottom = 0;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ScrollBy(int deltaLines)
+    {
+        if (deltaLines == 0)
+            return;
+        int max = MaxScroll();
+        _scrollFromBottom = Math.Clamp(_scrollFromBottom + deltaLines, 0, max);
+    }
+
+    // SGR mouse wheel: ESC [ < 64 ; col ; row M  (up) / 65 (down). ReadKey often delivers
+    // Escape first; drain the rest of the sequence when available.
+    private bool TryConsumeMouseWheel(ConsoleKeyInfo key, out int delta)
+    {
+        delta = 0;
+        if (key.Key != ConsoleKey.Escape && key.KeyChar != '\u001b')
+            return false;
+
+        // Peek/build sequence from buffered keys (non-blocking).
+        var sb = new StringBuilder();
+        sb.Append('\u001b');
+        DateTime deadline = DateTime.UtcNow.AddMilliseconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!Console.KeyAvailable)
+            {
+                System.Threading.Thread.Sleep(1);
+                continue;
+            }
+            ConsoleKeyInfo next = Console.ReadKey(intercept: true);
+            sb.Append(next.KeyChar == '\0' ? string.Empty : next.KeyChar.ToString());
+            // Also append if it's a letter/number from CSI
+            if (next.KeyChar is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or 'M' or 'm' or '~')
+                break;
+            if (sb.Length > 64)
+                break;
+        }
+
+        string seq = sb.ToString();
+        // SGR wheel: \x1b[<64;…M or \x1b[<65;…M  (sometimes button+32 etc.)
+        if (seq.Contains("<64;", StringComparison.Ordinal) || seq.Contains("<64M", StringComparison.Ordinal))
+        {
+            delta = Math.Max(3, ViewportHeight() / 4);
+            return true;
+        }
+        if (seq.Contains("<65;", StringComparison.Ordinal) || seq.Contains("<65M", StringComparison.Ordinal))
+        {
+            delta = -Math.Max(3, ViewportHeight() / 4);
+            return true;
+        }
+        // Legacy X10 mouse: \x1b[M Cb Cx Cy  where wheel up Cb=64, down=65 (with space offset: 96/97)
+        if (seq.Length >= 6 && seq.StartsWith("\u001b[M", StringComparison.Ordinal))
+        {
+            int cb = seq[3];
+            if (cb is 64 or 96) { delta = Math.Max(3, ViewportHeight() / 4); return true; }
+            if (cb is 65 or 97) { delta = -Math.Max(3, ViewportHeight() / 4); return true; }
+        }
+
+        // Not a wheel event — if we ate a lone Escape meant for menu cancel, treat as Esc.
+        if (seq is "\u001b" or "\u001b\u001b")
+        {
+            // Fake Esc handling path: return false and let Esc handler… but we already consumed.
+            // Manually clear menus.
+            if (!_busy)
+            {
+                MenuMode mode = GetMenuMode(_input, _cursor);
+                if (mode == MenuMode.Slash)
+                {
+                    _input = string.Empty;
+                    _cursor = 0;
+                }
+                else if (mode == MenuMode.At)
+                {
+                    RemoveAtToken();
+                }
+            }
+            return true; // consumed Esc
         }
 
         return false;
@@ -664,12 +790,11 @@ internal sealed class ChatTui : IDisposable
             while (Console.KeyAvailable)
             {
                 ConsoleKeyInfo k = Console.ReadKey(intercept: true);
-                if (k.Key == ConsoleKey.PageUp || (k.Key == ConsoleKey.UpArrow && k.Modifiers.HasFlag(ConsoleModifiers.Control)))
-                    _scrollFromBottom = Math.Min(_scrollFromBottom + Math.Max(3, ViewportHeight() / 3), MaxScroll());
-                else if (k.Key == ConsoleKey.PageDown || (k.Key == ConsoleKey.DownArrow && k.Modifiers.HasFlag(ConsoleModifiers.Control)))
-                    _scrollFromBottom = Math.Max(0, _scrollFromBottom - Math.Max(3, ViewportHeight() / 3));
-                else if (k.Key == ConsoleKey.End && k.Modifiers.HasFlag(ConsoleModifiers.Control))
-                    _scrollFromBottom = 0;
+                MenuMode mode = GetMenuMode(_input, _cursor);
+                if (TryConsumeMouseWheel(k, out int wheelDelta))
+                    ScrollBy(wheelDelta);
+                else
+                    TryHandleScrollKey(k, mode);
                 Paint();
             }
             await Task.Delay(20);
@@ -809,7 +934,7 @@ internal sealed class ChatTui : IDisposable
         // Scroll hint when not at bottom
         if (_scrollFromBottom > 0 && viewportH > 0)
         {
-            string hint = $" ↑ {_scrollFromBottom} more · PgDn / Ctrl+↓ ";
+            string hint = $" ↑ scrolled {_scrollFromBottom} · ↓ or PgDn to return ";
             int row = headerH + viewportH - 1;
             rows[row] = Ansi.Fg(AxiomTheme.Gold) + Ansi.ClipPad(hint.PadLeft((w + hint.Length) / 2).PadRight(w), w) + Ansi.Reset;
         }
@@ -824,7 +949,7 @@ internal sealed class ChatTui : IDisposable
         }
         else
         {
-            string tip = " PgUp/PgDn scroll transcript  ·  / tools  ·  @ folders  ·  exit ";
+            string tip = " ↑↓ scroll  ·  PgUp/PgDn  ·  / tools  ·  @ folders  ·  exit ";
             rows[activityRow] = Ansi.Fg(AxiomTheme.SystemMuted) + Ansi.ClipPad(tip, w) + Ansi.Reset;
         }
 
@@ -982,6 +1107,7 @@ internal sealed class ChatTui : IDisposable
                 case Role.User:
                     lines.Add(Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold + "You" + Ansi.Reset);
                     lines.Add(Ansi.Fg(AxiomTheme.Border) + new string('─', Math.Max(8, w)) + Ansi.Reset);
+                    // User text plain (their typing); still wrap cleanly.
                     foreach (string wl in Wrap(msg.Text, w))
                         lines.Add(Ansi.Fg(AxiomTheme.TextPrimary) + wl + Ansi.Reset);
                     lines.Add(string.Empty);
@@ -989,8 +1115,8 @@ internal sealed class ChatTui : IDisposable
                 case Role.Assistant:
                     lines.Add(Ansi.Fg(AxiomTheme.Builder) + Ansi.Bold + "Axiom" + Ansi.Reset);
                     lines.Add(Ansi.Fg(AxiomTheme.Border) + new string('─', Math.Max(8, w)) + Ansi.Reset);
-                    foreach (string wl in Wrap(msg.Text, w))
-                        lines.Add(Ansi.Fg(AxiomTheme.TextPrimary) + wl + Ansi.Reset);
+                    // Markdown rendering: **bold**, *italic*, `code`, fences, lists, headers, $math$.
+                    lines.AddRange(MarkdownAnsi.RenderLines(msg.Text, w, AxiomTheme.TextPrimary));
                     lines.Add(string.Empty);
                     break;
                 case Role.Status:
@@ -1002,8 +1128,8 @@ internal sealed class ChatTui : IDisposable
                     lines.Add(string.Empty);
                     break;
                 default:
-                    foreach (string wl in Wrap(msg.Text, w))
-                        lines.Add(Ansi.Fg(AxiomTheme.SystemMuted) + wl + Ansi.Reset);
+                    // System / Architect / Critic dumps — light markdown so ** and ` still work.
+                    lines.AddRange(MarkdownAnsi.RenderLines(msg.Text, w, AxiomTheme.SystemMuted));
                     lines.Add(string.Empty);
                     break;
             }

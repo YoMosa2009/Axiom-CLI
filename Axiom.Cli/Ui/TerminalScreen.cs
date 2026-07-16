@@ -35,11 +35,14 @@ internal sealed class TerminalScreen : IDisposable
         Console.Write(Ansi.EnterAltScreen);
         Console.Write(Ansi.HideCursor);
 
-        // Mouse mode is optional — it can interfere with paste on some Linux terminals.
-        // Enable with AXIOM_CLI_MOUSE=1 when desired.
-        if (string.Equals(Environment.GetEnvironmentVariable("AXIOM_CLI_MOUSE"), "1", StringComparison.Ordinal))
+        // Mouse wheel scrolls the transcript. Disable with AXIOM_CLI_MOUSE=0 if paste glitches.
+        string? mouseEnv = Environment.GetEnvironmentVariable("AXIOM_CLI_MOUSE");
+        bool enableMouse = !string.Equals(mouseEnv, "0", StringComparison.Ordinal);
+        if (enableMouse)
         {
             Console.Write(Ansi.EnableMouse);
+            // Also enable button-event tracking variants used by Windows Terminal / xterm for wheel.
+            Console.Write("\u001b[?1002h\u001b[?1003h");
             _mouseEnabled = true;
         }
 
@@ -56,7 +59,10 @@ internal sealed class TerminalScreen : IDisposable
             return;
 
         if (_mouseEnabled)
+        {
+            Console.Write("\u001b[?1003l\u001b[?1002l");
             Console.Write(Ansi.DisableMouse);
+        }
         Console.Write(Ansi.ShowCursor);
         Console.Write(Ansi.LeaveAltScreen);
         // Reset SGR so the user's shell doesn't inherit gold/bold colors.

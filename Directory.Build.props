@@ -4,7 +4,7 @@
     <!-- Single source of truth for the version: bump this for every release so it matches the
          release tag (e.g. tag v0.2.0 -> Version 0.2.0). release.yml also derives the tag's
          version and passes it in, so a tag push always wins over whatever is checked in here. -->
-    <Version>0.8.0</Version>
+    <Version>0.8.1</Version>
     <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
   </PropertyGroup>
 
