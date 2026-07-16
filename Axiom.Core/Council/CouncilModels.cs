@@ -1,14 +1,17 @@
+using System.Collections.Generic;
 using Axiom.Core.Workspace;
 
 namespace Axiom.Core.Council
 {
     // Session tool rails the council pipeline may use (mirrors desktop Workplace toggles).
     // Static validation always runs when Builder output looks like code; sandbox execution
-    // is gated by SandboxEnabled.
+    // is gated by SandboxEnabled. Agentic tools (write_file/shell) are provided by the host
+    // when AgentToolExecutor is wired into CouncilOrchestrator.
     public sealed record CouncilToolOptions(
         bool SandboxEnabled = false,
         bool CalculatorEnabled = true,
-        bool WebSearchEnabled = true)
+        bool WebSearchEnabled = true,
+        bool AgenticBuilderEnabled = true)
     {
         public static CouncilToolOptions Default { get; } = new();
     }
@@ -35,5 +38,8 @@ namespace Axiom.Core.Council
         bool Success,
         string FinalText,
         WorkspacePatchProposal? Patch,
-        CriticReport FinalCriticReport);
+        CriticReport FinalCriticReport,
+        int ToolCallCount = 0,
+        IReadOnlyList<string>? ChangedFiles = null,
+        string? ApplySummary = null);
 }

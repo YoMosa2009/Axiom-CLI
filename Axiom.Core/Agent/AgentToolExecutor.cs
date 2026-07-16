@@ -22,6 +22,8 @@ namespace Axiom.Core.Agent
 
         private readonly WorkspaceSession _workspace;
         private readonly WebSearchService _webSearch = new();
+        private readonly List<string> _writtenPaths = new();
+        private readonly object _writeGate = new();
 
         public AgentToolExecutor(WorkspaceSession workspace)
         {
@@ -30,6 +32,17 @@ namespace Axiom.Core.Agent
 
         /// <summary>When false, web_search is omitted from the tool list and rejected if called.</summary>
         public bool WebSearchEnabled { get; set; } = true;
+
+        /// <summary>Absolute paths successfully written via write_file since last <see cref="ClearWrittenPaths"/>.</summary>
+        public IReadOnlyList<string> WrittenPaths
+        {
+            get { lock (_writeGate) return _writtenPaths.ToList(); }
+        }
+
+        public void ClearWrittenPaths()
+        {
+            lock (_writeGate) _writtenPaths.Clear();
+        }
 
         public IReadOnlyList<OpenRouterToolDefinition> GetToolDefinitions()
         {
@@ -278,6 +291,11 @@ namespace Axiom.Core.Agent
 
             string content = GetString(root, "content");
             File.WriteAllText(path, content ?? string.Empty);
+            lock (_writeGate)
+            {
+                _writtenPaths.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+                _writtenPaths.Add(path);
+            }
             return $"Wrote {content?.Length ?? 0} chars to {path}";
         }
 

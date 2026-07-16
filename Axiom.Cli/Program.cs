@@ -291,38 +291,67 @@ internal static class Program
         chatService.SetApiKey(apiKey);
         IChatPipeline pipeline = new CloudChatPipeline(chatService, councilModelId);
         var workspaceAccess = new WorkspaceAccessService();
-        var orchestrator = new CouncilOrchestrator(pipeline, councilModelId, workspaceAccess);
 
         string root = Environment.CurrentDirectory;
+        // Agentic Builder tools are sandboxed to this folder (same as chat exclusive lock).
+        var workspaceSession = new WorkspaceSession(attachCwd: false);
+        workspaceSession.TrySetExclusive(root, remember: false);
+        var agentTools = new AgentToolExecutor(workspaceSession) { WebSearchEnabled = true };
+        var orchestrator = new CouncilOrchestrator(
+            pipeline,
+            councilModelId,
+            workspaceAccess,
+            sandbox: null,
+            chat: chatService,
+            agentTools: agentTools);
+
         ConnectedWorkspaceState workspaceState = workspaceAccess.CreateFolderConnection(root);
+        // Do not auto-apply patches here — show diffs first. write_file tools still write live.
+        workspaceState.AutoApplyCodebaseChanges = false;
         string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
         AnsiConsole.MarkupLine($"[{muted}]Connected workspace:[/] {root} [{muted}]({workspaceState.IndexedFileCount} files)[/]");
         AnsiConsole.MarkupLine($"[{muted}]Model:[/] [{AxiomTheme.Hex(AxiomTheme.Gold)}]{councilModelLabel}[/]");
+        AnsiConsole.MarkupLine($"[{muted}]Builder tools:[/] write_file · run_shell · list_dir · read_file (live)");
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        // axiom code path: sandbox on so Critic gets runtime evidence for coding tasks.
-        var codeTools = new CouncilToolOptions(SandboxEnabled: true);
+        var codeTools = new CouncilToolOptions(SandboxEnabled: true, AgenticBuilderEnabled: true);
         CouncilResult result = await orchestrator.RunAsync(
             new CouncilRequest(task, workspaceState, codeTools),
             CouncilConsoleRenderer.Create(),
             CancellationToken.None);
         sw.Stop();
 
-        if (!result.Success || result.Patch == null)
+        if (!result.Success
+            && result.Patch == null
+            && result.ToolCallCount == 0
+            && string.IsNullOrWhiteSpace(result.FinalText))
         {
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]The council could not produce an applyable patch.[/]");
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]The council could not complete the task.[/]");
+            ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, 0, failed: true));
+            return 1;
+        }
+
+        if (result.ToolCallCount > 0)
+        {
+            AnsiConsole.MarkupLine(
+                $"[{muted}]Builder tool calls:[/] {result.ToolCallCount} " +
+                $"(files may already be written under {root})");
+        }
+
+        if (result.Patch == null)
+        {
             if (!string.IsNullOrWhiteSpace(result.FinalText))
             {
                 ConsoleUi.WriteAssistantHeader();
                 LinkText.WriteWithLinks(result.FinalText);
                 Console.WriteLine();
             }
-            ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, 0, failed: true));
-            return 1;
+            ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, result.ToolCallCount));
+            return result.Success || result.ToolCallCount > 0 ? 0 : 1;
         }
 
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[bold {AxiomTheme.Hex(AxiomTheme.TextPrimary)}]Proposed changes:[/]");
+        AnsiConsole.MarkupLine($"[bold {AxiomTheme.Hex(AxiomTheme.TextPrimary)}]Proposed patch envelope:[/]");
         AnsiConsole.WriteLine();
         foreach (WorkspaceFilePatch filePatch in result.Patch.Files)
         {
@@ -333,12 +362,14 @@ internal static class Program
             AnsiConsole.WriteLine();
         }
 
-        ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, 0));
-        AnsiConsole.Markup($"Apply these changes? [{AxiomTheme.Hex(AxiomTheme.Success)}]y[/]/[{AxiomTheme.Hex(AxiomTheme.Error)}]n[/]: ");
+        ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, result.ToolCallCount));
+        AnsiConsole.Markup($"Apply patch envelope? [{AxiomTheme.Hex(AxiomTheme.Success)}]y[/]/[{AxiomTheme.Hex(AxiomTheme.Error)}]n[/]: ");
         string? answer = ReadLinePlain();
         if (!string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
         {
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Discarded — no files were changed.[/]");
+            AnsiConsole.MarkupLine(
+                $"[{muted}]Patch envelope discarded. " +
+                $"(Any write_file tool results already on disk were not rolled back.)[/]");
             return 0;
         }
 
@@ -513,8 +544,9 @@ internal static class Program
                 Say("  /clear                Clear the current chat transcript");
                 Say("  PgUp/PgDn             Scroll chat history");
                 Say("  exit                  Leave chat");
-                Say("Tools: council (Architect/Builder/Critic + static validation) · web-search · calculator · sandbox");
-                Say("  When sandbox is on, council Critic receives Python/Java execution logs.");
+                Say("Tools: council (Architect → agentic Builder with file/shell tools → Critic) · web-search · calculator · sandbox");
+                Say("  Builder writes real files in the locked workspace (write_file / run_shell), not chat-only.");
+                Say("  When sandbox is on, council Critic also receives Python/Java execution logs.");
                 return true;
 
             default:

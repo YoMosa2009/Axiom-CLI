@@ -162,7 +162,7 @@ internal sealed class ChatTui : IDisposable
             PushSystem("OpenRouter API key saved.");
         }
 
-        PushSystem($"Axiom ready · {session.ModelLabel} · council {(session.Tools.CouncilEnabled ? "on" : "off")} · /help · @ or /browse for folders");
+        PushSystem($"Axiom ready · {session.ModelLabel} · council {(session.Tools.CouncilEnabled ? "on (agentic Builder)" : "off")} · /help · @ or /browse for folders");
 
         using var animCts = new CancellationTokenSource();
         var animTask = AnimateLoopAsync(animCts.Token);
@@ -599,8 +599,10 @@ internal sealed class ChatTui : IDisposable
             try
             {
                 // Full folder connection (index + ConnectionKind=Folder) so council never sees "None".
+                // Auto-apply lets patch envelopes land on disk after Critic (write_file already writes live).
                 var access = new WorkspaceAccessService();
                 wsState = access.CreateFolderConnection(_session.Workspace.PrimaryRoot);
+                wsState.AutoApplyCodebaseChanges = true;
                 SetActivity($"Workspace · {wsState.IndexedFileCount} file(s) indexed");
                 Paint();
             }
@@ -610,6 +612,7 @@ internal sealed class ChatTui : IDisposable
                 wsState = new ConnectedWorkspaceState
                 {
                     CodebaseEditAccessEnabled = true,
+                    AutoApplyCodebaseChanges = true,
                     ConnectionKind = WorkspaceConnectionKind.Folder.ToString(),
                     RootPath = _session.Workspace.PrimaryRoot,
                     StatusMessage = "Folder connected (index incomplete: " + ex.Message + ")"
@@ -628,20 +631,27 @@ internal sealed class ChatTui : IDisposable
         sw.Stop();
 
         string final = result.FinalText ?? string.Empty;
-        if (result.Patch != null)
+        if (result.ChangedFiles is { Count: > 0 })
         {
-            // Surface patch text for the user; applying still goes through axiom code for review,
-            // but chat council can still propose structured output.
-            final = string.IsNullOrWhiteSpace(final) ? result.Patch.RawText : final;
+            var files = string.Join("\n", result.ChangedFiles.Select(f => "  • " + f));
+            string applyNote = string.IsNullOrWhiteSpace(result.ApplySummary)
+                ? $"Files written to workspace:\n{files}"
+                : $"{result.ApplySummary}\n{files}";
+            PushSystem(applyNote);
         }
 
         PushAssistant(string.IsNullOrWhiteSpace(final) ? "(Council produced no text.)" : final);
         _session.History.Add(new OpenRouterMessage("user", grounded));
         _session.History.Add(new OpenRouterMessage("assistant", final));
 
+        int toolish = Math.Max(3, result.ToolCallCount); // roles + tool calls
         string summary = result.Success
-            ? ActivityStatus.SummarizeTurn(sw.Elapsed, 3) // three roles
-            : ActivityStatus.SummarizeTurn(sw.Elapsed, 3, failed: true);
+            ? ActivityStatus.SummarizeTurn(sw.Elapsed, toolish)
+            : ActivityStatus.SummarizeTurn(sw.Elapsed, toolish, failed: true);
+        if (result.ToolCallCount > 0)
+            summary += $" · {result.ToolCallCount} tool call(s)";
+        if (result.ChangedFiles is { Count: > 0 })
+            summary += $" · {result.ChangedFiles.Count} file(s) on disk";
         if (result.FinalCriticReport != null && result.FinalCriticReport.HasIssues)
             summary += $" · Critic: {result.FinalCriticReport.FindingsCount} issue(s)";
         PushStatus("Council · " + summary);

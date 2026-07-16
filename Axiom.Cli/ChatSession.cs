@@ -24,16 +24,23 @@ internal sealed class ChatSession
 
     public CouncilOrchestrator CreateCouncil()
     {
-        // Council uses the same cloud pipeline abstraction as the desktop Workplace council,
-        // plus Core sandbox services for Critic pre-flagged evidence when sandbox is enabled.
+        // Council: Architect → agentic Builder (file/shell tools) → Critic (+ static validation).
+        ToolExecutor.WebSearchEnabled = Tools.WebSearchEnabled;
         var pipeline = new CloudChatPipeline(ChatService, ModelId);
-        return new CouncilOrchestrator(pipeline, ModelId);
+        return new CouncilOrchestrator(
+            pipeline,
+            ModelId,
+            workspace: null,
+            sandbox: null,
+            chat: ChatService,
+            agentTools: ToolExecutor);
     }
 
     public CouncilToolOptions CouncilTools() => new(
         SandboxEnabled: Tools.SandboxEnabled,
         CalculatorEnabled: Tools.CalculatorEnabled,
-        WebSearchEnabled: Tools.WebSearchEnabled);
+        WebSearchEnabled: Tools.WebSearchEnabled,
+        AgenticBuilderEnabled: true);
 
     public (int Used, int Max) EstimateContext()
     {
