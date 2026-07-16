@@ -21,12 +21,6 @@ case "$arch" in
   *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
 esac
 
-# osx-x64 and osx-arm64 both ship; linux only ships x64 for now.
-if [ "$platform" = "linux" ] && [ "$rid_arch" = "arm64" ]; then
-  echo "linux-arm64 is not yet published. Please build from source: https://github.com/$REPO" >&2
-  exit 1
-fi
-
 asset="axiom-cli-${platform}-${rid_arch}.tar.gz"
 api_url="https://api.github.com/repos/$REPO/releases/latest"
 
@@ -47,12 +41,21 @@ curl -fsSL "$download_url" -o "$tmp_dir/$asset"
 echo "Extracting..."
 tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
 
+# Locate the binary whether the archive is flat or nested one level.
+axiom_bin="$(find "$tmp_dir" -type f -name axiom | head -n 1)"
+if [ -z "$axiom_bin" ]; then
+  echo "Archive did not contain an 'axiom' binary." >&2
+  exit 1
+fi
+
 mkdir -p "$INSTALL_DIR"
-cp "$tmp_dir/axiom" "$INSTALL_DIR/axiom"
+cp "$axiom_bin" "$INSTALL_DIR/axiom"
 chmod +x "$INSTALL_DIR/axiom"
-# The native SQLite library ships beside the executable, not bundled into it.
-find "$tmp_dir" -maxdepth 1 -name '*.dylib' -o -name '*.so' | while IFS= read -r lib; do
-  cp "$lib" "$INSTALL_DIR/"
+
+# Copy any native libraries that ship beside the binary (SQLite, etc.).
+bin_dir="$(dirname "$axiom_bin")"
+find "$bin_dir" -maxdepth 1 \( -name '*.dylib' -o -name '*.so' -o -name '*.so.*' \) 2>/dev/null | while IFS= read -r lib; do
+  [ -n "$lib" ] && cp "$lib" "$INSTALL_DIR/" || true
 done
 
 echo "Installed axiom to $INSTALL_DIR/axiom"

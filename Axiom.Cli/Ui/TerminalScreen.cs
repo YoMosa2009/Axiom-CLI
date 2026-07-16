@@ -6,9 +6,11 @@ namespace Axiom.Cli.Ui;
 
 // Owns the console as a fixed canvas inside the alternate screen buffer so the host
 // scrollbar / scrollback is not part of the UX — we paint every row ourselves.
+// Works on Windows Terminal, macOS Terminal/iTerm2, and Linux VTE/xterm-family hosts.
 internal sealed class TerminalScreen : IDisposable
 {
     private bool _active;
+    private bool _mouseEnabled;
     private string[] _last = Array.Empty<string>();
 
     public int Width { get; private set; } = 80;
@@ -21,14 +23,26 @@ internal sealed class TerminalScreen : IDisposable
 
         try
         {
-            Console.OutputEncoding = Encoding.UTF8;
-            Console.InputEncoding = Encoding.UTF8;
+            // UTF-8 is required for box drawing + status glyphs on all platforms.
+            Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            Console.InputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
         }
-        catch { /* ignore */ }
+        catch { /* some hosts lock encoding */ }
+
+        // Sync console output so paint frames aren't delayed by block buffering (common on Unix).
+        try { Console.Out.Flush(); } catch { /* ignore */ }
 
         Console.Write(Ansi.EnterAltScreen);
         Console.Write(Ansi.HideCursor);
-        Console.Write(Ansi.EnableMouse);
+
+        // Mouse mode is optional — it can interfere with paste on some Linux terminals.
+        // Enable with AXIOM_CLI_MOUSE=1 when desired.
+        if (string.Equals(Environment.GetEnvironmentVariable("AXIOM_CLI_MOUSE"), "1", StringComparison.Ordinal))
+        {
+            Console.Write(Ansi.EnableMouse);
+            _mouseEnabled = true;
+        }
+
         try { Console.CursorVisible = false; } catch { /* ignore */ }
 
         _active = true;
@@ -41,11 +55,16 @@ internal sealed class TerminalScreen : IDisposable
         if (!_active)
             return;
 
-        Console.Write(Ansi.DisableMouse);
+        if (_mouseEnabled)
+            Console.Write(Ansi.DisableMouse);
         Console.Write(Ansi.ShowCursor);
         Console.Write(Ansi.LeaveAltScreen);
+        // Reset SGR so the user's shell doesn't inherit gold/bold colors.
+        Console.Write(Ansi.Reset);
         try { Console.CursorVisible = true; } catch { /* ignore */ }
+        try { Console.Out.Flush(); } catch { /* ignore */ }
         _active = false;
+        _mouseEnabled = false;
     }
 
     public void Dispose() => Leave();
@@ -54,17 +73,31 @@ internal sealed class TerminalScreen : IDisposable
     {
         try
         {
-            Width = Math.Max(60, Console.WindowWidth);
-            Height = Math.Max(16, Console.WindowHeight);
+            // On some Unix hosts WindowWidth/Height can be 0 until the first resize — fall back.
+            int w = Console.WindowWidth;
+            int h = Console.WindowHeight;
+            if (w <= 1)
+                w = TryEnvInt("COLUMNS", 80);
+            if (h <= 1)
+                h = TryEnvInt("LINES", 24);
+
+            Width = Math.Max(60, w);
+            Height = Math.Max(16, h);
         }
         catch
         {
-            Width = 100;
-            Height = 30;
+            Width = TryEnvInt("COLUMNS", 100);
+            Height = TryEnvInt("LINES", 30);
         }
 
         if (_last.Length != Height)
             _last = new string[Height];
+    }
+
+    private static int TryEnvInt(string name, int fallback)
+    {
+        string? v = Environment.GetEnvironmentVariable(name);
+        return int.TryParse(v, out int n) && n > 1 ? n : fallback;
     }
 
     public void ForceClear()
@@ -86,7 +119,6 @@ internal sealed class TerminalScreen : IDisposable
         for (int r = 0; r < h; r++)
         {
             string raw = r < rows.Count ? rows[r] ?? string.Empty : string.Empty;
-            // Ensure row fills width for visual block (ANSI codes allowed; pad based on visible len).
             string line = FitWidth(raw, w);
             if (r < _last.Length && string.Equals(_last[r], line, StringComparison.Ordinal))
                 continue;
@@ -99,7 +131,10 @@ internal sealed class TerminalScreen : IDisposable
         }
 
         if (sb.Length > 0)
+        {
             Console.Write(sb.ToString());
+            try { Console.Out.Flush(); } catch { /* ignore */ }
+        }
     }
 
     public void ShowCursorAt(int row1Based, int col1Based)
@@ -117,7 +152,6 @@ internal sealed class TerminalScreen : IDisposable
 
     private static string FitWidth(string text, int width)
     {
-        // If the string has no ANSI, fast path.
         if (text.IndexOf('\u001b') < 0)
         {
             if (text.Length > width)
@@ -128,7 +162,6 @@ internal sealed class TerminalScreen : IDisposable
         int vis = Ansi.VisibleLength(text);
         if (vis > width)
         {
-            // Truncate carefully is hard with ANSI; fall back to stripping for overflow rows.
             string plain = StripAnsi(text);
             if (plain.Length > width)
                 plain = plain[..Math.Max(0, width - 1)] + "…";

@@ -7,9 +7,12 @@ using System.Reflection;
 
 namespace Axiom.Cli;
 
-// Spawns an interactive chat session in a dedicated console window so the agent owns the full
-// terminal surface (like Claude Code / Codex), instead of sharing a cluttered host shell.
+// Optionally opens chat in a dedicated terminal window so the TUI owns the surface.
 // Ownership is marked with AXIOM_CLI_OWNED so the child never re-spawns itself.
+//
+// Windows: prefer Windows Terminal / PowerShell in a new window.
+// macOS / Linux: prefer a new terminal tab/window when a known host is available; otherwise
+// fall through and run the full-window TUI in the current terminal (same experience).
 internal static class SessionLauncher
 {
     public const string OwnedEnvironmentVariable = "AXIOM_CLI_OWNED";
@@ -30,10 +33,13 @@ internal static class SessionLauncher
         if (Console.IsInputRedirected || Console.IsOutputRedirected)
             return false;
 
+        // Explicit opt-out: run in the current terminal on every OS.
+        if (string.Equals(Environment.GetEnvironmentVariable("AXIOM_CLI_NO_NEW_WINDOW"), "1", StringComparison.Ordinal))
+            return false;
+
         if (!TryResolveLaunchTarget(out string fileName, out List<string> prefixArgs))
             return false;
 
-        // Preserve user args but force the chat command and strip any prior --owned flag.
         var childArgs = new List<string>(prefixArgs);
         bool sawChat = false;
         for (int i = 0; i < originalArgs.Count; i++)
@@ -59,8 +65,10 @@ internal static class SessionLauncher
         {
             if (OperatingSystem.IsWindows())
                 return LaunchWindows(fileName, childArgs);
-
-            // macOS/Linux: stay in the current terminal (window managers differ widely).
+            if (OperatingSystem.IsMacOS())
+                return LaunchMac(fileName, childArgs);
+            if (OperatingSystem.IsLinux())
+                return LaunchLinux(fileName, childArgs);
             return false;
         }
         catch
@@ -69,7 +77,6 @@ internal static class SessionLauncher
         }
     }
 
-    // `dotnet run` makes ProcessPath "dotnet.exe"; published installs use the axiom apphost.
     private static bool TryResolveLaunchTarget(out string fileName, out List<string> prefixArgs)
     {
         fileName = string.Empty;
@@ -90,7 +97,6 @@ internal static class SessionLauncher
             return true;
         }
 
-        // Prefer the nearby apphost (axiom.exe) when present — common for Debug bin output.
         if (!string.IsNullOrWhiteSpace(entryDll))
         {
             string? dir = Path.GetDirectoryName(entryDll);
@@ -119,14 +125,17 @@ internal static class SessionLauncher
         string argLine = string.Join(' ', childArgs.Select(QuoteArg));
         string workDir = Environment.CurrentDirectory;
 
-        // Prefer Windows Terminal when present — better full-window UX — then fall back to a
-        // fresh PowerShell host, then to launching the target directly via shell execute.
         if (TryStart("wt.exe", $"new-tab --title Axiom -d \"{workDir}\" \"{fileName}\" {argLine}", workDir))
             return true;
 
         string psFile = fileName.Replace("'", "''");
         string psArgs = argLine.Replace("'", "''");
         if (TryStart("powershell.exe",
+                $"-NoLogo -NoExit -Command \"$Host.UI.RawUI.WindowTitle='Axiom'; Set-Location -LiteralPath '{workDir.Replace("'", "''")}'; & '{psFile}' {psArgs}\"",
+                workDir))
+            return true;
+
+        if (TryStart("pwsh",
                 $"-NoLogo -NoExit -Command \"$Host.UI.RawUI.WindowTitle='Axiom'; Set-Location -LiteralPath '{workDir.Replace("'", "''")}'; & '{psFile}' {psArgs}\"",
                 workDir))
             return true;
@@ -140,6 +149,68 @@ internal static class SessionLauncher
         };
         Process.Start(direct);
         return true;
+    }
+
+    private static bool LaunchMac(string fileName, List<string> childArgs)
+    {
+        string workDir = Environment.CurrentDirectory;
+        // Escape for embedding inside an AppleScript double-quoted string.
+        static string Esc(string s) => (s ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"");
+        string argLine = string.Join(' ', childArgs.Select(a => Esc(a).Contains(' ') ? $"\\\"{Esc(a)}\\\"" : Esc(a)));
+        string inner = $"cd \\\"{Esc(workDir)}\\\" ; \\\"{Esc(fileName)}\\\" {argLine}";
+        string script = $"tell application \"Terminal\" to do script \"{inner}\"";
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "osascript",
+                WorkingDirectory = workDir,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            };
+            psi.ArgumentList.Add("-e");
+            psi.ArgumentList.Add(script);
+            using Process? p = Process.Start(psi);
+            if (p == null)
+                return false;
+            // Don't block the parent on Terminal forever — a quick wait confirms launch.
+            if (!p.WaitForExit(3000))
+                return true;
+            return p.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool LaunchLinux(string fileName, List<string> childArgs)
+    {
+        string workDir = Environment.CurrentDirectory;
+        string argLine = string.Join(' ', childArgs.Select(QuoteArgShell));
+        string cmd = $"cd {QuoteArgShell(workDir)} && {QuoteArgShell(fileName)} {argLine}; exec bash";
+
+        // Common terminal emulators (first match wins).
+        (string exe, string args)[] hosts =
+        [
+            ("gnome-terminal", $"--working-directory={workDir} -- {fileName} {string.Join(' ', childArgs.Select(QuoteArg))}"),
+            ("kgx", $"--working-directory={workDir} -- {fileName} {string.Join(' ', childArgs.Select(QuoteArg))}"),
+            ("konsole", $"-e {fileName} {string.Join(' ', childArgs.Select(QuoteArg))}"),
+            ("xfce4-terminal", $"--working-directory={workDir} -e \"{fileName} {argLine}\""),
+            ("xterm", $"-e bash -lc {QuoteArg(cmd)}"),
+            ("x-terminal-emulator", $"-e bash -lc {QuoteArg(cmd)}"),
+        ];
+
+        foreach ((string exe, string args) in hosts)
+        {
+            if (TryStart(exe, args, workDir))
+                return true;
+        }
+
+        // No external terminal found — run TUI in this shell.
+        return false;
     }
 
     private static bool TryStart(string fileName, string arguments, string workDir)
@@ -171,12 +242,19 @@ internal static class SessionLauncher
         return arg;
     }
 
+    private static string QuoteArgShell(string arg)
+    {
+        // Single-quote for POSIX shells, escape embedded single quotes.
+        return "'" + (arg ?? string.Empty).Replace("'", "'\\''") + "'";
+    }
+
     public static void PrepareOwnedConsole()
     {
         Environment.SetEnvironmentVariable(OwnedEnvironmentVariable, "1");
 
         try { Console.Title = "Axiom"; } catch { /* ignore */ }
 
+        // Buffer resize is mainly a Windows console concept; Unix terminals size via the host.
         if (!OperatingSystem.IsWindows())
             return;
 
@@ -193,7 +271,7 @@ internal static class SessionLauncher
         }
         catch
         {
-            // Some hosts (VS debug, redirected) refuse resize — not fatal.
+            // Some hosts refuse resize — not fatal.
         }
     }
 }

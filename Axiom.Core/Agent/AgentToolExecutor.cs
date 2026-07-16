@@ -146,13 +146,14 @@ namespace Axiom.Core.Agent
 
             if (OperatingSystem.IsWindows())
             {
+                string shell = ResolveWindowsShell();
                 string safeCwd = cwd.Replace("'", "''");
                 // Force location, then run user command. Set-Location overrides still validated above.
                 string wrapped =
                     $"Set-Location -LiteralPath '{safeCwd}'; " +
                     "$ErrorActionPreference = 'Continue'; " +
                     command;
-                psi.FileName = "powershell.exe";
+                psi.FileName = shell;
                 psi.ArgumentList.Add("-NoLogo");
                 psi.ArgumentList.Add("-NoProfile");
                 psi.ArgumentList.Add("-Command");
@@ -160,10 +161,21 @@ namespace Axiom.Core.Agent
             }
             else
             {
+                // Prefer bash when present (macOS/Linux); fall back to POSIX sh.
+                string shell = ResolveUnixShell();
                 string safeCwd = cwd.Replace("'", "'\\''");
-                psi.FileName = "/bin/bash";
-                psi.ArgumentList.Add("-lc");
-                psi.ArgumentList.Add($"cd '{safeCwd}' && {command}");
+                psi.FileName = shell;
+                // bash -lc / sh -c both accept a single command string.
+                if (shell.EndsWith("bash", StringComparison.Ordinal))
+                {
+                    psi.ArgumentList.Add("-lc");
+                    psi.ArgumentList.Add($"cd '{safeCwd}' && {command}");
+                }
+                else
+                {
+                    psi.ArgumentList.Add("-c");
+                    psi.ArgumentList.Add($"cd '{safeCwd}' && {command}");
+                }
             }
 
             using var process = new Process { StartInfo = psi };
@@ -376,6 +388,58 @@ namespace Axiom.Core.Agent
             ["type"] = type,
             ["description"] = description
         };
+
+        private static string ResolveWindowsShell()
+        {
+            // Prefer Windows PowerShell 5.x (ubiquitous), then PowerShell 7+ if only that is installed.
+            foreach (string candidate in new[] { "powershell.exe", "pwsh.exe", "pwsh" })
+            {
+                if (CommandExistsOnPath(candidate))
+                    return candidate;
+            }
+            return "powershell.exe";
+        }
+
+        private static string ResolveUnixShell()
+        {
+            foreach (string candidate in new[] { "/bin/bash", "/usr/bin/bash", "bash", "/bin/sh", "/usr/bin/sh", "sh" })
+            {
+                if (candidate.Contains('/') && File.Exists(candidate))
+                    return candidate;
+                if (!candidate.Contains('/') && CommandExistsOnPath(candidate))
+                    return candidate;
+            }
+            return "/bin/sh";
+        }
+
+        private static bool CommandExistsOnPath(string name)
+        {
+            try
+            {
+                string? pathEnv = Environment.GetEnvironmentVariable("PATH");
+                if (string.IsNullOrWhiteSpace(pathEnv))
+                    return false;
+
+                char sep = Path.PathSeparator;
+                foreach (string dir in pathEnv.Split(sep, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    try
+                    {
+                        string full = Path.Combine(dir.Trim(), name);
+                        if (File.Exists(full))
+                            return true;
+                        if (OperatingSystem.IsWindows() && !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (File.Exists(full + ".exe"))
+                                return true;
+                        }
+                    }
+                    catch { /* ignore bad PATH entries */ }
+                }
+            }
+            catch { /* ignore */ }
+            return false;
+        }
 
         private static string GetString(JsonElement root, string name)
         {

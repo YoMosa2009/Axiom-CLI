@@ -32,7 +32,7 @@ Both scripts detect your OS/architecture, download the matching release from
 
 ```sh
 axiom config              # paste in an OpenRouter API key (openrouter.ai/keys)
-axiom chat                # opens a dedicated chat window (Windows) with tools & slash menu
+axiom chat                # full-window TUI (Windows, macOS, Linux)
 axiom code "add input validation to the signup form"   # coding agent, run inside a repo
 ```
 
@@ -43,21 +43,24 @@ when a newer version is available.
 
 | Command | What it does |
 |---|---|
-| `axiom config` | Store your OpenRouter API key (encrypted at rest) |
-| `axiom chat [--model <id>]` | Interactive chat in a dedicated window (Windows). Press `/` for tools & models (↑↓ + Enter), or use `/tools`, `/model`, `/clear` |
-| `axiom code [--model <id>] "<task>"` | Connects the current directory, runs the Architect → Builder → Critic council, shows a diff, and asks before applying |
-| `axiom update` | Downloads and installs the latest release over the current one |
+| `axiom config` | Store your OpenRouter API key (encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
+| `axiom chat [--model <id>]` | Full-window TUI chat on every OS. `/` tools · `@` lock folder · `/help` |
+| `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
+| `axiom update` | Download and install the latest release for your platform |
 
 Available models: `eidos` (Eidos 1, general-purpose reasoning) and `hepha` (Hepha 1,
 code-specialized) — the same aliases as the desktop app. `axiom code` uses the desktop app's
 Workplace Council default model unless `--model` is given.
 
-In chat (`axiom chat` opens a self-drawn full-window TUI inside the terminal — not the host scrollbar):
-- Fixed header (◆ Axiom mark), app-managed scrollable transcript (PgUp/PgDn), pinned prompt box at the bottom
-- GUI-style turns with live activity statuses
-- `/workspace <path>` or `@` locks the agent exclusively to a folder (sandbox cannot leave it)
-- Sessions auto-save after each turn; `/sessions`, `/session load`, `/session delete`
-- `/help` for the full command list
+### Cross-platform chat TUI
+`axiom chat` paints its own interface (alternate screen) on **Windows, macOS, and Linux** so the
+host terminal scrollbar is not part of the UX:
+
+- Fixed header (◆ Axiom), scrollable transcript (PgUp/PgDn), pinned prompt at the bottom
+- Shell tools use PowerShell/pwsh on Windows and bash/sh on macOS/Linux
+- `/workspace <path>` or `@` locks the agent to a folder (sandbox cannot leave it)
+- Sessions auto-save; `/sessions`, `/session load`, `/session delete`
+- Optional: set `AXIOM_CLI_NO_NEW_WINDOW=1` to always run in the current terminal; `AXIOM_CLI_MOUSE=1` enables mouse tracking
 
 
 ## How the council works
@@ -72,7 +75,7 @@ pick up exactly where the last one left off.
 
 ## System requirements
 
-- Windows, macOS, or Linux (x64; arm64 on macOS)
+- Windows (x64), macOS (x64 + arm64), or Linux (x64 + arm64)
 - An [OpenRouter](https://openrouter.ai) account and API key (free tier available)
 - For the Python sandbox tool: a system Python 3 install on PATH
 - For the Java sandbox tool: a JDK (`javac`/`java`) on PATH

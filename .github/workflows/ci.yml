@@ -32,3 +32,11 @@ jobs:
 
       - name: Test
         run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal"
+
+      # Smoke the CLI entrypoints on every OS so Windows-only regressions are caught early.
+      - name: Smoke help
+        run: dotnet run --project Axiom.Cli --no-build -c Release -- help
+
+      - name: Smoke code usage (no network)
+        run: dotnet run --project Axiom.Cli --no-build -c Release -- code
+        continue-on-error: true

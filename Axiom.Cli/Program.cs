@@ -105,12 +105,12 @@ internal static class Program
         AnsiConsole.MarkupLine($"[bold]axiom[/] [{muted}]— Axiom CLI (cloud mode)[/]");
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom chat[/] [[--model <id>]]     Start chat in a dedicated window (Windows)");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--model <id>]] <task>   Run the Architect/Builder/Critic council");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom chat[/] [[--model <id>]]     Full-window TUI chat (Windows/macOS/Linux)");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--model <id>]] <task>   Architect/Builder/Critic council on the current dir");
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
         AnsiConsole.MarkupLine($"  [{gold}]axiom help[/]                    Show this help");
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[{muted}]In chat: / tools · @ folders · agent can shell/build/edit inside attached workspaces[/]");
+        AnsiConsole.MarkupLine($"[{muted}]Chat: /help · @ lock folder · /sessions · PgUp/PgDn scroll · same TUI on every OS[/]");
         return 0;
     }
 

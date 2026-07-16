@@ -320,6 +320,13 @@ namespace Axiom.Core.Agent
             }
         }
 
+        // Windows / macOS default volumes are case-insensitive; Linux is case-sensitive.
+        // Matching the host FS rules keeps sandbox checks correct on every platform.
+        private static StringComparison PathComparison =>
+            OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+
         public static bool IsUnderRoot(string fullPath, string rootPath)
         {
             try
@@ -329,11 +336,11 @@ namespace Axiom.Core.Agent
                 string candidate = Path.GetFullPath(fullPath)
                     .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-                if (string.Equals(candidate, rootFull, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(candidate, rootFull, PathComparison))
                     return true;
 
                 string prefix = rootFull + Path.DirectorySeparatorChar;
-                return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+                return candidate.StartsWith(prefix, PathComparison);
             }
             catch
             {
