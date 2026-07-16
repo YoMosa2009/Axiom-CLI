@@ -337,20 +337,36 @@ internal static class ConsoleUi
 
     private static int VisibleLen(string s) => s?.Length ?? 0;
 
+    // Live activity line with status-specific animations (spinner, bars, orbit, arrows, …).
     public sealed class ThinkingIndicator : IDisposable
     {
-        private static readonly string[] Frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        private static readonly string[] Spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        private static readonly string[] Orbit = ["◐", "◓", "◑", "◒"];
+        private static readonly string[] Bounce = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+        private static readonly string[] PulseBar = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▂"];
+        private static readonly string[] Blocks = ["▓░░░", "░▓░░", "░░▓░", "░░░▓", "░░▓░", "░▓░░"];
+        private static readonly string[] Dots = ["·   ", "··  ", "··· ", "····", " ···", "  ··", "   ·"];
+        private static readonly string[] Arrows = ["→   ", " →  ", "  → ", "   →", "  → ", " →  "];
+        private static readonly string[] Sparkle = ["✧", "✦", "✶", "✦"];
+        private static readonly string[] Wave = ["⋆ ⋆ ⋆", " ⋆ ⋆ ", "⋆ ⋆ ⋆", " ⋆ ⋆ "];
+        private static readonly string[] Moon = ["○", "◔", "◑", "◕", "●", "◕", "◑", "◔"];
+        private static readonly string[] CheckPulse = ["✓  ", " ✓ ", "  ✓", " ✓ "];
+        private static readonly string[] ErrorPulse = ["✕  ", " ✕ ", "  ✕", " ✕ "];
+
         private readonly CancellationTokenSource _cts = new();
         private readonly Task? _task;
         private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
         private readonly object _gate = new();
         private string _label;
+        private string[] _frames;
+        private int _delayMs;
         private int _stopped;
         private int _lastLen;
 
         public ThinkingIndicator(string label = ActivityStatus.Thinking)
         {
             _label = label;
+            (_frames, _delayMs) = ResolveAnimation(label);
             if (Console.IsOutputRedirected)
                 return;
 
@@ -362,12 +378,18 @@ internal static class ConsoleUi
                     while (!_cts.Token.IsCancellationRequested)
                     {
                         double seconds = _stopwatch.Elapsed.TotalSeconds;
-                        string text;
+                        string glyph;
+                        string labelCopy;
+                        int delay;
                         lock (_gate)
-                            text = $"{Frames[frame % Frames.Length]}  {_label}  ·  {seconds:0.0}s";
-                        Paint(text);
+                        {
+                            glyph = _frames[frame % _frames.Length];
+                            labelCopy = _label;
+                            delay = _delayMs;
+                        }
+                        Paint($"{glyph}  {labelCopy}  ·  {seconds:0.0}s");
                         frame++;
-                        await Task.Delay(80, _cts.Token);
+                        await Task.Delay(delay, _cts.Token);
                     }
                 }
                 catch (OperationCanceledException) { }
@@ -376,7 +398,42 @@ internal static class ConsoleUi
 
         public void SetLabel(string label)
         {
-            lock (_gate) _label = label;
+            lock (_gate)
+            {
+                _label = label;
+                (_frames, _delayMs) = ResolveAnimation(label);
+            }
+        }
+
+        private static (string[] Frames, int DelayMs) ResolveAnimation(string label)
+        {
+            string l = (label ?? string.Empty).ToLowerInvariant();
+
+            if (l.Contains("fail") || l.Contains("error") || l.Contains("stopped") || l.Contains("cancel"))
+                return (ErrorPulse, 140);
+            if (l.Contains("complete") || l.Contains("finished") || l.Contains("done") || l.Contains("success"))
+                return (CheckPulse, 160);
+            if (l.Contains("download"))
+                return (Arrows, 90);
+            if (l.Contains("search") || l.Contains("look") || l.Contains("find"))
+                return (Dots, 100);
+            if (l.Contains("build") || l.Contains("compil") || l.Contains("install") || l.Contains("running") || l.Contains("command"))
+                return (PulseBar, 70);
+            if (l.Contains("writ") || l.Contains("read") || l.Contains("list"))
+                return (Blocks, 95);
+            if (l.Contains("generat") || l.Contains("stream") || l.Contains("respond"))
+                return (Orbit, 110);
+            if (l.Contains("plan") || l.Contains("review"))
+                return (Moon, 130);
+            if (l.Contains("connect") || l.Contains("wait") || l.Contains("retry"))
+                return (Wave, 120);
+            if (l.Contains("work") || l.Contains("step") || l.Contains("tool"))
+                return (Sparkle, 100);
+            if (l.Contains("think"))
+                return (Spinner, 80);
+
+            // Default: gentle bounce
+            return (Bounce, 90);
         }
 
         private void Paint(string text)
@@ -391,7 +448,6 @@ internal static class ConsoleUi
                     if (text.Length > width)
                         text = text[..(width - 1)] + "…";
                     int pad = Math.Max(_lastLen, text.Length);
-                    // Full-width activity line (not left-cramped fragment).
                     Console.Write("\r" + text.PadRight(pad));
                     _lastLen = text.Length;
                 }

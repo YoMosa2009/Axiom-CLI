@@ -6,12 +6,12 @@ using Spectre.Console;
 
 namespace Axiom.Cli.Ui;
 
-// Full-width input panel that tracks the console width. Layout:
+// Full-width input panel docked to the bottom of the visible console window. Layout:
 //
 //   ╭──────────────────────────────────────────────────────────╮
 //   │  prompt text wraps across the box…                       │
 //   ╰──────────────────────────────────────────────────────────╯
-//    Model  Eidos 1  ·  1.2k / 131k  ·  / tools  @ folders
+//    Model  Eidos 1              · · ·              1.2k / 131k
 //
 // Slash (/) and at (@) menus open above the box.
 internal static class ChatInput
@@ -53,8 +53,9 @@ internal static class ChatInput
         var buffer = new StringBuilder();
         int cursor = 0;
         int selected = 0;
-        int blockStartTop = SafeCursorTop();
-        int blockHeight = 1;
+        // Reserve a minimum dock height (top+2 content+bottom+model), then pin to viewport bottom.
+        int blockHeight = EstimateBlockHeight(buffer.ToString(), menuOpen: false, menuItems: 0);
+        int blockStartTop = PinBlockToBottom(blockHeight);
 
         DrawBlock(buffer, cursor, selected, chrome, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
 
@@ -431,30 +432,34 @@ internal static class ChatInput
 
         lines.Add(bottom);
 
-        // Seamless model line under the box (sits on the border edge).
+        // Seamless model line under the box — model left, context right, wide visual gap.
         string context = ConsoleUi.FormatContext(chrome.UsedTokens, chrome.ContextWindowTokens);
-        string modelLine = ConsoleUi.LayoutThree(
-            $"  Model  {chrome.ModelLabel}",
-            "",
-            context + "  ",
-            width - 1);
-        lines.Add(modelLine);
+        lines.Add(BuildModelStatusLine(chrome.ModelLabel, context, width));
 
         try
         {
+            // Re-pin when height changes (menu open/close, multi-line wrap).
+            int desiredHeight = lines.Count;
+            int pinned = PinBlockToBottom(desiredHeight, preferKeep: blockStartTop, previousHeight: blockHeight);
+            // Only jump if we can dock lower (more bottom space) or first paint.
+            if (pinned > blockStartTop || blockHeight <= 1)
+                blockStartTop = pinned;
+
             int clearRows = Math.Max(blockHeight, lines.Count);
-            Console.SetCursorPosition(0, blockStartTop);
-            for (int i = 0; i < clearRows; i++)
+            // Clear previous footprint (may be higher than the new docked position).
+            int clearFrom = Math.Min(blockStartTop, Math.Max(0, blockStartTop - Math.Max(0, clearRows - lines.Count)));
+            try
             {
-                Console.Write(new string(' ', Math.Max(1, width - 1)));
-                if (i < clearRows - 1)
+                for (int i = 0; i < clearRows + 2; i++)
                 {
-                    if (blockStartTop + i + 1 >= Console.BufferHeight - 1)
-                        Console.WriteLine();
-                    else
-                        Console.SetCursorPosition(0, blockStartTop + i + 1);
+                    int row = clearFrom + i;
+                    if (row < 0 || row >= Console.BufferHeight)
+                        continue;
+                    Console.SetCursorPosition(0, row);
+                    Console.Write(new string(' ', Math.Max(1, width - 1)));
                 }
             }
+            catch { /* ignore */ }
 
             int neededBottom = blockStartTop + lines.Count;
             while (neededBottom >= Console.BufferHeight)
@@ -510,30 +515,106 @@ internal static class ChatInput
         }
     }
 
+    // Docks the input block to the bottom of the *visible* console viewport so the prompt
+    // doesn't float mid-window after short transcripts.
+    private static int PinBlockToBottom(int blockHeight, int preferKeep = -1, int previousHeight = 0)
+    {
+        blockHeight = Math.Max(4, blockHeight);
+        try
+        {
+            int windowTop = Console.WindowTop;
+            int windowHeight = Math.Max(10, Console.WindowHeight);
+            int cursorTop = Console.CursorTop;
+            // Leave one blank row above the docked block for breathing room when possible.
+            int targetStart = windowTop + windowHeight - blockHeight;
+            targetStart = Math.Max(windowTop, targetStart);
+
+            // If chat content already sits below the ideal dock line, keep flowing after content
+            // (window will scroll) rather than overwriting transcript.
+            if (cursorTop > targetStart && preferKeep < 0)
+                return cursorTop;
+
+            // Pad blank lines so the docked region begins at targetStart.
+            if (cursorTop < targetStart)
+            {
+                Console.SetCursorPosition(0, cursorTop);
+                for (int i = cursorTop; i < targetStart; i++)
+                    Console.WriteLine();
+            }
+
+            // When re-drawing an existing docked block, prefer the established top unless the
+            // block grew and needs to shift up.
+            if (preferKeep >= 0 && previousHeight > 0)
+            {
+                int grown = blockHeight - previousHeight;
+                if (grown > 0)
+                    return Math.Max(windowTop, preferKeep - grown);
+                return preferKeep;
+            }
+
+            return targetStart;
+        }
+        catch
+        {
+            return SafeCursorTop();
+        }
+    }
+
+    private static int EstimateBlockHeight(string text, bool menuOpen, int menuItems)
+    {
+        int width = Math.Max(40, ConsoleUi.SafeWidth());
+        int inner = Math.Max(20, width - 4);
+        int content = Math.Max(2, Wrap(string.IsNullOrEmpty(text) ? " " : text, inner).Count);
+        int menu = menuOpen ? 1 + Math.Max(1, menuItems) + 1 : 0;
+        // top border + content + bottom border + model line
+        return menu + 1 + content + 1 + 1;
+    }
+
+    private static string BuildModelStatusLine(string modelLabel, string context, int width)
+    {
+        string left = $"  Model  {modelLabel}";
+        string right = context;
+        width = Math.Max(40, width - 1);
+        int gap = Math.Max(10, width - left.Length - right.Length - 2);
+        // Visual separator dots centered in the gap so model and tokens don't sit flush.
+        int dots = Math.Clamp(gap / 4, 3, 9);
+        int leftPad = Math.Max(3, (gap - dots) / 2);
+        int rightPad = Math.Max(3, gap - dots - leftPad);
+        return left + new string(' ', leftPad) + new string('·', dots) + new string(' ', rightPad) + right;
+    }
+
     private static void WriteModelLine(string modelLabel, string context, int width)
     {
         string gold = AxiomTheme.Hex(AxiomTheme.Gold);
         string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
-        string primary = AxiomTheme.Hex(AxiomTheme.TextPrimary);
-        string line = ConsoleUi.LayoutThree($"  Model  {modelLabel}", "", context + "  ", width - 1);
-        // Color "Model" muted, model name gold, context muted.
+        string line = BuildModelStatusLine(modelLabel, context, width);
         try
         {
             string prefix = "  Model  ";
-            if (line.StartsWith(prefix, StringComparison.Ordinal))
+            int ctxIdx = line.LastIndexOf(context, StringComparison.Ordinal);
+            if (line.StartsWith(prefix, StringComparison.Ordinal) && ctxIdx > prefix.Length)
             {
                 AnsiConsole.Markup($"[{muted}]{prefix.EscapeMarkup()}[/]");
-                string after = line[prefix.Length..];
-                int ctxIdx = after.LastIndexOf(context, StringComparison.Ordinal);
-                if (ctxIdx >= 0)
+                // model name
+                string mid = line[prefix.Length..ctxIdx];
+                // split name vs dotted spacer
+                int nameEnd = 0;
+                while (nameEnd < mid.Length && mid[nameEnd] != '·' && !char.IsWhiteSpace(mid[nameEnd]))
+                    nameEnd++;
+                // actually model name may have spaces — take until we hit a run of spaces before dots
+                int dotsAt = mid.IndexOf('·');
+                if (dotsAt < 0)
                 {
-                    AnsiConsole.Markup($"[bold {gold}]{after[..ctxIdx].TrimEnd().EscapeMarkup()}[/]");
-                    AnsiConsole.Markup($"[{muted}]{after[ctxIdx..].EscapeMarkup()}[/]");
+                    AnsiConsole.Markup($"[bold {gold}]{mid.TrimEnd().EscapeMarkup()}[/]");
                 }
                 else
                 {
-                    AnsiConsole.Markup($"[{primary}]{after.EscapeMarkup()}[/]");
+                    string name = mid[..dotsAt].TrimEnd();
+                    string spacer = mid[dotsAt..];
+                    AnsiConsole.Markup($"[bold {gold}]{name.EscapeMarkup()}[/]");
+                    AnsiConsole.Markup($"[{muted}]{spacer.EscapeMarkup()}[/]");
                 }
+                AnsiConsole.Markup($"[{muted}]{line[ctxIdx..].EscapeMarkup()}[/]");
             }
             else
             {
