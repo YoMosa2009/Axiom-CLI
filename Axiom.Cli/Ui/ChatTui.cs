@@ -596,11 +596,25 @@ internal sealed class ChatTui : IDisposable
         ConnectedWorkspaceState? wsState = null;
         if (_session.Workspace.Roots.Count > 0)
         {
-            wsState = new ConnectedWorkspaceState
+            try
             {
-                CodebaseEditAccessEnabled = true,
-                RootPath = _session.Workspace.PrimaryRoot
-            };
+                // Full folder connection (index + ConnectionKind=Folder) so council never sees "None".
+                var access = new WorkspaceAccessService();
+                wsState = access.CreateFolderConnection(_session.Workspace.PrimaryRoot);
+                SetActivity($"Workspace · {wsState.IndexedFileCount} file(s) indexed");
+                Paint();
+            }
+            catch (Exception ex)
+            {
+                // Still attach RootPath so access language can fire even if indexing throws.
+                wsState = new ConnectedWorkspaceState
+                {
+                    CodebaseEditAccessEnabled = true,
+                    ConnectionKind = WorkspaceConnectionKind.Folder.ToString(),
+                    RootPath = _session.Workspace.PrimaryRoot,
+                    StatusMessage = "Folder connected (index incomplete: " + ex.Message + ")"
+                };
+            }
         }
 
         CouncilOrchestrator council = _session.CreateCouncil();
@@ -1083,7 +1097,7 @@ internal sealed class ChatTui : IDisposable
             // Explicit folder choice locks the agent exclusively to that tree.
             if (_session.Workspace.TrySetExclusive(pick.Id))
             {
-                PushSystem($"Workspace locked to: {pick.Id}");
+                PushSystem(DescribeWorkspaceLock(pick.Id));
                 AutoSave();
             }
             else
@@ -1146,12 +1160,26 @@ internal sealed class ChatTui : IDisposable
 
         if (_session.Workspace.TrySetExclusive(path))
         {
-            PushSystem($"Workspace locked to: {path}");
+            PushSystem(DescribeWorkspaceLock(path));
             AutoSave();
         }
         else
         {
             PushError($"Could not lock workspace: {path}");
+        }
+    }
+
+    private static string DescribeWorkspaceLock(string path)
+    {
+        try
+        {
+            var access = new WorkspaceAccessService();
+            WorkspaceIndexResult index = access.IndexWorkspace(path);
+            return $"Workspace locked to: {path} · {index.Files.Count} readable file(s) indexed — the model can see this folder.";
+        }
+        catch
+        {
+            return $"Workspace locked to: {path} — the model can work inside this folder.";
         }
     }
 

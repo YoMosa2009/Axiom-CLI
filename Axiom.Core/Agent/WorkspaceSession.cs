@@ -274,26 +274,111 @@ namespace Axiom.Core.Agent
 
         public string BuildContextBlock()
         {
+            List<string> roots;
+            bool exclusive;
             lock (_gate)
             {
                 if (_roots.Count == 0)
                     return string.Empty;
-
-                var sb = new StringBuilder();
-                sb.AppendLine("[[ATTACHED WORKSPACES — SANDBOX]]");
-                sb.AppendLine(_exclusive
-                    ? "EXCLUSIVE LOCK: you may ONLY operate inside this directory tree. Leaving it is forbidden."
-                    : "You may read, write, list, run shell commands, build, and download ONLY inside these directories:");
-                for (int i = 0; i < _roots.Count; i++)
-                {
-                    string label = i == 0 ? "primary" : $"extra-{i}";
-                    sb.AppendLine($"- ({label}) {_roots[i]}");
-                }
-                sb.AppendLine("Never use absolute paths outside these roots. Never cd to parent folders above them.");
-                sb.AppendLine("Prefer relative paths from the primary workspace. Use the provided tools for filesystem and shell work.");
-                sb.AppendLine("[[END ATTACHED WORKSPACES]]");
-                return sb.ToString();
+                roots = _roots.ToList();
+                exclusive = _exclusive;
             }
+
+            var sb = new StringBuilder();
+            sb.AppendLine("[[ATTACHED WORKSPACES — YOU HAVE ACCESS]]");
+            sb.AppendLine("A local folder is connected for this session. You CAN read/list/edit files via tools.");
+            sb.AppendLine("Never claim you lack access to the user's project or filesystem when this block is present.");
+            sb.AppendLine(exclusive
+                ? "EXCLUSIVE LOCK: you may ONLY operate inside this directory tree. Leaving it is forbidden."
+                : "You may read, write, list, run shell commands, build, and download ONLY inside these directories:");
+            for (int i = 0; i < roots.Count; i++)
+            {
+                string label = i == 0 ? "primary" : $"extra-{i}";
+                sb.AppendLine($"- ({label}) {roots[i]}");
+            }
+            sb.AppendLine("Never use absolute paths outside these roots. Never cd to parent folders above them.");
+            sb.AppendLine("Prefer relative paths from the primary workspace. Use list_dir, read_file, search_files, and run_shell to inspect the tree — do not refuse for lack of access.");
+
+            // Snapshot of paths so the model sees the project without a tool round first.
+            string primary = roots[0];
+            List<string> sample = SampleRelativePaths(primary, maxEntries: 120);
+            if (sample.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"FILE INDEX (sample under primary, {sample.Count} path(s)):");
+                foreach (string rel in sample)
+                    sb.AppendLine("- " + rel);
+            }
+            else
+            {
+                sb.AppendLine();
+                sb.AppendLine("FILE INDEX: no readable files found under primary yet (folder may be empty). Root is still connected.");
+            }
+
+            sb.AppendLine("[[END ATTACHED WORKSPACES]]");
+            return sb.ToString();
+        }
+
+        private static List<string> SampleRelativePaths(string root, int maxEntries)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+                return result;
+
+            var ignoredDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".git", ".vs", ".idea", ".vscode", "bin", "obj", "node_modules", "packages",
+                "dist", "build", "coverage", ".next", ".nuxt", ".turbo"
+            };
+
+            try
+            {
+                var pending = new Stack<string>();
+                pending.Push(root);
+                while (pending.Count > 0 && result.Count < maxEntries)
+                {
+                    string current = pending.Pop();
+                    IEnumerable<string> dirs;
+                    IEnumerable<string> files;
+                    try
+                    {
+                        dirs = Directory.EnumerateDirectories(current);
+                        files = Directory.EnumerateFiles(current);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    foreach (string file in files)
+                    {
+                        if (result.Count >= maxEntries)
+                            break;
+                        try
+                        {
+                            result.Add(Path.GetRelativePath(root, file).Replace('\\', '/'));
+                        }
+                        catch
+                        {
+                            // skip unreadable
+                        }
+                    }
+
+                    foreach (string dir in dirs)
+                    {
+                        string name = Path.GetFileName(dir);
+                        if (!ignoredDirs.Contains(name))
+                            pending.Push(dir);
+                    }
+                }
+            }
+            catch
+            {
+                // best-effort index
+            }
+
+            result.Sort(StringComparer.OrdinalIgnoreCase);
+            return result;
         }
 
         public static bool TryNormalizeExistingDirectory(string path, out string full)

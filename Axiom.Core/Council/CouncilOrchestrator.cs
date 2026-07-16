@@ -45,34 +45,41 @@ namespace Axiom.Core.Council
             CancellationToken cancellationToken)
         {
             CouncilToolOptions tools = request.Tools ?? CouncilToolOptions.Default;
-            bool isWorkspaceTask = request.Workspace is { CodebaseEditAccessEnabled: true };
+            // Folder connected for context (index + file contents). Patch-only mode is separate:
+            // Q&A / explore turns must still answer from the connected tree, not claim "no access".
+            bool workspaceConnected = request.Workspace is { CodebaseEditAccessEnabled: true };
+            bool expectPatch = workspaceConnected && LooksLikeCodeEditRequest(request.UserPrompt);
             string workspaceContext = string.Empty;
             IReadOnlyList<string> workspaceFilesRead = Array.Empty<string>();
 
-            if (isWorkspaceTask)
+            if (workspaceConnected)
             {
                 WorkspaceContextResult context = _workspace.BuildContextPacket(
                     request.Workspace!, request.UserPrompt, WorkspaceContextBudgetChars);
                 workspaceContext = context.Packet;
                 workspaceFilesRead = context.FilesRead;
+                bool hasAccessNotice = workspaceContext.Contains("YOU HAVE ACCESS", StringComparison.Ordinal);
                 Report(progress, CouncilEventKind.Status,
                     workspaceFilesRead.Count > 0
-                        ? $"Connected codebase context attached: {workspaceFilesRead.Count} file(s)."
-                        : "Codebase Edit Access is enabled, but no readable local code files are connected yet.");
+                        ? $"Workspace connected · {workspaceFilesRead.Count} file content(s) in context."
+                        : hasAccessNotice
+                            ? "Workspace connected · file index attached (no content slices yet)."
+                            : "Workspace flag set, but no local folder path was available.");
             }
 
             // ── Architect: plan ────────────────────────────────────────────────
             Report(progress, CouncilEventKind.Status, "Architect is planning...");
             string architectSystem = FoundationSystemPrompt.Apply(
-                "You are the Architect. Read the user's request and any attached context, then " +
-                "produce a concise numbered implementation plan (3-8 steps). Do not write final " +
-                "code or prose output — only the plan.");
+                "You are the Architect. Read the user's request and any attached workspace context, then " +
+                "produce a concise numbered plan (3-8 steps). Do not write final code or long prose — only the plan.\n" +
+                "If [[CONNECTED WORKSPACE — YOU HAVE ACCESS]] is present, the user's local project IS connected: " +
+                "plan using the FILE INDEX and RELEVANT FILE CONTENTS. Never claim you lack access to their files.");
             string architectInput = BuildContextualInput(request.UserPrompt, workspaceContext);
             string architectPlan = await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken);
             Report(progress, CouncilEventKind.ArchitectOutput, architectPlan);
 
             // ── Builder: implement ──────────────────────────────────────────────
-            string builderSystem = BuildBuilderSystemPrompt(isWorkspaceTask);
+            string builderSystem = BuildBuilderSystemPrompt(workspaceConnected, expectPatch);
             string builderInput = BuildBuilderInput(request.UserPrompt, architectPlan, workspaceContext);
 
             Report(progress, CouncilEventKind.Status, "Builder is implementing...");
@@ -80,11 +87,12 @@ namespace Axiom.Core.Council
             Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
 
             WorkspacePatchProposal? patch = null;
-            if (isWorkspaceTask)
+            bool builderEmittedPatch = ContainsPatchEnvelope(builderOutput);
+            if (expectPatch || builderEmittedPatch)
             {
                 patch = await ResolvePatchWithRetryAsync(
                     request, workspaceContext, architectPlan, builderSystem, builderOutput, progress, cancellationToken);
-                if (patch == null)
+                if (patch == null && expectPatch)
                 {
                     return new CouncilResult(
                         Success: false,
@@ -93,7 +101,8 @@ namespace Axiom.Core.Council
                         FinalCriticReport: new CriticReport { Status = "issues" });
                 }
 
-                builderOutput = patch.RawText ?? builderOutput;
+                if (patch != null)
+                    builderOutput = patch.RawText ?? builderOutput;
             }
 
             // ── Critic: static validation + optional sandbox + review/revision ─
@@ -103,10 +112,10 @@ namespace Axiom.Core.Council
             {
                 // Deterministic rails before every Critic call (desktop Stage 2.5 / sandbox).
                 CriticEvidence evidence = await GatherCriticEvidenceAsync(
-                    builderOutput, isWorkspaceTask, tools, progress, cancellationToken);
+                    builderOutput, expectPatch || patch != null, tools, progress, cancellationToken);
 
                 Report(progress, CouncilEventKind.Status, "Critic is reviewing...");
-                string criticInput = BuildCriticInput(request.UserPrompt, isWorkspaceTask, builderOutput, evidence);
+                string criticInput = BuildCriticInput(request.UserPrompt, patch != null, builderOutput, evidence);
                 string criticOutput = await CallRoleAsync(CriticSystemPrompt, criticInput, progress, cancellationToken);
                 Report(progress, CouncilEventKind.CriticOutput, criticOutput);
                 report = CriticContractParser.Parse(criticOutput);
@@ -139,21 +148,22 @@ namespace Axiom.Core.Council
 
                 string revisionSystem = fullRevision
                     ? builderSystem
-                    : builderSystem + "\n" + TargetedPatchModeNote(isWorkspaceTask);
+                    : builderSystem + "\n" + TargetedPatchModeNote(expectPatch || patch != null);
                 string revisionInput = BuildRevisionInput(
                     request.UserPrompt, architectPlan, workspaceContext, builderOutput, criticOutput, fullRevision, evidence);
 
                 builderOutput = await CallRoleAsync(revisionSystem, revisionInput, progress, cancellationToken);
                 Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
 
-                if (isWorkspaceTask)
+                if (expectPatch || ContainsPatchEnvelope(builderOutput))
                 {
                     patch = await ResolvePatchWithRetryAsync(
                         request, workspaceContext, architectPlan, builderSystem, builderOutput, progress, cancellationToken);
-                    if (patch == null)
+                    if (patch == null && expectPatch)
                         return new CouncilResult(false, builderOutput, null, report);
 
-                    builderOutput = patch.RawText ?? builderOutput;
+                    if (patch != null)
+                        builderOutput = patch.RawText ?? builderOutput;
                 }
             }
 
@@ -315,21 +325,35 @@ namespace Axiom.Core.Council
             return result.ResponseText;
         }
 
-        private static string BuildBuilderSystemPrompt(bool isWorkspaceTask)
+        private static string BuildBuilderSystemPrompt(bool workspaceConnected, bool expectPatch)
         {
             string role = "You are the Builder. Implement the Architect's plan completely — no " +
                 "TODO placeholders, no omitted sections, no pseudo-code.";
-            return FoundationSystemPrompt.Apply(isWorkspaceTask
-                ? role + "\n" + WorkspacePatchModeNote
-                : role);
+
+            if (workspaceConnected && expectPatch)
+                return FoundationSystemPrompt.Apply(role + "\n" + WorkspaceAccessNote + "\n" + WorkspacePatchModeNote);
+
+            if (workspaceConnected)
+                return FoundationSystemPrompt.Apply(role + "\n" + WorkspaceAccessNote + "\n" + WorkspaceAnswerModeNote);
+
+            return FoundationSystemPrompt.Apply(role);
         }
 
-        private const string WorkspacePatchModeNote =
-            "This is a connected-codebase task. Follow the patch envelope format given in the " +
-            "workspace context exactly. Output ONLY the [[AXIOM_CODEBASE_PATCH]] envelope — no " +
-            "narration before or after it.";
+        private const string WorkspaceAccessNote =
+            "A local workspace is connected for this turn (see FILE INDEX / RELEVANT FILE CONTENTS). " +
+            "You HAVE access to those files. Never claim you cannot open the project or lack filesystem access.";
 
-        private static string TargetedPatchModeNote(bool isWorkspaceTask) => isWorkspaceTask
+        private const string WorkspacePatchModeNote =
+            "This turn expects codebase edits. Follow the patch envelope format in the workspace " +
+            "context exactly. Output ONLY the [[AXIOM_CODEBASE_PATCH]] envelope — no narration " +
+            "before or after it.";
+
+        private const string WorkspaceAnswerModeNote =
+            "This turn is Q&A / analysis / exploration (not a forced edit). Answer in clear prose " +
+            "using the connected FILE INDEX and RELEVANT FILE CONTENTS. If the user also wants " +
+            "code changes, include a [[AXIOM_CODEBASE_PATCH]] envelope after your explanation.";
+
+        private static string TargetedPatchModeNote(bool patchMode) => patchMode
             ? "[TARGETED PATCH MODE] Fix ONLY the specific issues listed below. Output a complete, " +
               "valid [[AXIOM_CODEBASE_PATCH]] envelope — do not output a diff or partial snippet, " +
               "and do not change anything not mentioned in the findings."
@@ -342,7 +366,53 @@ namespace Axiom.Core.Council
             "Be specific and evidence-based. When PRE-FLAGGED ISSUES or SANDBOX OUTPUT are " +
             "present, confirm each finding and check for additional problems. Treat CRITICAL " +
             "and RUNTIME findings as must-fix unless the sandbox output clearly shows they " +
-            "are false positives." + "\n" + CriticContractParser.ContractInstruction);
+            "are false positives. If a connected workspace was provided, do not mark the Builder " +
+            "wrong for using those files — they were intentionally attached." + "\n" +
+            CriticContractParser.ContractInstruction);
+
+        /// <summary>
+        /// Heuristic: edit-like prompts require a patch envelope; explore/Q&A do not.
+        /// </summary>
+        public static bool LooksLikeCodeEditRequest(string prompt)
+        {
+            if (string.IsNullOrWhiteSpace(prompt))
+                return false;
+
+            string p = prompt.ToLowerInvariant();
+            // Strip pre-injected tool blocks so "search" in web results doesn't force patch mode.
+            int cut = p.IndexOf("[[web search", StringComparison.Ordinal);
+            if (cut < 0) cut = p.IndexOf("[[python sandbox", StringComparison.Ordinal);
+            if (cut < 0) cut = p.IndexOf("[[calculator", StringComparison.Ordinal);
+            if (cut > 0)
+                p = p[..cut];
+
+            string[] editHints =
+            [
+                "fix", "implement", "refactor", "rename", "migrate", "upgrade",
+                "patch", "wire up", "integrate", "scaffold", "boilerplate",
+                "add ", "create ", "change ", "update ", "edit ", "write ", "modify ",
+                "delete ", "remove ", "replace ", "insert ", "apply "
+            ];
+            if (editHints.Any(h => p.Contains(h, StringComparison.Ordinal)))
+                return true;
+
+            // Explicit file targets often imply edits.
+            if (System.Text.RegularExpressions.Regex.IsMatch(p, @"\b[\w./\\-]+\.(cs|ts|tsx|js|jsx|py|java|go|rs|cpp|h|html|css|json|md|yml|yaml)\b"))
+            {
+                string[] softEdit = ["in ", "to ", "the ", "our ", "my "];
+                // "explain Main.cs" is not an edit; "update Main.cs" already matched above.
+                string[] explore = ["what", "how", "why", "explain", "summarize", "list", "show", "describe", "review", "where"];
+                if (explore.Any(e => p.Contains(e, StringComparison.Ordinal)))
+                    return false;
+                return softEdit.Any(s => p.Contains(s, StringComparison.Ordinal));
+            }
+
+            return false;
+        }
+
+        private static bool ContainsPatchEnvelope(string text)
+            => !string.IsNullOrWhiteSpace(text)
+               && text.Contains("[[AXIOM_CODEBASE_PATCH]]", StringComparison.OrdinalIgnoreCase);
 
         private static string BuildContextualInput(string userPrompt, string workspaceContext)
         {

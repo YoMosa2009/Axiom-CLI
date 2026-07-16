@@ -294,16 +294,10 @@ internal static class Program
         var orchestrator = new CouncilOrchestrator(pipeline, councilModelId, workspaceAccess);
 
         string root = Environment.CurrentDirectory;
-        WorkspaceIndexResult index = workspaceAccess.IndexWorkspace(root);
+        ConnectedWorkspaceState workspaceState = workspaceAccess.CreateFolderConnection(root);
         string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
-        AnsiConsole.MarkupLine($"[{muted}]Connected workspace:[/] {root} [{muted}]({index.Files.Count} files)[/]");
+        AnsiConsole.MarkupLine($"[{muted}]Connected workspace:[/] {root} [{muted}]({workspaceState.IndexedFileCount} files)[/]");
         AnsiConsole.MarkupLine($"[{muted}]Model:[/] [{AxiomTheme.Hex(AxiomTheme.Gold)}]{councilModelLabel}[/]");
-
-        var workspaceState = new ConnectedWorkspaceState
-        {
-            CodebaseEditAccessEnabled = true,
-            RootPath = root
-        };
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         // axiom code path: sandbox on so Critic gets runtime evidence for coding tasks.
@@ -420,7 +414,7 @@ internal static class Program
                     {
                         string path = string.Join(' ', parts.Skip(2)).Trim().Trim('"');
                         if (session.Workspace.TrySetExclusive(path))
-                            Say($"Workspace locked to: {session.Workspace.PrimaryRoot}");
+                            Say(DescribeWorkspaceLock(session.Workspace.PrimaryRoot));
                         else
                             Say($"Could not lock workspace (folder missing?): {path}");
                         return true;
@@ -428,7 +422,7 @@ internal static class Program
                     if (sub is "cwd" or ".")
                     {
                         session.Workspace.TrySetExclusive(Environment.CurrentDirectory);
-                        Say($"Workspace locked to cwd: {session.Workspace.PrimaryRoot}");
+                        Say(DescribeWorkspaceLock(session.Workspace.PrimaryRoot));
                         return true;
                     }
                     if (sub is "clear" or "reset")
@@ -440,7 +434,7 @@ internal static class Program
                     // Treat remaining args as a path: /workspace C:\foo
                     string direct = string.Join(' ', parts.Skip(1)).Trim().Trim('"');
                     if (session.Workspace.TrySetExclusive(direct))
-                        Say($"Workspace locked to: {session.Workspace.PrimaryRoot}");
+                        Say(DescribeWorkspaceLock(session.Workspace.PrimaryRoot));
                     else
                         Say($"Could not lock workspace: {direct}");
                     return true;
@@ -450,7 +444,7 @@ internal static class Program
                     Say($"  • {root}");
                 Say("Pick folder:  /browse  ·  @ then Browse…  ·  /workspace pick");
                 Say("Or type a path:  /workspace <path>  ·  /workspace cwd");
-                Say("The agent cannot read/write/run outside the locked folder.");
+                Say("The model can read/write/run only inside the locked folder — it does have access there.");
                 return true;
 
             case "/sessions":
@@ -526,6 +520,20 @@ internal static class Program
             default:
                 Say($"Unknown command: {parts[0]}  ·  type /help");
                 return true;
+        }
+    }
+
+    private static string DescribeWorkspaceLock(string path)
+    {
+        try
+        {
+            var access = new WorkspaceAccessService();
+            WorkspaceIndexResult index = access.IndexWorkspace(path);
+            return $"Workspace locked to: {path} · {index.Files.Count} readable file(s) indexed — the model can see this folder.";
+        }
+        catch
+        {
+            return $"Workspace locked to: {path} — the model can work inside this folder.";
         }
     }
 

@@ -236,6 +236,30 @@ namespace Axiom.Core.Workspace
                 totalBytes);
         }
 
+        /// <summary>
+        /// Builds a fully populated folder connection for CLI/chat so council and tools see
+        /// ConnectionKind=Folder, an index count, and a real RootPath — not Connection: None.
+        /// </summary>
+        public ConnectedWorkspaceState CreateFolderConnection(string rootPath, bool codebaseEditAccess = true)
+        {
+            string root = NormalizeRoot(rootPath);
+            WorkspaceIndexResult index = IndexWorkspace(root);
+            return new ConnectedWorkspaceState
+            {
+                CodebaseEditAccessEnabled = codebaseEditAccess,
+                ConnectionKind = WorkspaceConnectionKind.Folder.ToString(),
+                RootPath = root,
+                DisplayName = index.DisplayName,
+                IndexedFileCount = index.Files.Count,
+                IndexedByteCount = index.TotalBytes,
+                IndexedAt = DateTime.UtcNow,
+                EnabledAt = DateTime.UtcNow,
+                StatusMessage = codebaseEditAccess
+                    ? $"Connected folder with {index.Files.Count} readable file(s)."
+                    : "Folder connected (read-only)."
+            };
+        }
+
         public WorkspaceContextResult BuildContextPacket(ConnectedWorkspaceState state, string query, int maxChars)
         {
             if (state == null || !state.CodebaseEditAccessEnabled)
@@ -255,17 +279,39 @@ namespace Axiom.Core.Workspace
                 .ToList();
             var readFiles = new List<string>();
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("The user enabled Codebase Edit Access for this Workplace chat.");
-            sb.AppendLine($"Locked model mode: {state.LockedMode}");
-            sb.AppendLine($"Connection: {state.ConnectionKind}");
-            sb.AppendLine($"Auto apply: {(state.AutoApplyCodebaseChanges ? "enabled" : "disabled")}");
+
+            // Lead with an unambiguous access grant — models otherwise invent "I can't see your files".
+            sb.AppendLine("[[CONNECTED WORKSPACE — YOU HAVE ACCESS]]");
+            sb.AppendLine("The user connected a local folder for this session. You CAN see and reason about its files.");
+            sb.AppendLine("Never claim you lack filesystem access, cannot open the project, or that no folder is connected.");
+            sb.AppendLine($"Local root: {(string.IsNullOrWhiteSpace(state.RootPath) ? "(selected files)" : state.RootPath)}");
+            sb.AppendLine($"Connection: {(string.IsNullOrWhiteSpace(state.ConnectionKind) || state.ConnectionKind == "None" ? WorkspaceConnectionKind.Folder.ToString() : state.ConnectionKind)}");
+            sb.AppendLine($"Indexed readable files: {files.Count}");
+            if (!string.IsNullOrWhiteSpace(state.DisplayName))
+                sb.AppendLine($"Display name: {state.DisplayName}");
             if (!string.IsNullOrWhiteSpace(state.RepositoryUrl))
                 sb.AppendLine($"Repository URL: {state.RepositoryUrl}");
-            if (!string.IsNullOrWhiteSpace(state.RootPath))
-                sb.AppendLine($"Local root: {state.RootPath}");
             sb.AppendLine(state.AutoApplyCodebaseChanges
-                ? "Current capability: read/search context plus host-side auto-apply after a valid patch. Do not claim files were changed until the app reports the patch was applied."
-                : "Current capability: read/search context only. Do not claim files were changed. If code changes are needed, propose them for review.");
+                ? "Capability: read context below; host may auto-apply a valid patch after you propose it. Do not claim files changed until apply is confirmed."
+                : "Capability: read/search context below. Answer questions from these files. Propose code changes with the patch envelope when edits are needed.");
+            sb.AppendLine("[[END ACCESS NOTICE]]");
+            sb.AppendLine();
+
+            // Compact path index so the model knows the tree even when only a few files are inlined.
+            const int maxIndexEntries = 250;
+            sb.AppendLine("FILE INDEX (relative paths):");
+            int listed = 0;
+            foreach (string path in files
+                .OrderBy(p => GetDisplayPath(state, p), StringComparer.OrdinalIgnoreCase)
+                .Take(maxIndexEntries))
+            {
+                sb.AppendLine("- " + GetDisplayPath(state, path));
+                listed++;
+            }
+            if (files.Count > listed)
+                sb.AppendLine($"... and {files.Count - listed} more file(s)");
+            sb.AppendLine();
+
             sb.AppendLine("When proposing codebase changes, output this exact structured patch envelope:");
             sb.AppendLine("[[AXIOM_CODEBASE_PATCH]]");
             sb.AppendLine("FILE: relative/path/from/workspace.ext");
@@ -290,7 +336,7 @@ namespace Axiom.Core.Workspace
             sb.AppendLine("Use ACTION: create only for new files. Do not use delete actions. Do not output partial replacement files.");
             sb.AppendLine("Use the exact connected workspace path for the target file. Do not rename file extensions.");
             sb.AppendLine();
-            sb.AppendLine("RELEVANT FILES:");
+            sb.AppendLine("RELEVANT FILE CONTENTS:");
 
             int remaining = Math.Max(1200, maxChars);
             // Per-file caps scale with the packet budget. The fixed 8k/24k caps were sized for
@@ -1620,16 +1666,29 @@ namespace Axiom.Core.Workspace
         private static string BuildUnavailablePacket(ConnectedWorkspaceState state)
         {
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("The user enabled Codebase Edit Access, but no readable local code files are connected yet.");
-            sb.AppendLine($"Locked model mode: {state.LockedMode}");
+            bool hasRoot = !string.IsNullOrWhiteSpace(state.RootPath) && Directory.Exists(state.RootPath);
+
+            // Folder is connected but index found nothing readable (empty dir, binaries-only, etc.).
+            // Do NOT tell the model "ask the user to connect a folder" — that causes false "no access" replies.
+            if (hasRoot)
+            {
+                sb.AppendLine("[[CONNECTED WORKSPACE — YOU HAVE ACCESS]]");
+                sb.AppendLine($"The user connected a local folder at: {state.RootPath}");
+                sb.AppendLine("The folder is connected and accessible to this session.");
+                sb.AppendLine("No indexable source/text files were found under that root (empty folder, only binaries/media, or all paths ignored).");
+                sb.AppendLine("Never claim the user did not connect a folder. Report what you can see (the root path) and ask which files to inspect if needed.");
+                sb.AppendLine("[[END ACCESS NOTICE]]");
+                return sb.ToString().Trim();
+            }
+
+            sb.AppendLine("Codebase Edit Access is enabled, but no local folder or files are connected yet.");
             sb.AppendLine($"Connection: {state.ConnectionKind}");
             if (!string.IsNullOrWhiteSpace(state.RepositoryUrl))
             {
                 sb.AppendLine($"Repository URL: {state.RepositoryUrl}");
-                if (string.IsNullOrWhiteSpace(state.RootPath))
-                    sb.AppendLine("A repository URL is recorded, but the repo must be cloned locally or connected through a provider integration before file reads/edits can run.");
+                sb.AppendLine("A repository URL is recorded, but the repo must be cloned locally or connected through a provider integration before file reads/edits can run.");
             }
-            sb.AppendLine("Ask the user to connect a local folder or files before making codebase-specific claims.");
+            sb.AppendLine("Ask the user to connect a local folder (CLI: /browse or /workspace <path>) before making codebase-specific claims.");
             return sb.ToString().Trim();
         }
 
