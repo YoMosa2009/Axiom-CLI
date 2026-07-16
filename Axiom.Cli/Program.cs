@@ -110,7 +110,7 @@ internal static class Program
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
         AnsiConsole.MarkupLine($"  [{gold}]axiom help[/]                    Show this help");
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[{muted}]Chat: /help · @ lock folder · /sessions · PgUp/PgDn scroll · same TUI on every OS[/]");
+        AnsiConsole.MarkupLine($"[{muted}]Chat: /help · @ lock folder · /sessions · ↑↓ scroll · same TUI on every OS[/]");
         return 0;
     }
 
@@ -542,7 +542,7 @@ internal static class Program
                 Say("  /session load <n|id>  Resume a saved session");
                 Say("  /session delete <n|id> Delete a saved session");
                 Say("  /clear                Clear the current chat transcript");
-                Say("  PgUp/PgDn             Scroll chat history");
+                Say("  Up/Down (empty input) Scroll chat history (also PgUp/PgDn, Shift+arrows, wheel)");
                 Say("  exit                  Leave chat");
                 Say("Tools: council (Architect → agentic Builder with file/shell tools → Critic) · web-search · calculator · sandbox");
                 Say("  Builder writes real files in the locked workspace (write_file / run_shell), not chat-only.");
