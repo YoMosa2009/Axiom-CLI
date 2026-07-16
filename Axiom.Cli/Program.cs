@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Axiom.Cli.Ui;
 using Axiom.Core;
+using Axiom.Core.Agent;
 using Axiom.Core.Chat;
 using Axiom.Core.Council;
 using Axiom.Core.Persistence;
@@ -22,6 +24,10 @@ internal static class Program
         (OpenRouterChatService.Hepha1ModelId, "Hepha 1", "Code-specialized")
     ];
 
+    private static readonly Regex PathInMessageRegex = new(
+        @"(?<q>[""'])(?<path>[^""']+)\k<q>|(?<path>(?:[A-Za-z]:\\|/)[^\s""']+)",
+        RegexOptions.Compiled);
+
     private static async Task<int> Main(string[] args)
     {
         bool ownedFlag = args.Any(a => a.Equals("--owned", StringComparison.OrdinalIgnoreCase));
@@ -32,11 +38,8 @@ internal static class Program
         UpdateInstaller.CleanupPendingBackups();
         ConsoleUi.ConfigureConsole();
 
-        // Interactive chat opens in a dedicated full console window (Windows). The child is
-        // marked --owned / AXIOM_CLI_OWNED so it does not re-spawn.
         if (command == "chat" && !ownedFlag && !SessionLauncher.IsOwnedSession)
         {
-            // Rebuild the arg list the child should see (including --model if present).
             var launchArgs = new List<string>(args);
             if (!string.IsNullOrWhiteSpace(modelOverride))
             {
@@ -74,8 +77,6 @@ internal static class Program
         }
     }
 
-    // Pulls "--model <id>" out of the args wherever it appears (e.g. "axiom code --model hepha
-    // <task>" or "axiom chat --model eidos"), leaving the remaining args for normal parsing.
     private static string? ExtractModelFlag(ref string[] args)
     {
         int index = Array.FindIndex(args, a => a.Equals("--model", StringComparison.OrdinalIgnoreCase));
@@ -102,15 +103,14 @@ internal static class Program
         string gold = AxiomTheme.Hex(AxiomTheme.Gold);
         string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
         AnsiConsole.MarkupLine($"[bold]axiom[/] [{muted}]— Axiom CLI (cloud mode)[/]");
-        AnsiConsole.MarkupLine("");
+        AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key");
         AnsiConsole.MarkupLine($"  [{gold}]axiom chat[/] [[--model <id>]]     Start chat in a dedicated window (Windows)");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--model <id>]] <task>   Run the Architect/Builder/Critic council against the current directory");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--model <id>]] <task>   Run the Architect/Builder/Critic council");
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
         AnsiConsole.MarkupLine($"  [{gold}]axiom help[/]                    Show this help");
-        AnsiConsole.MarkupLine("");
-        AnsiConsole.MarkupLine($"[{muted}]Models: eidos (Eidos 1, general-purpose) · hepha (Hepha 1, code-specialized)[/]");
-        AnsiConsole.MarkupLine($"[{muted}]In chat: type / for the tool & command menu (↑↓ + Enter).[/]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine($"[{muted}]In chat: / tools · @ folders · agent can shell/build/edit inside attached workspaces[/]");
         return 0;
     }
 
@@ -126,9 +126,6 @@ internal static class Program
         return success ? 0 : 1;
     }
 
-    // Fire-and-forget, bounded to a couple seconds so a slow/unreachable GitHub never delays
-    // startup — the check result (if it arrives in time) is only shown after the session ends,
-    // mirroring the WPF app's non-blocking startup update notice.
     private static async Task ShowUpdateNoticeIfAvailableAsync()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
@@ -189,7 +186,6 @@ internal static class Program
     {
         if (Console.IsInputRedirected)
             return Console.ReadLine();
-
         return AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).Secret());
     }
 
@@ -197,7 +193,6 @@ internal static class Program
     {
         if (Console.IsInputRedirected)
             return Console.ReadLine();
-
         return AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).AllowEmpty());
     }
 
@@ -206,11 +201,20 @@ internal static class Program
         public required OpenRouterChatService ChatService { get; init; }
         public required string ModelId { get; set; }
         public required string ModelLabel { get; set; }
-        public IChatPipeline Pipeline { get; private set; } = null!;
         public SessionToolSettings Tools { get; } = new();
         public List<OpenRouterMessage> History { get; } = new();
+        public required WorkspaceSession Workspace { get; init; }
+        public required AgentToolExecutor ToolExecutor { get; init; }
 
-        public void RebuildPipeline() => Pipeline = new CloudChatPipeline(ChatService, ModelId);
+        public AgentLoop CreateAgent() => new(ChatService, ToolExecutor, Workspace, ModelId);
+
+        public (int Used, int Max) EstimateContext()
+        {
+            int max = ChatService.GetApproximateContextWindowTokens(ModelId);
+            string system = FoundationSystemPrompt.Apply("You are Axiom.");
+            int used = ChatService.EstimateConversationTokens(History, system);
+            return (used, max);
+        }
     }
 
     private static async Task<int> RunChatAsync(string? modelOverride)
@@ -228,22 +232,40 @@ internal static class Program
         (string modelId, string modelLabel) = ResolveInitialModel(modelOverride);
         var chatService = new OpenRouterChatService();
         chatService.SetApiKey(apiKey);
-        var session = new ChatSession { ChatService = chatService, ModelId = modelId, ModelLabel = modelLabel };
-        session.RebuildPipeline();
 
-        ConsoleUi.ShowWelcome(session.ModelLabel, session.Tools);
+        var recent = new RecentFoldersStore();
+        var workspace = new WorkspaceSession(recent);
+        var toolExecutor = new AgentToolExecutor(workspace);
+        var session = new ChatSession
+        {
+            ChatService = chatService,
+            ModelId = modelId,
+            ModelLabel = modelLabel,
+            Workspace = workspace,
+            ToolExecutor = toolExecutor
+        };
+
+        // Startup frame — Gargantua — cleared on the first real chat turn.
+        bool showArt = !Console.IsOutputRedirected;
+        if (showArt)
+            GargantuaArt.Render();
+
+        (int used, int max) = session.EstimateContext();
+        ConsoleUi.ShowWelcome(session.ModelLabel, session.Tools, used, max, session.Workspace.Roots);
 
         int turnCount = 0;
         while (true)
         {
+            (used, max) = session.EstimateContext();
             AnsiConsole.WriteLine();
             string? input = ChatInput.ReadLine(
                 session.Tools,
-                () => ChatInput.BuildDefaultItems(session.Tools, ModelCatalog),
+                () => ChatInput.BuildSlashItems(session.Tools, ModelCatalog),
+                () => ChatInput.BuildFolderItems(session.Workspace.Recent.GetRecent()),
                 result => HandleMenuAction(result, session));
 
             if (input == null)
-                break; // stdin closed (EOF)
+                break;
             if (string.IsNullOrWhiteSpace(input))
                 continue;
             if (input.Equals("exit", StringComparison.OrdinalIgnoreCase) || input.Equals("quit", StringComparison.OrdinalIgnoreCase))
@@ -252,28 +274,42 @@ internal static class Program
             if (TryHandleSlashCommand(input, session))
                 continue;
 
-            string userMessage = await AugmentWithToolResultsAsync(input, session.Tools);
-            var request = new ChatPipelineRequest(FoundationSystemPrompt.Text, userMessage, session.History);
+            // First message clears the startup black-hole art.
+            if (showArt)
+            {
+                GargantuaArt.Clear();
+                showArt = false;
+                (used, max) = session.EstimateContext();
+                ConsoleUi.ShowWelcome(session.ModelLabel, session.Tools, used, max, session.Workspace.Roots);
+            }
 
+            AttachPathsMentionedInMessage(input, session);
+
+            string grounded = await AugmentWithToolResultsAsync(input, session.Tools);
             var thinking = new ConsoleUi.ThinkingIndicator();
             var stream = new ConsoleUi.TokenStream();
+
             try
             {
-                ChatPipelineResult result = await session.Pipeline.ExecuteAsync(
-                    request,
+                AgentLoop agent = session.CreateAgent();
+                AgentTurnResult result = await agent.RunAsync(
+                    grounded,
+                    session.History,
                     onToken: token =>
                     {
                         thinking.Stop();
                         stream.WriteToken(token);
                     },
+                    onStatus: status => thinking.SetLabel(status.TrimStart('⚙', '✓', ' ')),
                     CancellationToken.None);
 
                 thinking.Stop();
                 stream.Complete();
-                session.History.Add(new OpenRouterMessage("user", input));
-                session.History.Add(new OpenRouterMessage("assistant", result.ResponseText));
+                ConsoleUi.WriteWorkedFor(result.Elapsed, result.ToolCallCount);
+
                 turnCount++;
-                ConsoleUi.StatusFooter(session.ModelLabel, session.Tools, turnCount);
+                (used, max) = session.EstimateContext();
+                ConsoleUi.StatusFooter(session.ModelLabel, session.Tools, turnCount, used, max);
             }
             catch (Exception ex)
             {
@@ -291,12 +327,39 @@ internal static class Program
         return 0;
     }
 
-    private static void HandleMenuAction(ChatInput.SlashResult result, ChatSession session)
+    private static void AttachPathsMentionedInMessage(string input, ChatSession session)
     {
-        // Tool toggles update session state immediately; the slash menu redraws with new ●/○.
-        // Avoid printing extra lines here — that would fight the in-place editor redraw.
+        foreach (Match match in PathInMessageRegex.Matches(input))
+        {
+            string path = match.Groups["path"].Value;
+            if (session.Workspace.TryAttach(path))
+            {
+                AnsiConsole.MarkupLine(
+                    $"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Attached workspace:[/] [{AxiomTheme.Hex(AxiomTheme.Gold)}]{path.EscapeMarkup()}[/]");
+            }
+        }
+    }
+
+    private static void HandleMenuAction(ChatInput.MenuResult result, ChatSession session)
+    {
         if (result.Kind == "toggle-tool" && !string.IsNullOrWhiteSpace(result.ToolName))
             session.Tools.TryToggle(result.ToolName, out _);
+
+        if (result.Kind == "attach-folder" && !string.IsNullOrWhiteSpace(result.FolderPath))
+        {
+            if (session.Workspace.TryAttach(result.FolderPath))
+            {
+                // Confirmation is visible via workspace header after art clear / next footer.
+                // Keep editor clean — a single soft status line:
+                try
+                {
+                    int top = Console.CursorTop;
+                    // Don't break the input block; remember silently + soft beep-free confirm after submit.
+                    _ = top;
+                }
+                catch { }
+            }
+        }
     }
 
     private static (string Id, string Label) ResolveInitialModel(string? modelOverride)
@@ -325,10 +388,6 @@ internal static class Program
             return 1;
         }
 
-        // The council stays on one model for the whole task rather than falling back mid-run — a
-        // silent model swap leaves the replacement model unable to continue what the first model
-        // started (see the WPF app's changelog for the incident this fixed). --model overrides
-        // the council's usual default; otherwise it keeps using the GUI app's council default.
         string councilModelId = OpenRouterChatService.WorkplaceCouncilDefaultModelId;
         string councilModelLabel = "Workplace Council default";
         if (!string.IsNullOrWhiteSpace(modelOverride) && TryResolveModel(modelOverride, out var match))
@@ -355,16 +414,23 @@ internal static class Program
             RootPath = root
         };
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         CouncilResult result = await orchestrator.RunAsync(
             new CouncilRequest(task, workspaceState),
             CouncilConsoleRenderer.Create(),
             CancellationToken.None);
+        sw.Stop();
 
         if (!result.Success || result.Patch == null)
         {
             AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]The council could not produce an applyable patch.[/]");
             if (!string.IsNullOrWhiteSpace(result.FinalText))
-                AnsiConsole.MarkupLine(result.FinalText.EscapeMarkup());
+            {
+                ConsoleUi.WriteAssistantPrefix();
+                LinkText.WriteWithLinks(result.FinalText);
+                Console.WriteLine();
+            }
+            ConsoleUi.WriteWorkedFor(sw.Elapsed);
             return 1;
         }
 
@@ -380,6 +446,7 @@ internal static class Program
             AnsiConsole.WriteLine();
         }
 
+        ConsoleUi.WriteWorkedFor(sw.Elapsed);
         AnsiConsole.Markup($"Apply these changes? [{AxiomTheme.Hex(AxiomTheme.Success)}]y[/]/[{AxiomTheme.Hex(AxiomTheme.Error)}]n[/]: ");
         string? answer = ReadLinePlain();
         if (!string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
@@ -422,7 +489,6 @@ internal static class Program
                     {
                         session.ModelId = match.Id;
                         session.ModelLabel = match.Label;
-                        session.RebuildPipeline();
                         AnsiConsole.MarkupLine($"Switched to [{AxiomTheme.Hex(AxiomTheme.Gold)}]{match.Label}[/].");
                     }
                     else
@@ -433,6 +499,14 @@ internal static class Program
                 ConsoleUi.ShowModelPanel(session.ModelLabel, ModelCatalog);
                 return true;
 
+            case "/workspace":
+            case "/ws":
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.TextPrimary)}]Attached workspaces:[/]");
+                foreach (string root in session.Workspace.Roots)
+                    AnsiConsole.MarkupLine($"  [{AxiomTheme.Hex(AxiomTheme.Gold)}]•[/] {root.EscapeMarkup()}");
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Tip: type @ to pick a recent folder, or paste a path in your message.[/]");
+                return true;
+
             case "/clear":
                 session.History.Clear();
                 AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Conversation cleared.[/]");
@@ -440,7 +514,7 @@ internal static class Program
 
             case "/help":
                 AnsiConsole.MarkupLine(
-                    $"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Press [/][{AxiomTheme.Hex(AxiomTheme.Gold)}]/[/][{AxiomTheme.Hex(AxiomTheme.SystemMuted)}] for tools & models. Commands: /tools, /model, /clear, exit[/]");
+                    $"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}][/][{AxiomTheme.Hex(AxiomTheme.Gold)}]/[/][{AxiomTheme.Hex(AxiomTheme.SystemMuted)}] tools  [/][{AxiomTheme.Hex(AxiomTheme.Gold)}]@[/][{AxiomTheme.Hex(AxiomTheme.SystemMuted)}] folders  /workspace  /model  /clear  exit[/]");
                 return true;
 
             default:
@@ -449,10 +523,6 @@ internal static class Program
         }
     }
 
-    // Mirrors the WPF app's deterministic tool-intent routing (LocalToolIntentRouter): a
-    // calculator/web-search/sandbox request detected in the user's own text is executed locally
-    // and the result is handed to the model as grounded context, rather than trusting the model
-    // to compute or recall it. Each tool only runs when the user has enabled it via /tools.
     private static async Task<string> AugmentWithToolResultsAsync(string input, SessionToolSettings tools)
     {
         if (tools.CalculatorEnabled && CalculatorToolAgent.TryBuildContext(input, out string calcContext, out _))

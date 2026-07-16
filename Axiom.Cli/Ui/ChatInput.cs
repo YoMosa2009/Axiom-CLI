@@ -6,28 +6,32 @@ using Spectre.Console;
 
 namespace Axiom.Cli.Ui;
 
-// Claude Code / Codex-style line editor. Typing "/" opens a compact dropdown above the prompt;
-// ↑↓ moves, Enter selects (toggles tools or runs a command), Esc closes the menu.
+// Line editor with two palettes:
+//   /  → tools & commands
+//   @  → recent / attachable folders
 internal static class ChatInput
 {
-    public sealed record SlashItem(
+    public sealed record MenuItem(
         string Id,
         string Label,
         string Description,
         bool IsTool,
-        bool? Enabled);
+        bool? Enabled,
+        string Kind); // "slash" | "folder"
 
-    public sealed class SlashResult
+    public sealed class MenuResult
     {
-        public required string Kind { get; init; } // "toggle-tool" | "command"
+        public required string Kind { get; init; } // "toggle-tool" | "command" | "attach-folder"
         public string? ToolName { get; init; }
         public string? Command { get; init; }
+        public string? FolderPath { get; init; }
     }
 
     public static string? ReadLine(
         SessionToolSettings tools,
-        Func<IReadOnlyList<SlashItem>> buildItems,
-        Action<SlashResult> onMenuAction)
+        Func<IReadOnlyList<MenuItem>> buildSlashItems,
+        Func<IReadOnlyList<MenuItem>> buildFolderItems,
+        Action<MenuResult> onMenuAction)
     {
         if (Console.IsInputRedirected)
             return Console.ReadLine();
@@ -36,9 +40,9 @@ internal static class ChatInput
         int cursor = 0;
         int selected = 0;
         int blockStartTop = SafeCursorTop();
-        int blockHeight = 1; // prompt line only at first
+        int blockHeight = 1;
 
-        DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+        DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
 
         while (true)
         {
@@ -46,15 +50,16 @@ internal static class ChatInput
 
             if (key.Key == ConsoleKey.Enter)
             {
-                bool menuOpen = ShouldShowMenu(buffer.ToString());
-                if (menuOpen)
+                string text = buffer.ToString();
+                MenuMode mode = GetMenuMode(text, cursor);
+                if (mode != MenuMode.None)
                 {
-                    IReadOnlyList<SlashItem> items = FilteredItems(buildItems(), buffer.ToString());
+                    IReadOnlyList<MenuItem> items = GetFilteredItems(text, cursor, mode, buildSlashItems, buildFolderItems);
                     if (items.Count > 0)
                     {
-                        SlashItem pick = items[Math.Clamp(selected, 0, items.Count - 1)];
-                        string? submit = ApplySelection(pick, onMenuAction, buffer, ref cursor, ref selected);
-                        DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                        MenuItem pick = items[Math.Clamp(selected, 0, items.Count - 1)];
+                        string? submit = ApplySelection(pick, onMenuAction, buffer, ref cursor, ref selected, mode);
+                        DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                         if (submit != null)
                         {
                             FinishBlock(ref blockStartTop, ref blockHeight);
@@ -72,13 +77,20 @@ internal static class ChatInput
 
             if (key.Key == ConsoleKey.Escape)
             {
-                if (ShouldShowMenu(buffer.ToString()))
+                if (GetMenuMode(buffer.ToString(), cursor) != MenuMode.None)
                 {
-                    // Close the slash palette and clear the partial command.
-                    buffer.Clear();
-                    cursor = 0;
+                    // Close active token only.
+                    if (GetMenuMode(buffer.ToString(), cursor) == MenuMode.Slash && buffer.ToString().TrimStart().StartsWith('/'))
+                    {
+                        buffer.Clear();
+                        cursor = 0;
+                    }
+                    else
+                    {
+                        RemoveActiveAtToken(buffer, ref cursor);
+                    }
                     selected = 0;
-                    DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                    DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 }
                 continue;
             }
@@ -91,7 +103,7 @@ internal static class ChatInput
                     cursor--;
                 }
                 selected = 0;
-                DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
@@ -100,51 +112,54 @@ internal static class ChatInput
                 if (cursor < buffer.Length)
                     buffer.Remove(cursor, 1);
                 selected = 0;
-                DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
             if (key.Key == ConsoleKey.LeftArrow)
             {
                 if (cursor > 0) cursor--;
-                DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                selected = 0;
+                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
             if (key.Key == ConsoleKey.RightArrow)
             {
                 if (cursor < buffer.Length) cursor++;
-                DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                selected = 0;
+                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
             if (key.Key == ConsoleKey.Home)
             {
                 cursor = 0;
-                DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
             if (key.Key == ConsoleKey.End)
             {
                 cursor = buffer.Length;
-                DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
             if (key.Key is ConsoleKey.UpArrow or ConsoleKey.DownArrow)
             {
-                if (!ShouldShowMenu(buffer.ToString()))
+                MenuMode mode = GetMenuMode(buffer.ToString(), cursor);
+                if (mode == MenuMode.None)
                     continue;
 
-                IReadOnlyList<SlashItem> items = FilteredItems(buildItems(), buffer.ToString());
+                IReadOnlyList<MenuItem> items = GetFilteredItems(buffer.ToString(), cursor, mode, buildSlashItems, buildFolderItems);
                 if (items.Count == 0)
                     continue;
 
                 selected = key.Key == ConsoleKey.UpArrow
                     ? (selected - 1 + items.Count) % items.Count
                     : (selected + 1) % items.Count;
-                DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+                DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
                 continue;
             }
 
@@ -154,21 +169,156 @@ internal static class ChatInput
             buffer.Insert(cursor, key.KeyChar);
             cursor++;
             selected = 0;
-            DrawBlock(buffer, cursor, selected, buildItems, ref blockStartTop, ref blockHeight);
+            DrawBlock(buffer, cursor, selected, buildSlashItems, buildFolderItems, ref blockStartTop, ref blockHeight);
         }
     }
 
-    // Returns a synthetic submit string for commands that should leave the editor; null to stay.
+    private enum MenuMode { None, Slash, At }
+
+    private static MenuMode GetMenuMode(string text, int cursor)
+    {
+        if (string.IsNullOrEmpty(text))
+            return MenuMode.None;
+
+        // Slash menu: buffer is a slash command (starts with / and no newline)
+        if (text.StartsWith('/') && !text.Contains('\n'))
+        {
+            // Still slash-mode while typing command tokens.
+            if (!text.Contains(' ') || IsKnownSlashHead(text.Split(' ', 2)[0]))
+                return MenuMode.Slash;
+        }
+
+        // @ menu: active when cursor sits in an @token
+        if (TryGetAtToken(text, cursor, out _, out _, out _))
+            return MenuMode.At;
+
+        return MenuMode.None;
+    }
+
+    private static bool IsKnownSlashHead(string head)
+    {
+        head = head.ToLowerInvariant();
+        return head is "/" or "/tools" or "/model" or "/clear" or "/help" or "/workspace"
+            || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
+            || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
+            || head.StartsWith("/w") || head.StartsWith("/a");
+    }
+
+    private static bool TryGetAtToken(string text, int cursor, out int start, out int end, out string token)
+    {
+        start = end = 0;
+        token = string.Empty;
+        int i = Math.Clamp(cursor, 0, text.Length);
+
+        // Find '@' before cursor with no whitespace between.
+        int at = -1;
+        for (int p = i - 1; p >= 0; p--)
+        {
+            char c = text[p];
+            if (c == '@')
+            {
+                // Start of token if at beginning or preceded by whitespace
+                if (p == 0 || char.IsWhiteSpace(text[p - 1]))
+                {
+                    at = p;
+                    break;
+                }
+                return false;
+            }
+            if (char.IsWhiteSpace(c))
+                return false;
+        }
+
+        if (at < 0)
+            return false;
+
+        end = at + 1;
+        while (end < text.Length && !char.IsWhiteSpace(text[end]))
+            end++;
+
+        // Cursor must be inside the token
+        if (cursor < at || cursor > end)
+            return false;
+
+        start = at;
+        token = text[at..end];
+        return true;
+    }
+
+    private static void RemoveActiveAtToken(StringBuilder buffer, ref int cursor)
+    {
+        string text = buffer.ToString();
+        if (!TryGetAtToken(text, cursor, out int start, out int end, out _))
+            return;
+        buffer.Remove(start, end - start);
+        cursor = start;
+    }
+
+    private static IReadOnlyList<MenuItem> GetFilteredItems(
+        string text,
+        int cursor,
+        MenuMode mode,
+        Func<IReadOnlyList<MenuItem>> buildSlashItems,
+        Func<IReadOnlyList<MenuItem>> buildFolderItems)
+    {
+        if (mode == MenuMode.Slash)
+        {
+            string filter = text.StartsWith('/') ? text[1..] : text;
+            if (filter.StartsWith("model ", StringComparison.OrdinalIgnoreCase))
+                filter = filter["model ".Length..];
+            else if (filter.StartsWith("tools", StringComparison.OrdinalIgnoreCase))
+                filter = filter.Length > 5 ? filter[5..].TrimStart() : string.Empty;
+
+            return Filter(buildSlashItems(), filter);
+        }
+
+        if (mode == MenuMode.At && TryGetAtToken(text, cursor, out _, out _, out string token))
+        {
+            string filter = token.StartsWith('@') ? token[1..] : token;
+            return Filter(buildFolderItems(), filter);
+        }
+
+        return Array.Empty<MenuItem>();
+    }
+
+    private static IReadOnlyList<MenuItem> Filter(IReadOnlyList<MenuItem> all, string filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter))
+            return all;
+        return all
+            .Where(i => i.Label.Contains(filter, StringComparison.OrdinalIgnoreCase)
+                || i.Id.Contains(filter, StringComparison.OrdinalIgnoreCase)
+                || i.Description.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
     private static string? ApplySelection(
-        SlashItem pick,
-        Action<SlashResult> onMenuAction,
+        MenuItem pick,
+        Action<MenuResult> onMenuAction,
         StringBuilder buffer,
         ref int cursor,
-        ref int selected)
+        ref int selected,
+        MenuMode mode)
     {
+        if (mode == MenuMode.At || pick.Kind == "folder")
+        {
+            onMenuAction(new MenuResult { Kind = "attach-folder", FolderPath = pick.Id });
+            // Replace @token with the path (quoted if spaces)
+            string text = buffer.ToString();
+            if (TryGetAtToken(text, cursor, out int start, out int end, out _))
+            {
+                string insert = pick.Id.Contains(' ') ? $"\"{pick.Id}\"" : pick.Id;
+                buffer.Remove(start, end - start);
+                buffer.Insert(start, insert + " ");
+                cursor = start + insert.Length + 1;
+            }
+            selected = 0;
+            return null;
+        }
+
         if (pick.IsTool)
         {
-            onMenuAction(new SlashResult { Kind = "toggle-tool", ToolName = pick.Id });
+            onMenuAction(new MenuResult { Kind = "toggle-tool", ToolName = pick.Id });
             buffer.Clear();
             buffer.Append('/');
             cursor = 1;
@@ -176,14 +326,12 @@ internal static class ChatInput
             return null;
         }
 
-        onMenuAction(new SlashResult { Kind = "command", Command = pick.Id });
+        onMenuAction(new MenuResult { Kind = "command", Command = pick.Id });
 
-        if (pick.Id == "exit")
-            return "exit";
-        if (pick.Id == "clear")
-            return "/clear";
-        if (pick.Id == "help")
-            return "/help";
+        if (pick.Id == "exit") return "exit";
+        if (pick.Id == "clear") return "/clear";
+        if (pick.Id == "help") return "/help";
+        if (pick.Id == "workspace") return "/workspace";
         if (pick.Id.StartsWith("model:", StringComparison.Ordinal))
             return "/model " + pick.Id["model:".Length..];
 
@@ -197,38 +345,45 @@ internal static class ChatInput
         StringBuilder buffer,
         int cursor,
         int selected,
-        Func<IReadOnlyList<SlashItem>> buildItems,
+        Func<IReadOnlyList<MenuItem>> buildSlashItems,
+        Func<IReadOnlyList<MenuItem>> buildFolderItems,
         ref int blockStartTop,
         ref int blockHeight)
     {
         string text = buffer.ToString();
-        bool showMenu = ShouldShowMenu(text);
-        IReadOnlyList<SlashItem> items = showMenu
-            ? FilteredItems(buildItems(), text)
-            : Array.Empty<SlashItem>();
+        MenuMode mode = GetMenuMode(text, cursor);
+        IReadOnlyList<MenuItem> items = mode == MenuMode.None
+            ? Array.Empty<MenuItem>()
+            : GetFilteredItems(text, cursor, mode, buildSlashItems, buildFolderItems);
 
         int width = SafeWidth();
         var lines = new List<string>();
 
-        if (showMenu)
+        if (mode != MenuMode.None)
         {
-            lines.Add("  ↑↓ navigate  ·  enter select  ·  esc clears /");
+            string hint = mode == MenuMode.At
+                ? "  ↑↓ folders  ·  enter attach  ·  esc cancel"
+                : "  ↑↓ navigate  ·  enter select  ·  esc clear";
+            lines.Add(hint);
+
             if (items.Count == 0)
             {
-                lines.Add("  (no matches)");
+                lines.Add(mode == MenuMode.At ? "  (no recent folders — type a path)" : "  (no matches)");
             }
             else
             {
                 selected = Math.Clamp(selected, 0, items.Count - 1);
                 for (int i = 0; i < items.Count; i++)
                 {
-                    SlashItem item = items[i];
+                    MenuItem item = items[i];
                     bool active = i == selected;
                     string marker = active ? "❯" : " ";
                     string status = item.IsTool
                         ? (item.Enabled == true ? " ● on " : " ○ off")
                         : "      ";
-                    string line = $"  {marker} {item.Label,-12}{status}  {item.Description}";
+                    string line = mode == MenuMode.At
+                        ? $"  {marker} {item.Label}"
+                        : $"  {marker} {item.Label,-12}{status}  {item.Description}";
                     if (line.Length > width - 1)
                         line = line[..Math.Max(8, width - 4)] + "...";
                     lines.Add(line);
@@ -236,10 +391,8 @@ internal static class ChatInput
             }
         }
 
-        // Prompt line always last.
         lines.Add("❯ " + text);
 
-        // Clear previous block and redraw from blockStartTop.
         try
         {
             int clearRows = Math.Max(blockHeight, lines.Count);
@@ -256,7 +409,6 @@ internal static class ChatInput
                 }
             }
 
-            // If the buffer is short on rows, scroll by writing newlines at end.
             int neededBottom = blockStartTop + lines.Count;
             while (neededBottom >= Console.BufferHeight)
             {
@@ -270,8 +422,8 @@ internal static class ChatInput
             {
                 Console.SetCursorPosition(0, blockStartTop + i);
                 bool isPrompt = i == lines.Count - 1;
-                bool isHint = showMenu && i == 0;
-                bool isActive = showMenu && items.Count > 0 && i == selected + 1; // +1 for hint row
+                bool isHint = mode != MenuMode.None && i == 0;
+                bool isActive = mode != MenuMode.None && items.Count > 0 && i == selected + 1;
 
                 if (isPrompt)
                 {
@@ -279,27 +431,20 @@ internal static class ChatInput
                     Console.Write(text);
                 }
                 else if (isActive)
-                {
                     WriteGold(lines[i]);
-                }
                 else if (isHint)
-                {
                     WriteMuted(lines[i]);
-                }
                 else
-                {
                     WriteSecondary(lines[i]);
-                }
             }
 
             blockHeight = lines.Count;
-            int promptCol = 2 + cursor; // "❯ "
+            int promptCol = 2 + cursor;
             int promptTop = blockStartTop + lines.Count - 1;
             Console.SetCursorPosition(Math.Min(promptCol, width - 1), promptTop);
         }
         catch
         {
-            // Last-resort fallback when the host rejects cursor control.
             Console.Write("\r");
             WriteGold("❯ ");
             Console.Write(text);
@@ -311,68 +456,20 @@ internal static class ChatInput
     {
         try
         {
-            // Park cursor at end of the block so following WriteLine continues below.
-            Console.SetCursorPosition(0, blockStartTop + Math.Max(0, blockHeight - 1));
-            // Move to end of line content visually.
-            Console.Write("\r");
-            // Jump past the block.
             int end = Math.Min(Console.BufferHeight - 1, blockStartTop + blockHeight - 1);
             Console.SetCursorPosition(0, end);
         }
-        catch { /* ignore */ }
-    }
-
-    private static bool ShouldShowMenu(string text)
-    {
-        if (string.IsNullOrEmpty(text) || text[0] != '/')
-            return false;
-        // Hide once the user is typing a normal sentence after a completed command-ish token.
-        // Keep open for "/", "/cal", "/model", "/model e".
-        if (!text.Contains(' '))
-            return true;
-        string head = text.Split(' ', 2)[0].ToLowerInvariant();
-        return head is "/" or "/tools" or "/model" or "/clear" or "/help"
-            || head.StartsWith("/t", StringComparison.Ordinal)
-            || head.StartsWith("/m", StringComparison.Ordinal)
-            || head.StartsWith("/c", StringComparison.Ordinal)
-            || head.StartsWith("/h", StringComparison.Ordinal)
-            || head.StartsWith("/e", StringComparison.Ordinal)
-            || head.StartsWith("/s", StringComparison.Ordinal)
-            || head.StartsWith("/w", StringComparison.Ordinal);
-    }
-
-    private static IReadOnlyList<SlashItem> FilteredItems(IReadOnlyList<SlashItem> all, string buffer)
-    {
-        string filter = buffer.StartsWith('/') ? buffer[1..] : buffer;
-        if (filter.StartsWith("model ", StringComparison.OrdinalIgnoreCase))
-            filter = filter["model ".Length..];
-        else if (filter.StartsWith("tools", StringComparison.OrdinalIgnoreCase))
-            filter = filter.Length > 5 ? filter[5..].TrimStart() : string.Empty;
-
-        if (string.IsNullOrWhiteSpace(filter))
-            return all;
-
-        return all
-            .Where(i => i.Label.Contains(filter, StringComparison.OrdinalIgnoreCase)
-                || i.Id.Contains(filter, StringComparison.OrdinalIgnoreCase)
-                || i.Description.Contains(filter, StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        catch { }
     }
 
     private static void WriteGold(string text)
-    {
-        AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.Gold)}]{text.EscapeMarkup()}[/]");
-    }
+        => AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.Gold)}]{text.EscapeMarkup()}[/]");
 
     private static void WriteMuted(string text)
-    {
-        AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]{text.EscapeMarkup()}[/]");
-    }
+        => AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]{text.EscapeMarkup()}[/]");
 
     private static void WriteSecondary(string text)
-    {
-        AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.TextSecondary)}]{text.EscapeMarkup()}[/]");
-    }
+        => AnsiConsole.Markup($"[{AxiomTheme.Hex(AxiomTheme.TextSecondary)}]{text.EscapeMarkup()}[/]");
 
     private static int SafeWidth()
     {
@@ -386,23 +483,58 @@ internal static class ChatInput
         catch { return 0; }
     }
 
-    public static IReadOnlyList<SlashItem> BuildDefaultItems(
+    public static IReadOnlyList<MenuItem> BuildSlashItems(
         SessionToolSettings tools,
         IReadOnlyList<(string Id, string Label, string Description)> models)
     {
-        var items = new List<SlashItem>
+        var items = new List<MenuItem>
         {
-            new("calculator", "calculator", "Math & unit conversion", true, tools.CalculatorEnabled),
-            new("web-search", "web-search", "Live web lookup", true, tools.WebSearchEnabled),
-            new("sandbox", "sandbox", "Local Python execution", true, tools.SandboxEnabled),
+            new("calculator", "calculator", "Math & unit conversion", true, tools.CalculatorEnabled, "slash"),
+            new("web-search", "web-search", "Live web lookup", true, tools.WebSearchEnabled, "slash"),
+            new("sandbox", "sandbox", "Local Python execution", true, tools.SandboxEnabled, "slash"),
+            new("workspace", "workspace", "Show attached folders", false, null, "slash"),
         };
 
         foreach (var m in models)
-            items.Add(new($"model:{m.Id}", m.Label, m.Description, false, null));
+            items.Add(new($"model:{m.Id}", m.Label, m.Description, false, null, "slash"));
 
-        items.Add(new("clear", "clear", "Reset conversation history", false, null));
-        items.Add(new("help", "help", "Show command help", false, null));
-        items.Add(new("exit", "exit", "Leave chat", false, null));
+        items.Add(new("clear", "clear", "Reset conversation history", false, null, "slash"));
+        items.Add(new("help", "help", "Show command help", false, null, "slash"));
+        items.Add(new("exit", "exit", "Leave chat", false, null, "slash"));
+        return items;
+    }
+
+    public static IReadOnlyList<MenuItem> BuildFolderItems(IReadOnlyList<string> recentFolders)
+    {
+        var items = new List<MenuItem>();
+        foreach (string path in recentFolders)
+        {
+            string label;
+            try { label = path; }
+            catch { label = path; }
+
+            string desc;
+            try { desc = new System.IO.DirectoryInfo(path).Name; }
+            catch { desc = path; }
+
+            // Show folder name as label, full path as description if space.
+            string name;
+            try { name = new System.IO.DirectoryInfo(path).Name; }
+            catch { name = path; }
+
+            items.Add(new(path, $"{name}  —  {path}", "Attach workspace", false, null, "folder"));
+        }
+
+        // Always offer the current directory.
+        string cwd = Environment.CurrentDirectory;
+        if (!items.Any(i => string.Equals(i.Id, cwd, StringComparison.OrdinalIgnoreCase)))
+        {
+            string name;
+            try { name = new System.IO.DirectoryInfo(cwd).Name; }
+            catch { name = cwd; }
+            items.Insert(0, new(cwd, $"{name}  —  {cwd}  (cwd)", "Current directory", false, null, "folder"));
+        }
+
         return items;
     }
 }
