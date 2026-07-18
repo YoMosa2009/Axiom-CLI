@@ -1,12 +1,9 @@
 using System.Collections.Generic;
+using Axiom.Core.Agent;
 
 namespace Axiom.Cli;
 
-// Manual tool enablement for the current chat session.
-// Council defaults on (main multi-agent feature from the desktop app).
-// Calculator is always safe; web search leaves the machine (defaults on);
-// Python/Java sandbox defaults off until the user opts in — when on, council
-// Critic receives real sandbox logs (same rails as desktop Workplace).
+// Manual tool enablement + approval mode for the current chat session.
 internal sealed class SessionToolSettings
 {
     public bool CalculatorEnabled { get; set; } = true;
@@ -14,12 +11,47 @@ internal sealed class SessionToolSettings
     public bool SandboxEnabled { get; set; }
     public bool CouncilEnabled { get; set; } = true;
 
+    /// <summary>Auto | Ask | Plan — how freely tools may mutate the workspace.</summary>
+    public ApprovalMode ApprovalMode { get; set; } = ApprovalMode.Auto;
+
     public IEnumerable<(string Name, bool Enabled)> AsList()
     {
         yield return ("council", CouncilEnabled);
         yield return ("calculator", CalculatorEnabled);
         yield return ("web-search", WebSearchEnabled);
         yield return ("sandbox", SandboxEnabled);
+    }
+
+    public string ApprovalLabel => ApprovalMode switch
+    {
+        ApprovalMode.Ask => "ask",
+        ApprovalMode.Plan => "plan",
+        _ => "auto"
+    };
+
+    public bool TrySetApproval(string name)
+    {
+        switch ((name ?? string.Empty).Trim().ToLowerInvariant())
+        {
+            case "auto":
+            case "yolo":
+                ApprovalMode = ApprovalMode.Auto;
+                return true;
+            case "ask":
+            case "confirm":
+            case "safe":
+                ApprovalMode = ApprovalMode.Ask;
+                return true;
+            case "plan":
+            case "readonly":
+            case "read-only":
+            case "dry":
+            case "dry-run":
+                ApprovalMode = ApprovalMode.Plan;
+                return true;
+            default:
+                return false;
+        }
     }
 
     public bool TrySet(string name, bool enabled)

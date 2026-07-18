@@ -223,13 +223,17 @@ internal static class ConsoleUi
     private static (string Name, bool Enabled, string Description)[] ToolDescriptions(SessionToolSettings tools) =>
     [
         ("council", tools.CouncilEnabled, "Architect → Builder → Critic multi-agent pipeline"),
+        ("mode", true, "approval " + tools.ApprovalLabel),
         ("calculator", tools.CalculatorEnabled, "Math expressions and unit conversions"),
         ("web-search", tools.WebSearchEnabled, "Live information lookup"),
         ("sandbox", tools.SandboxEnabled, "Local Python execution (off by default)")
     ];
 
     public static string ToolChipsPlain(SessionToolSettings tools)
-        => string.Join("  ", tools.AsList().Select(t => (t.Enabled ? "● " : "○ ") + t.Name));
+    {
+        string chips = string.Join("  ", tools.AsList().Select(t => (t.Enabled ? "● " : "○ ") + t.Name));
+        return chips + "  ·  " + tools.ApprovalLabel;
+    }
 
     public static void ShowModelPanel(string currentModelLabel, (string Id, string Label, string Description)[] models)
     {

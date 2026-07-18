@@ -24,6 +24,7 @@ namespace Axiom.Core.Agent
         private readonly WebSearchService _webSearch = new();
         private readonly List<string> _writtenPaths = new();
         private readonly object _writeGate = new();
+        private readonly FileChangeUndo _undo = new();
 
         public AgentToolExecutor(WorkspaceSession workspace)
         {
@@ -32,6 +33,16 @@ namespace Axiom.Core.Agent
 
         /// <summary>When false, web_search is omitted from the tool list and rejected if called.</summary>
         public bool WebSearchEnabled { get; set; } = true;
+
+        public ApprovalMode ApprovalMode { get; set; } = ApprovalMode.Auto;
+
+        /// <summary>Optional host prompt for Ask mode (write/shell/download).</summary>
+        public ToolApprovalHandler? ApprovalHandler { get; set; }
+
+        /// <summary>Optional subagent factory for spawn_subagent tool.</summary>
+        public Func<SubagentKind, string, CancellationToken, Task<SubagentResult>>? SubagentHandler { get; set; }
+
+        public FileChangeUndo Undo => _undo;
 
         /// <summary>Absolute paths successfully written via write_file since last <see cref="ClearWrittenPaths"/>.</summary>
         public IReadOnlyList<string> WrittenPaths
@@ -43,6 +54,10 @@ namespace Axiom.Core.Agent
         {
             lock (_writeGate) _writtenPaths.Clear();
         }
+
+        public void BeginUndoTurn(string label) => _undo.BeginTurn(label);
+
+        public void CommitUndoTurn() => _undo.CommitTurn();
 
         public enum ToolScope
         {
@@ -87,13 +102,49 @@ namespace Axiom.Core.Agent
 
                 new(
                     "search_files",
-                    "Search for a text pattern across files in an attached workspace directory.",
+                    "Ripgrep-class search across the workspace (uses rg when installed). Returns path:line:snippet.",
                     Schema(new JsonObject
                     {
-                        ["query"] = Prop("string", "Text to search for"),
+                        ["query"] = Prop("string", "Text or regex to search for"),
                         ["path"] = Prop("string", "Directory to search (default: primary workspace)"),
-                        ["glob"] = Prop("string", "Optional file extension filter e.g. *.cs")
-                    }, required: ["query"]))
+                        ["glob"] = Prop("string", "Optional file filter e.g. *.cs"),
+                        ["regex"] = Prop("boolean", "If true, treat query as regex (default false)"),
+                        ["max_hits"] = Prop("integer", "Max matches (default 80, max 200)")
+                    }, required: ["query"])),
+
+                new(
+                    "git_status",
+                    "Show git status --short --branch for the workspace root.",
+                    Schema(new JsonObject(), required: [])),
+
+                new(
+                    "git_diff",
+                    "Show git diff (optionally staged).",
+                    Schema(new JsonObject
+                    {
+                        ["staged"] = Prop("boolean", "If true, show staged diff only")
+                    }, required: [])),
+
+                new(
+                    "git_log",
+                    "Show recent commits (oneline).",
+                    Schema(new JsonObject
+                    {
+                        ["count"] = Prop("integer", "How many commits (default 12)")
+                    }, required: [])),
+
+                new(
+                    "git_branch",
+                    "List local branches (-vv).",
+                    Schema(new JsonObject(), required: [])),
+
+                new(
+                    "diagnostics",
+                    "Detect project type and run build/test diagnostics (dotnet/npm/pytest/cargo/go).",
+                    Schema(new JsonObject
+                    {
+                        ["prefer"] = Prop("string", "Optional: dotnet|node|python|rust|go")
+                    }, required: []))
             };
 
             if (scope == ToolScope.Full)
@@ -116,6 +167,53 @@ namespace Axiom.Core.Agent
                         ["path"] = Prop("string", "Destination file path inside the workspace")
                     }, required: ["url", "path"])));
 
+                tools.Add(new(
+                    "git_commit",
+                    "Stage all changes and create a git commit with the given message.",
+                    Schema(new JsonObject
+                    {
+                        ["message"] = Prop("string", "Commit message")
+                    }, required: ["message"])));
+
+                tools.Add(new(
+                    "git_checkout",
+                    "Checkout an existing branch or create a new one.",
+                    Schema(new JsonObject
+                    {
+                        ["branch"] = Prop("string", "Branch name"),
+                        ["create"] = Prop("boolean", "If true, create with checkout -b")
+                    }, required: ["branch"])));
+
+                tools.Add(new(
+                    "worktree_create",
+                    "Create an isolated git worktree + branch for agent work (does not merge).",
+                    Schema(new JsonObject
+                    {
+                        ["branch"] = Prop("string", "Optional branch name (default axiom/timestamp)")
+                    }, required: [])));
+
+                tools.Add(new(
+                    "worktree_list",
+                    "List git worktrees for the repo.",
+                    Schema(new JsonObject(), required: [])));
+
+                tools.Add(new(
+                    "worktree_remove",
+                    "Remove a git worktree by path.",
+                    Schema(new JsonObject
+                    {
+                        ["path"] = Prop("string", "Worktree path from worktree_list")
+                    }, required: ["path"])));
+
+                tools.Add(new(
+                    "spawn_subagent",
+                    "Run a bounded specialist subagent: explore (read-only), tests, or fix.",
+                    Schema(new JsonObject
+                    {
+                        ["kind"] = Prop("string", "explore | tests | fix"),
+                        ["task"] = Prop("string", "What the subagent should do")
+                    }, required: ["kind", "task"])));
+
                 if (WebSearchEnabled)
                 {
                     tools.Add(new(
@@ -134,7 +232,9 @@ namespace Axiom.Core.Agent
         public async Task<string> ExecuteAsync(string toolName, string argumentsJson, CancellationToken token, ToolScope scope = ToolScope.Full)
         {
             if (scope == ToolScope.Inspect
-                && toolName is "write_file" or "download_file" or "web_search")
+                && toolName is "write_file" or "download_file" or "web_search"
+                    or "git_commit" or "git_checkout" or "worktree_create" or "worktree_remove"
+                    or "spawn_subagent")
             {
                 return $"Error: tool '{toolName}' is not available in Critic inspect mode.";
             }
@@ -148,24 +248,120 @@ namespace Axiom.Core.Agent
             {
                 using JsonDocument doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(argumentsJson) ? "{}" : argumentsJson);
                 JsonElement root = doc.RootElement;
+                string name = toolName ?? string.Empty;
 
-                return toolName switch
+                // Approval / plan gates for mutating tools.
+                if (IsMutatingTool(name))
+                {
+                    string summary = BuildApprovalSummary(name, root);
+                    if (ApprovalMode == ApprovalMode.Plan)
+                        return $"Plan-only: would run {name} — {summary}";
+
+                    if (ApprovalMode == ApprovalMode.Ask && ApprovalHandler != null)
+                    {
+                        bool ok = await ApprovalHandler(
+                            new ToolApprovalRequest(name, summary, argumentsJson ?? "{}"),
+                            token);
+                        if (!ok)
+                            return $"Denied: user rejected {name} ({summary})";
+                    }
+                }
+
+                return name switch
                 {
                     "run_shell" => await RunShellAsync(root, token),
                     "read_file" => ReadFile(root),
                     "write_file" => WriteFile(root),
                     "list_dir" => ListDir(root),
                     "download_file" => await DownloadAsync(root, token),
-                    "search_files" => SearchFiles(root),
+                    "search_files" => await SearchFilesAsync(root, token),
                     "web_search" => await WebSearchAsync(root, token),
+                    "git_status" => await GitWorkspaceService.StatusAsync(_workspace.PrimaryRoot, token),
+                    "git_diff" => await GitWorkspaceService.DiffAsync(
+                        _workspace.PrimaryRoot, token,
+                        staged: root.TryGetProperty("staged", out JsonElement st) && st.ValueKind == JsonValueKind.True),
+                    "git_log" => await GitWorkspaceService.LogAsync(
+                        _workspace.PrimaryRoot, token,
+                        count: root.TryGetProperty("count", out JsonElement c) && c.TryGetInt32(out int n) ? n : 12),
+                    "git_branch" => await GitWorkspaceService.BranchAsync(_workspace.PrimaryRoot, token),
+                    "git_commit" => await GitWorkspaceService.CommitAsync(
+                        _workspace.PrimaryRoot, GetString(root, "message"), token),
+                    "git_checkout" => await GitWorkspaceService.CheckoutBranchAsync(
+                        _workspace.PrimaryRoot,
+                        GetString(root, "branch"),
+                        create: root.TryGetProperty("create", out JsonElement cr) && cr.ValueKind == JsonValueKind.True,
+                        token),
+                    "diagnostics" => await DiagnosticsService.RunAsync(
+                        _workspace.PrimaryRoot, token, GetString(root, "prefer")),
+                    "worktree_create" => await GitWorktreeService.CreateAsync(
+                        _workspace.PrimaryRoot, GetString(root, "branch"), token),
+                    "worktree_list" => await GitWorktreeService.ListAsync(_workspace.PrimaryRoot, token),
+                    "worktree_remove" => await GitWorktreeService.RemoveAsync(
+                        _workspace.PrimaryRoot, GetString(root, "path"), token),
+                    "spawn_subagent" => await SpawnSubagentAsync(root, token),
                     _ => $"Unknown tool: {toolName}"
                 };
+            }
+            catch (OperationCanceledException)
+            {
+                return "Error: cancelled.";
             }
             catch (Exception ex)
             {
                 return $"Tool error ({toolName}): {ex.Message}";
             }
         }
+
+        private static bool IsMutatingTool(string name) => name is
+            "write_file" or "run_shell" or "download_file" or "git_commit" or "git_checkout"
+            or "worktree_create" or "worktree_remove" or "spawn_subagent";
+
+        private static string BuildApprovalSummary(string name, JsonElement root) => name switch
+        {
+            "write_file" => "write " + GetString(root, "path"),
+            "run_shell" => GetString(root, "command"),
+            "download_file" => GetString(root, "url") + " → " + GetString(root, "path"),
+            "git_commit" => "commit: " + GetString(root, "message"),
+            "git_checkout" => "checkout " + GetString(root, "branch"),
+            "spawn_subagent" => GetString(root, "kind") + ": " + Truncate(GetString(root, "task"), 60),
+            _ => name
+        };
+
+        private async Task<string> SpawnSubagentAsync(JsonElement root, CancellationToken token)
+        {
+            if (SubagentHandler == null)
+                return "Error: subagents are not configured in this host.";
+
+            string kindRaw = GetString(root, "kind").Trim().ToLowerInvariant();
+            string task = GetString(root, "task");
+            if (string.IsNullOrWhiteSpace(task))
+                return "Error: task is required for spawn_subagent.";
+
+            SubagentKind kind = kindRaw switch
+            {
+                "explore" or "search" or "map" => SubagentKind.Explore,
+                "tests" or "test" => SubagentKind.Tests,
+                "fix" or "repair" => SubagentKind.Fix,
+                _ => SubagentKind.Fix
+            };
+
+            SubagentResult result = await SubagentHandler(kind, task, token);
+            var sb = new StringBuilder();
+            sb.AppendLine($"subagent: {result.Kind}");
+            sb.AppendLine($"tool_calls: {result.ToolCalls}");
+            if (result.WrittenPaths.Count > 0)
+            {
+                sb.AppendLine("written:");
+                foreach (string p in result.WrittenPaths)
+                    sb.AppendLine("  - " + p);
+            }
+            sb.AppendLine("--- summary ---");
+            sb.AppendLine(result.Summary);
+            return Trim(sb.ToString());
+        }
+
+        private static string Truncate(string s, int max)
+            => string.IsNullOrEmpty(s) ? string.Empty : (s.Length <= max ? s : s[..(max - 1)] + "…");
 
         private async Task<string> WebSearchAsync(JsonElement root, CancellationToken token)
         {
@@ -314,13 +510,49 @@ namespace Axiom.Core.Agent
                 Directory.CreateDirectory(dir);
 
             string content = GetString(root, "content");
+            _undo.RecordBeforeWrite(path);
+            string? before = null;
+            try
+            {
+                if (File.Exists(path) && new FileInfo(path).Length < 400_000)
+                    before = File.ReadAllText(path);
+            }
+            catch { /* ignore */ }
+
             File.WriteAllText(path, content ?? string.Empty);
             lock (_writeGate)
             {
                 _writtenPaths.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
                 _writtenPaths.Add(path);
             }
-            return $"Wrote {content?.Length ?? 0} chars to {path}";
+
+            string diffHint = string.Empty;
+            if (before != null)
+            {
+                try
+                {
+                    var entries = Workspace.LineDiff.Build(before, content ?? string.Empty);
+                    var diff = new StringBuilder();
+                    int shown = 0;
+                    foreach (var e in entries)
+                    {
+                        if (e.Kind == Workspace.LineDiffKind.Unchanged)
+                            continue;
+                        char mark = e.Kind == Workspace.LineDiffKind.Added ? '+' : '-';
+                        diff.Append(mark).Append(' ').AppendLine(e.Text);
+                        if (++shown >= 40)
+                        {
+                            diff.AppendLine("...[diff truncated]");
+                            break;
+                        }
+                    }
+                    if (shown > 0)
+                        diffHint = "\n--- diff preview ---\n" + diff.ToString().TrimEnd();
+                }
+                catch { /* optional */ }
+            }
+
+            return $"Wrote {content?.Length ?? 0} chars to {path}{diffHint}";
         }
 
         private string ListDir(JsonElement root)
@@ -385,7 +617,7 @@ namespace Axiom.Core.Agent
             return $"Downloaded {info.Length} bytes to {path}";
         }
 
-        private string SearchFiles(JsonElement root)
+        private async Task<string> SearchFilesAsync(JsonElement root, CancellationToken token)
         {
             string query = GetString(root, "query");
             if (string.IsNullOrWhiteSpace(query))
@@ -401,45 +633,12 @@ namespace Axiom.Core.Agent
                 return $"Error: directory not found: {path}";
 
             string? glob = GetString(root, "glob");
-            var sb = new StringBuilder();
-            int hits = 0;
+            bool regex = root.TryGetProperty("regex", out JsonElement re) && re.ValueKind == JsonValueKind.True;
+            int maxHits = 80;
+            if (root.TryGetProperty("max_hits", out JsonElement mh) && mh.TryGetInt32(out int m))
+                maxHits = m;
 
-            foreach (string file in Directory.EnumerateFiles(path, string.IsNullOrWhiteSpace(glob) ? "*" : glob, SearchOption.AllDirectories))
-            {
-                if (!_workspace.IsPathAllowed(file))
-                    continue;
-
-                string ext = Path.GetExtension(file).ToLowerInvariant();
-                if (ext is ".dll" or ".exe" or ".pdb" or ".png" or ".jpg" or ".jpeg" or ".gif" or ".zip" or ".pdf")
-                    continue;
-
-                string text;
-                try
-                {
-                    var info = new FileInfo(file);
-                    if (info.Length > 1_500_000)
-                        continue;
-                    text = File.ReadAllText(file);
-                }
-                catch { continue; }
-
-                string[] lines = text.Split('\n');
-                for (int i = 0; i < lines.Length; i++)
-                {
-                    if (lines[i].Contains(query, StringComparison.OrdinalIgnoreCase))
-                    {
-                        string rel = Path.GetRelativePath(path, file).Replace('\\', '/');
-                        string line = lines[i].TrimEnd('\r');
-                        if (line.Length > 200)
-                            line = line[..200] + "...";
-                        sb.AppendLine($"{rel}:{i + 1}: {line}");
-                        if (++hits >= 80)
-                            return Trim(sb.ToString()) + "\n...[truncated]";
-                    }
-                }
-            }
-
-            return hits == 0 ? "No matches." : Trim(sb.ToString());
+            return await WorkspaceSearchService.SearchAsync(path, query, glob, regex, maxHits, token);
         }
 
         private static JsonObject Schema(JsonObject properties, string[] required)

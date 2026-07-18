@@ -27,6 +27,8 @@ namespace Axiom.Core.Council
         ArchitectOutput,
         BuilderOutput,
         CriticOutput,
+        Tool,
+        Token,
         Warning,
         Completed,
         Failed
@@ -41,5 +43,6 @@ namespace Axiom.Core.Council
         CriticReport FinalCriticReport,
         int ToolCallCount = 0,
         IReadOnlyList<string>? ChangedFiles = null,
-        string? ApplySummary = null);
+        string? ApplySummary = null,
+        bool Cancelled = false);
 }

@@ -14,9 +14,10 @@ namespace Axiom.Core.Agent
         int ToolCallCount,
         int EstimatedPromptTokens,
         int ContextWindowTokens,
-        bool Failed = false);
+        bool Failed = false,
+        bool Cancelled = false);
 
-    // Multi-step tool-using chat turn: model may call shell/file/download tools repeatedly
+    // Multi-step tool-using chat turn: model may call shell/file/git tools repeatedly
     // (bounded) before producing a final user-facing answer.
     public sealed class AgentLoop
     {
@@ -42,16 +43,21 @@ namespace Axiom.Core.Agent
             List<OpenRouterMessage> history,
             Action<string>? onToken,
             Action<string>? onStatus,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Action<ToolEvent>? onToolEvent = null)
         {
             var sw = Stopwatch.StartNew();
             bool failed = false;
+            bool cancelled = false;
 
-            string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt());
+            string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt(_tools.ApprovalMode));
             string workspaceBlock = _workspace.BuildContextBlock();
-            string effectiveUser = string.IsNullOrWhiteSpace(workspaceBlock)
-                ? userMessage
-                : userMessage + "\n\n" + workspaceBlock;
+            string memory = ProjectMemory.BuildContextBlock(_workspace.PrimaryRoot);
+            string effectiveUser = userMessage;
+            if (!string.IsNullOrWhiteSpace(memory))
+                effectiveUser += "\n\n" + memory;
+            if (!string.IsNullOrWhiteSpace(workspaceBlock))
+                effectiveUser += "\n\n" + workspaceBlock;
 
             int contextWindow = _chat.GetApproximateContextWindowTokens(_modelId);
             int promptTokens = _chat.EstimateConversationTokens(
@@ -60,6 +66,7 @@ namespace Axiom.Core.Agent
             string finalText = string.Empty;
             int toolCalls = 0;
 
+            _tools.BeginUndoTurn("agent");
             try
             {
                 var loop = new ToolCallingLoop(_chat, _tools, _modelId);
@@ -67,12 +74,29 @@ namespace Axiom.Core.Agent
                     system,
                     effectiveUser,
                     onStatus,
-                    cancellationToken);
+                    cancellationToken,
+                    AgentToolExecutor.ToolScope.Full,
+                    onToolEvent: onToolEvent,
+                    onToken: onToken);
 
                 finalText = result.FinalText;
                 toolCalls = result.ToolCallCount;
-                if (!string.IsNullOrEmpty(finalText))
-                    onToken?.Invoke(finalText);
+                cancelled = result.Cancelled;
+                // Streamed tokens already delivered via onToken during generation; if model
+                // returned tool-free text only through response.Text path, ensure flush.
+                if (toolCalls == 0 && !string.IsNullOrEmpty(finalText) && onToken == null)
+                {
+                    // no-op
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                cancelled = true;
+                failed = true;
+                onStatus?.Invoke("Stopped");
+                finalText = string.IsNullOrEmpty(finalText)
+                    ? "(Stopped by user.)"
+                    : finalText + "\n\n(Stopped by user.)";
             }
             catch
             {
@@ -82,6 +106,7 @@ namespace Axiom.Core.Agent
             }
             finally
             {
+                _tools.CommitUndoTurn();
                 sw.Stop();
             }
 
@@ -94,21 +119,34 @@ namespace Axiom.Core.Agent
                 toolCalls,
                 promptTokens,
                 contextWindow,
-                failed);
+                failed,
+                cancelled);
         }
 
-        private static string BuildAgentSystemPrompt()
+        private static string BuildAgentSystemPrompt(ApprovalMode mode)
         {
+            string approval = mode switch
+            {
+                ApprovalMode.Plan =>
+                    "Approval mode is PLAN: do not mutate the workspace. Prefer search/read/diagnostics; " +
+                    "mutating tools return Plan-only previews.\n",
+                ApprovalMode.Ask =>
+                    "Approval mode is ASK: the user may approve or deny write/shell/network actions.\n",
+                _ =>
+                    "Approval mode is AUTO inside the attached workspace sandbox.\n"
+            };
+
             return
-                "You are Axiom, a terminal coding agent with tools for shell, files, search, and downloads.\n" +
-                "When a message includes [[ATTACHED WORKSPACES — YOU HAVE ACCESS]], the user's local folder " +
-                "is connected: you DO have filesystem access inside those roots via tools. Never say you " +
-                "cannot access their computer, project, or files while that block is present — call list_dir, " +
-                "read_file, search_files, or run_shell instead.\n" +
-                "Inspect the tree, run builds/tests, edit files, install packages, and download assets as needed.\n" +
-                "Prefer tools over guessing file contents. Be concise in final answers.\n" +
+                "You are Axiom, a terminal coding agent with tools for shell, files, git, search, diagnostics, and downloads.\n" +
+                approval +
+                "When a message includes [[ATTACHED WORKSPACES — YOU HAVE ACCESS]] or [[PROJECT MEMORY]], " +
+                "the user's local project is connected — use tools; never claim you lack access.\n" +
+                "Follow [[PROJECT MEMORY]] conventions when present (AXIOM.md / AGENTS.md).\n" +
+                "Tools include: write_file, read_file, list_dir, search_files (rg), run_shell, " +
+                "git_status/diff/log/commit/branch, diagnostics, worktree_*, spawn_subagent (explore|tests|fix), web_search.\n" +
+                "Prefer tools over guessing. Be concise in final answers.\n" +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +
-                "When done, answer the user clearly with what changed and how to run it.";
+                "When done, answer clearly with what changed and how to run/test it.";
         }
     }
 }

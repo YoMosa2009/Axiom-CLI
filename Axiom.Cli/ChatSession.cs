@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Axiom.Core.Agent;
 using Axiom.Core.Chat;
 using Axiom.Core.Council;
@@ -16,16 +18,26 @@ internal sealed class ChatSession
     public required WorkspaceSession Workspace { get; init; }
     public required AgentToolExecutor ToolExecutor { get; init; }
 
-    public AgentLoop CreateAgent()
+    public void ApplyToolSettings()
     {
         ToolExecutor.WebSearchEnabled = Tools.WebSearchEnabled;
+        ToolExecutor.ApprovalMode = Tools.ApprovalMode;
+        ToolExecutor.SubagentHandler = async (kind, task, ct) =>
+        {
+            var runner = new SubagentRunner(ChatService, ToolExecutor, Workspace, ModelId);
+            return await runner.RunAsync(kind, task, onStatus: null, onToolEvent: null, ct);
+        };
+    }
+
+    public AgentLoop CreateAgent()
+    {
+        ApplyToolSettings();
         return new AgentLoop(ChatService, ToolExecutor, Workspace, ModelId);
     }
 
     public CouncilOrchestrator CreateCouncil()
     {
-        // Council: Architect → agentic Builder (file/shell tools) → Critic (+ static validation).
-        ToolExecutor.WebSearchEnabled = Tools.WebSearchEnabled;
+        ApplyToolSettings();
         var pipeline = new CloudChatPipeline(ChatService, ModelId);
         return new CouncilOrchestrator(
             pipeline,

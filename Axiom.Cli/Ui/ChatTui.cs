@@ -11,6 +11,7 @@ using Axiom.Core.Council;
 using Axiom.Core.Memory;
 using Axiom.Core.Tools;
 using Axiom.Core.Workspace;
+// ProjectMemory, ToolEvent, ToolCallingLoop, ApprovalMode from Axiom.Core.Agent
 
 namespace Axiom.Cli.Ui;
 
@@ -50,6 +51,11 @@ internal sealed class ChatTui : IDisposable
     private DateTime _lastPaint = DateTime.MinValue;
     private string _sessionId = SessionStore.NewId();
     private DateTime _sessionCreated = DateTime.UtcNow;
+    private CancellationTokenSource? _turnCts;
+    private readonly StringBuilder _streamBuffer = new();
+    private int _streamAssistantIndex = -1;
+    private TaskCompletionSource<bool>? _approvalTcs;
+    private string _approvalPrompt = string.Empty;
 
     // Session bindings
     private ChatSession? _session;
@@ -190,7 +196,19 @@ internal sealed class ChatTui : IDisposable
             PushSystem("OpenRouter API key saved.");
         }
 
-        PushSystem($"Axiom ready · {session.ModelLabel} · council {(session.Tools.CouncilEnabled ? "on (agentic Builder)" : "off")} · /help · @ or /browse for folders");
+        // Resume last session if present (Claude Code-style continuity).
+        TryAutoResumeLastSession();
+
+        string mode = session.Tools.ApprovalLabel;
+        PushSystem(
+            $"Axiom ready · {session.ModelLabel} · council {(session.Tools.CouncilEnabled ? "on" : "off")} · mode {mode} · Esc stops · /undo · /help");
+
+        var memFiles = ProjectMemory.ListLoadedFiles(session.Workspace.PrimaryRoot);
+        if (memFiles.Count > 0)
+            PushSystem("Project memory: " + string.Join(", ", memFiles));
+
+        // Wire approval prompts for Ask mode.
+        session.ToolExecutor.ApprovalHandler = PromptToolApprovalAsync;
 
         using var animCts = new CancellationTokenSource();
         var animTask = AnimateLoopAsync(animCts.Token);
@@ -209,6 +227,37 @@ internal sealed class ChatTui : IDisposable
                 }
 
                 ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+
+                // Approve/deny modal takes Esc/y/n while waiting.
+                if (_approvalTcs != null)
+                {
+                    if (key.Key is ConsoleKey.Y || key.KeyChar is 'y' or 'Y')
+                    {
+                        _approvalTcs.TrySetResult(true);
+                        _approvalTcs = null;
+                        _approvalPrompt = string.Empty;
+                        Paint(force: true);
+                        continue;
+                    }
+                    if (key.Key is ConsoleKey.N or ConsoleKey.Escape || key.KeyChar is 'n' or 'N')
+                    {
+                        _approvalTcs.TrySetResult(false);
+                        _approvalTcs = null;
+                        _approvalPrompt = string.Empty;
+                        Paint(force: true);
+                        continue;
+                    }
+                }
+
+                // Esc stops the in-flight turn (Claude Code / Codex style).
+                if (_busy && key.Key == ConsoleKey.Escape)
+                {
+                    _turnCts?.Cancel();
+                    SetActivity("Stopping…");
+                    Paint(force: true);
+                    continue;
+                }
+
                 if (await HandleKeyAsync(key))
                     Paint();
             }
@@ -627,6 +676,9 @@ internal sealed class ChatTui : IDisposable
         Paint(force: true);
 
         _busy = true;
+        _turnCts?.Dispose();
+        _turnCts = new CancellationTokenSource();
+        CancellationToken turnToken = _turnCts.Token;
         SetActivity(ActivityStatus.Thinking);
         int assistantIndex = -1;
         var sw = Stopwatch.StartNew();
@@ -640,7 +692,7 @@ internal sealed class ChatTui : IDisposable
 
             if (_session.Tools.CouncilEnabled)
             {
-                await RunCouncilTurnAsync(grounded, sw);
+                await RunCouncilTurnAsync(grounded, sw, turnToken);
             }
             else
             {
@@ -673,7 +725,12 @@ internal sealed class ChatTui : IDisposable
                         SetActivity(status);
                         Paint();
                     },
-                    CancellationToken.None);
+                    turnToken,
+                    onToolEvent: ev =>
+                    {
+                        PushToolTrail(ev);
+                        ThrottledPaint();
+                    });
 
                 await PumpScrollWhileAsync(agentTask);
 
@@ -686,10 +743,20 @@ internal sealed class ChatTui : IDisposable
                 else if (assistantIndex >= 0)
                     lock (_gate) _messages[assistantIndex].Text = result.ResponseText ?? collected.ToString();
 
-                PushStatus(ActivityStatus.SummarizeTurn(result.Elapsed, result.ToolCallCount, result.Failed));
+                string summary = ActivityStatus.SummarizeTurn(result.Elapsed, result.ToolCallCount, result.Failed || result.Cancelled);
+                if (result.Cancelled)
+                    summary += " · stopped";
+                PushStatus(summary);
             }
 
             _turnCount++;
+            AutoSave();
+        }
+        catch (OperationCanceledException)
+        {
+            sw.Stop();
+            PushSystem("Turn stopped.");
+            PushStatus(ActivityStatus.SummarizeTurn(sw.Elapsed, toolCalls, failed: true));
             AutoSave();
         }
         catch (Exception ex)
@@ -703,19 +770,96 @@ internal sealed class ChatTui : IDisposable
         {
             _busy = false;
             _activity = string.Empty;
+            _streamBuffer.Clear();
+            _streamAssistantIndex = -1;
+            _turnCts?.Dispose();
+            _turnCts = null;
             _scrollFromBottom = 0;
             Paint(force: true);
         }
     }
 
+    private void PushToolTrail(ToolEvent ev)
+    {
+        string mark = ev.Phase switch
+        {
+            ToolEventPhase.Started => "●",
+            ToolEventPhase.Finished => "✓",
+            ToolEventPhase.Denied => "✗",
+            ToolEventPhase.Planned => "◇",
+            _ => "·"
+        };
+        string line = $"{mark} {ev.ToolName}";
+        if (!string.IsNullOrWhiteSpace(ev.Detail))
+            line += "  " + Truncate(ev.Detail, 72);
+        if (ev.Phase != ToolEventPhase.Started && !string.IsNullOrWhiteSpace(ev.ResultPreview))
+            line += "  →  " + Truncate(ev.ResultPreview!, 48);
+        PushSystem(line);
+        if (ev.Phase == ToolEventPhase.Started)
+            SetActivity(ToolCallingLoop.DescribeToolStart(new OpenRouterToolCall("x", ev.ToolName, "{}")));
+    }
+
+    private async Task<bool> PromptToolApprovalAsync(ToolApprovalRequest req, CancellationToken token)
+    {
+        _approvalPrompt = $"Allow {req.ToolName}?  {Truncate(req.Summary, 60)}  [y/n]";
+        SetActivity(_approvalPrompt);
+        Paint(force: true);
+
+        _approvalTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var reg = token.Register(() => _approvalTcs.TrySetResult(false));
+        try
+        {
+            return await _approvalTcs.Task;
+        }
+        finally
+        {
+            _approvalPrompt = string.Empty;
+            _approvalTcs = null;
+        }
+    }
+
+    private void TryAutoResumeLastSession()
+    {
+        if (_session == null)
+            return;
+        var list = _sessionStore.List(max: 1);
+        if (list.Count == 0)
+            return;
+        // Only auto-resume if this is a brand-new empty chat and last session has content.
+        lock (_gate)
+        {
+            if (_messages.Count > 1) // ready line may already be there — check history
+                return;
+        }
+        if (_session.History.Count > 0)
+            return;
+
+        SessionListItem last = list[0];
+        if (last.MessageCount < 2)
+            return;
+        if (TryLoadSession(last.Id, out _))
+            PushSystem($"Resumed last session: {last.Title}");
+    }
+
+    public string UndoLastTurn()
+    {
+        if (_session == null)
+            return "No session.";
+        string summary = _session.ToolExecutor.Undo.UndoLast();
+        PushSystem(summary);
+        return summary;
+    }
+
     // Architect → Builder → Critic pipeline (mirrors desktop Workplace council control flow).
-    private async Task RunCouncilTurnAsync(string grounded, Stopwatch sw)
+    private async Task RunCouncilTurnAsync(string grounded, Stopwatch sw, CancellationToken token)
     {
         if (_session == null)
             return;
 
         SetActivity("Council · Architect planning");
         Paint();
+        _streamBuffer.Clear();
+        _streamAssistantIndex = -1;
 
         var progress = new Progress<CouncilEvent>(evt =>
         {
@@ -725,15 +869,25 @@ internal sealed class ChatTui : IDisposable
                 case CouncilEventKind.Warning:
                     SetActivity(evt.Message);
                     break;
+                case CouncilEventKind.Tool:
+                    PushSystem(evt.Message);
+                    break;
+                case CouncilEventKind.Token:
+                    AppendStreamToken(evt.Message);
+                    break;
                 case CouncilEventKind.ArchitectOutput:
                     SetActivity("Council · Architect done");
+                    FlushStreamAsSystem("Architect plan");
                     PushSystem("Architect plan\n" + Truncate(evt.Message, 1200));
                     break;
                 case CouncilEventKind.BuilderOutput:
                     SetActivity("Council · Builder working");
+                    // Final builder text becomes the assistant answer later; keep stream as working log.
+                    FlushStreamAsSystem("Builder draft");
                     break;
                 case CouncilEventKind.CriticOutput:
                     SetActivity("Council · Critic reviewing");
+                    FlushStreamAsSystem("Critic");
                     PushSystem("Critic review\n" + Truncate(evt.Message, 800));
                     break;
                 case CouncilEventKind.Completed:
@@ -743,7 +897,7 @@ internal sealed class ChatTui : IDisposable
                     SetActivity("Council · Failed");
                     break;
             }
-            Paint();
+            ThrottledPaint();
         });
 
         ConnectedWorkspaceState? wsState = null;
@@ -777,7 +931,7 @@ internal sealed class ChatTui : IDisposable
         Task<CouncilResult> task = council.RunAsync(
             new CouncilRequest(grounded, wsState, _session.CouncilTools()),
             progress,
-            CancellationToken.None);
+            token);
 
         await PumpScrollWhileAsync(task);
         CouncilResult result = await task;
@@ -793,14 +947,18 @@ internal sealed class ChatTui : IDisposable
             PushSystem(applyNote);
         }
 
-        PushAssistant(string.IsNullOrWhiteSpace(final) ? "(Council produced no text.)" : final);
+        PushAssistant(string.IsNullOrWhiteSpace(final)
+            ? (result.Cancelled ? "(Stopped.)" : "(Council produced no text.)")
+            : final);
         _session.History.Add(new OpenRouterMessage("user", grounded));
         _session.History.Add(new OpenRouterMessage("assistant", final));
 
         int toolish = Math.Max(3, result.ToolCallCount); // roles + tool calls
-        string summary = result.Success
+        string summary = result.Success && !result.Cancelled
             ? ActivityStatus.SummarizeTurn(sw.Elapsed, toolish)
             : ActivityStatus.SummarizeTurn(sw.Elapsed, toolish, failed: true);
+        if (result.Cancelled)
+            summary += " · stopped";
         if (result.ToolCallCount > 0)
             summary += $" · {result.ToolCallCount} tool call(s)";
         if (result.ChangedFiles is { Count: > 0 })
@@ -808,6 +966,45 @@ internal sealed class ChatTui : IDisposable
         if (result.FinalCriticReport != null && result.FinalCriticReport.HasIssues)
             summary += $" · Critic: {result.FinalCriticReport.FindingsCount} issue(s)";
         PushStatus("Council · " + summary);
+    }
+
+    private void AppendStreamToken(string token)
+    {
+        if (string.IsNullOrEmpty(token))
+            return;
+        _streamBuffer.Append(token);
+        // Live stream into a temporary system/assistant line while a role is generating.
+        lock (_gate)
+        {
+            string text = _streamBuffer.ToString();
+            if (_streamAssistantIndex < 0 || _streamAssistantIndex >= _messages.Count)
+            {
+                _messages.Add(new Msg { Role = Role.System, Text = text });
+                _streamAssistantIndex = _messages.Count - 1;
+            }
+            else
+            {
+                _messages[_streamAssistantIndex].Text = text;
+            }
+        }
+        SetActivity(ActivityStatus.Generating);
+    }
+
+    private void FlushStreamAsSystem(string label)
+    {
+        if (_streamBuffer.Length == 0)
+            return;
+        string text = _streamBuffer.ToString();
+        _streamBuffer.Clear();
+        lock (_gate)
+        {
+            if (_streamAssistantIndex >= 0 && _streamAssistantIndex < _messages.Count)
+                _messages.RemoveAt(_streamAssistantIndex);
+            _streamAssistantIndex = -1;
+        }
+        // Keep a short breadcrumb; full text may already be reported as Architect/Critic output.
+        if (text.Length > 40)
+            PushSystem($"{label} streamed ({text.Length} chars)");
     }
 
     private async Task PumpScrollWhileAsync(Task task)
@@ -971,12 +1168,16 @@ internal sealed class ChatTui : IDisposable
         if (_busy && !string.IsNullOrEmpty(_activity))
         {
             string glyph = _animFrames[Math.Abs(_animFrame) % _animFrames.Length];
-            string act = $" {glyph}  {_activity}";
+            string act = string.IsNullOrEmpty(_approvalPrompt)
+                ? $" {glyph}  {_activity}  ·  Esc to stop"
+                : $" {glyph}  {_approvalPrompt}";
             rows[activityRow] = Ansi.Fg(AxiomTheme.Gold) + Ansi.ClipPad(act, w) + Ansi.Reset;
         }
         else
         {
-            string tip = " ↑↓ scroll  ·  PgUp/PgDn  ·  / tools  ·  @ folders  ·  exit ";
+            string tip = !string.IsNullOrEmpty(_approvalPrompt)
+                ? " " + _approvalPrompt
+                : " ↑↓ scroll · Esc stop · /mode auto|ask|plan · /undo · /del · exit ";
             rows[activityRow] = Ansi.Fg(AxiomTheme.SystemMuted) + Ansi.ClipPad(tip, w) + Ansi.Reset;
         }
 
@@ -1194,11 +1395,12 @@ internal sealed class ChatTui : IDisposable
         head = head.ToLowerInvariant();
         return head is "/" or "/tools" or "/model" or "/clear" or "/help" or "/workspace" or "/ws"
             or "/sessions" or "/session" or "/browse" or "/folder" or "/open"
-            or "/delete" or "/del" or "/rm"
+            or "/delete" or "/del" or "/rm" or "/undo" or "/mode" or "/resume"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
             || head.StartsWith("/w") || head.StartsWith("/b") || head.StartsWith("/f")
-            || head.StartsWith("/o") || head.StartsWith("/d") || head.StartsWith("/r");
+            || head.StartsWith("/o") || head.StartsWith("/d") || head.StartsWith("/r")
+            || head.StartsWith("/u");
     }
 
     private IReadOnlyList<ChatInput.MenuItem> GetMenuItems(MenuMode mode)
@@ -1287,8 +1489,8 @@ internal sealed class ChatTui : IDisposable
         }
 
         // Commands that should run immediately (this was the /help bug: it only filled the buffer).
-        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse" or "delete")
-            return "/" + pick.Id;
+        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse" or "delete" or "undo" or "mode")
+            return pick.Id == "mode" ? "/mode" : "/" + pick.Id;
 
         if (pick.Id.StartsWith("session-del:", StringComparison.Ordinal))
         {

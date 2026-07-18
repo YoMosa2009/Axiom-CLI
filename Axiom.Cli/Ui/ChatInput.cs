@@ -811,6 +811,8 @@ internal static class ChatInput
             new("browse", "browse", "Open folder picker (file explorer)", false, null, "slash"),
             new("sessions", "sessions", "List saved chat sessions", false, null, "slash"),
             new("delete", "delete", "Delete current session + start fresh", false, null, "slash"),
+            new("undo", "undo", "Undo last agent file changes", false, null, "slash"),
+            new("mode", "mode", "Set approval: auto | ask | plan", false, null, "slash"),
         };
 
         // One-tap delete rows for recent sessions (seamless — pick from / menu).

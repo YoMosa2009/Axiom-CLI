@@ -538,11 +538,53 @@ internal static class Program
                 Say("Conversation cleared. (Saved file kept — use /del to remove it and start fresh.)");
                 return true;
 
+            case "/undo":
+                tui.UndoLastTurn();
+                return true;
+
+            case "/mode":
+            {
+                if (parts.Length >= 2 && session.Tools.TrySetApproval(parts[1]))
+                {
+                    session.ApplyToolSettings();
+                    Say($"Approval mode → {session.Tools.ApprovalLabel}  (auto | ask | plan)");
+                }
+                else if (parts.Length >= 2)
+                {
+                    Say($"Unknown mode: {parts[1]}  ·  use auto | ask | plan");
+                }
+                else
+                {
+                    Say($"Current approval mode: {session.Tools.ApprovalLabel}");
+                    Say("  auto — write/shell freely in sandbox");
+                    Say("  ask  — confirm each write/shell/download");
+                    Say("  plan — no mutations; tools return Plan-only previews");
+                    Say("Set: /mode ask");
+                }
+                return true;
+            }
+
+            case "/resume":
+            {
+                var list = tui.ListSessions();
+                if (list.Count == 0)
+                {
+                    Say("No saved sessions to resume.");
+                    return true;
+                }
+                if (tui.TryLoadSession(list[0].Id, out string err))
+                    Say($"Resumed: {list[0].Title}");
+                else
+                    Say(err);
+                return true;
+            }
+
             case "/help":
             case "/?":
                 Say("Commands:");
                 Say("  /help                 Show this help");
                 Say("  /tools [name on|off]  Toggle council / calculator / web-search / sandbox");
+                Say("  /mode [auto|ask|plan] Approval mode for writes/shell");
                 Say("  /model [eidos|hepha]  Switch cloud model");
                 Say("  /browse               Open file explorer and pick a work folder");
                 Say("  /workspace [path]     Show or lock the agent work folder");
@@ -550,14 +592,16 @@ internal static class Program
                 Say("  @                     Recent folders + Browse… (native picker)");
                 Say("  /sessions             List auto-saved sessions");
                 Say("  /session load <n>     Resume a saved session");
-                Say("  /del                  Delete current session + start fresh");
-                Say("  /del <n>              Delete session by list number");
-                Say("  /del all              Delete all saved sessions");
+                Say("  /resume               Resume most recent session");
+                Say("  /del · /del <n> · /del all   Delete sessions");
+                Say("  /undo                 Restore files from last agent turn");
                 Say("  /clear                Clear transcript (keeps save file)");
-                Say("  Up/Down (empty input) Scroll chat history (also PgUp/PgDn, Shift+arrows, wheel)");
+                Say("  Esc                   Stop in-flight agent/council turn");
+                Say("  ↑↓ scroll             (also PgUp/PgDn, Shift+arrows, wheel)");
                 Say("  exit                  Leave chat");
-                Say("Tools: council (Architect → agentic Builder → Critic inspect) · web-search · calculator · sandbox");
-                Say("  Builder writes real files; Critic can re-read the workspace to falsify claims.");
+                Say("Agent tools: write/read/list/search · shell · git · diagnostics · worktree · subagents");
+                Say("Council: Architect → agentic Builder → Critic (inspect) + static validation");
+                Say("Project memory: AXIOM.md / AGENTS.md / .axiom/rules.md in the workspace root");
                 return true;
 
             default:

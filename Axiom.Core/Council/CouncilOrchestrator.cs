@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Axiom.Core.Agent;
 using Axiom.Core.Chat;
 using Axiom.Core.Workspace;
+// ProjectMemory lives in Agent namespace.
 
 namespace Axiom.Core.Council
 {
@@ -91,17 +92,43 @@ namespace Axiom.Core.Council
             }
 
             CouncilTaskKind taskKind = CouncilRolePrompts.DetectTaskKind(request.UserPrompt);
+            GoalContract goal = GoalContract.FromPrompt(request.UserPrompt);
+            string memoryBlock = string.Empty;
+            if (workspaceConnected && !string.IsNullOrWhiteSpace(request.Workspace?.RootPath))
+                memoryBlock = ProjectMemory.BuildContextBlock(request.Workspace!.RootPath);
+            if (!string.IsNullOrWhiteSpace(memoryBlock))
+            {
+                workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
+                    ? memoryBlock
+                    : memoryBlock + "\n\n" + workspaceContext;
+                Report(progress, CouncilEventKind.Status, "Project memory loaded (AXIOM.md / AGENTS.md).");
+            }
+            string goalBlock = goal.ToPromptBlock();
+            if (!string.IsNullOrWhiteSpace(goalBlock))
+            {
+                workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
+                    ? goalBlock
+                    : goalBlock + "\n\n" + workspaceContext;
+            }
+
             if (agentic)
-                Report(progress, CouncilEventKind.Status, "Council · Builder has agentic tools (files/shell).");
+                Report(progress, CouncilEventKind.Status, "Council · Builder has agentic tools (files/shell/git).");
             Report(progress, CouncilEventKind.Status, $"Council · task kind: {taskKind}.");
 
+            _agentTools?.BeginUndoTurn("council");
+            bool cancelled = false;
+
+            string architectPlan = string.Empty;
+            string builderOutput = string.Empty;
+            try
+            {
             // ── Architect: plan (desktop Workplace role contract) ─────────────
             Report(progress, CouncilEventKind.Status, "Architect is planning...");
             string architectSystem = FoundationSystemPrompt.Apply(
                 CouncilRolePrompts.Architect(taskKind, workspaceConnected, agentic));
             string architectInput = BuildContextualInput(request.UserPrompt, workspaceContext);
-            string architectPlan = CouncilRolePrompts.StripRoleMarkers(
-                await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken));
+            architectPlan = CouncilRolePrompts.StripRoleMarkers(
+                await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken, streamTokens: true));
             Report(progress, CouncilEventKind.ArchitectOutput, architectPlan);
 
             // ── Builder: implement (agentic tool loop when available) ──────────
@@ -112,7 +139,7 @@ namespace Axiom.Core.Council
             Report(progress, CouncilEventKind.Status,
                 agentic ? "Builder is implementing with tools..." : "Builder is implementing...");
             _agentTools?.ClearWrittenPaths();
-            (string builderOutput, int builderTools) = await CallBuilderAsync(
+            (builderOutput, int builderTools) = await CallBuilderAsync(
                 builderSystem, builderInput, agentic, progress, cancellationToken);
             builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
             totalToolCalls += builderTools;
@@ -252,7 +279,27 @@ namespace Axiom.Core.Council
                 report,
                 totalToolCalls,
                 changedFiles.Count > 0 ? changedFiles : null,
-                applySummary);
+                applySummary,
+                cancelled);
+            }
+            catch (OperationCanceledException)
+            {
+                cancelled = true;
+                Report(progress, CouncilEventKind.Warning, "Council run stopped by user.");
+                return new CouncilResult(
+                    false,
+                    builderOutput ?? string.Empty,
+                    null,
+                    new CriticReport { Status = "issues" },
+                    totalToolCalls,
+                    changedFiles.Count > 0 ? changedFiles : null,
+                    applySummary,
+                    Cancelled: true);
+            }
+            finally
+            {
+                _agentTools?.CommitUndoTurn();
+            }
         }
 
         private async Task<CriticEvidence> GatherCriticEvidenceAsync(
@@ -412,7 +459,7 @@ namespace Axiom.Core.Council
         {
             if (!agentic || _chat == null || _agentTools == null)
             {
-                string text = await CallRoleAsync(systemPrompt, userInput, progress, cancellationToken);
+                string text = await CallRoleAsync(systemPrompt, userInput, progress, cancellationToken, streamTokens: true);
                 return (text, 0);
             }
 
@@ -422,7 +469,9 @@ namespace Axiom.Core.Council
                 userInput,
                 status => Report(progress, CouncilEventKind.Status, "Builder · " + status),
                 cancellationToken,
-                AgentToolExecutor.ToolScope.Full);
+                AgentToolExecutor.ToolScope.Full,
+                onToolEvent: ev => ReportToolEvent(progress, "Builder", ev),
+                onToken: tok => progress?.Report(new CouncilEvent(CouncilEventKind.Token, tok)));
 
             if (result.ToolCallCount > 0)
             {
@@ -442,7 +491,7 @@ namespace Axiom.Core.Council
         {
             if (!inspectTools || _chat == null || _agentTools == null)
             {
-                string text = await CallRoleAsync(systemPrompt, userInput, progress, cancellationToken);
+                string text = await CallRoleAsync(systemPrompt, userInput, progress, cancellationToken, streamTokens: true);
                 return (text, 0);
             }
 
@@ -452,7 +501,9 @@ namespace Axiom.Core.Council
                 userInput,
                 status => Report(progress, CouncilEventKind.Status, "Critic · " + status),
                 cancellationToken,
-                AgentToolExecutor.ToolScope.Inspect);
+                AgentToolExecutor.ToolScope.Inspect,
+                onToolEvent: ev => ReportToolEvent(progress, "Critic", ev),
+                onToken: tok => progress?.Report(new CouncilEvent(CouncilEventKind.Token, tok)));
 
             if (result.ToolCallCount > 0)
             {
@@ -475,14 +526,58 @@ namespace Axiom.Core.Council
             }
         }
 
+        private static void ReportToolEvent(IProgress<CouncilEvent>? progress, string role, ToolEvent ev)
+        {
+            string mark = ev.Phase switch
+            {
+                ToolEventPhase.Started => "●",
+                ToolEventPhase.Finished => "✓",
+                ToolEventPhase.Denied => "✗",
+                ToolEventPhase.Planned => "◇",
+                _ => "·"
+            };
+            string line = $"{mark} {role} · {ev.ToolName}";
+            if (!string.IsNullOrWhiteSpace(ev.Detail))
+                line += "  " + (ev.Detail.Length > 80 ? ev.Detail[..77] + "…" : ev.Detail);
+            if (ev.Phase != ToolEventPhase.Started && !string.IsNullOrWhiteSpace(ev.ResultPreview))
+                line += " → " + (ev.ResultPreview!.Length > 60 ? ev.ResultPreview[..57] + "…" : ev.ResultPreview);
+            progress?.Report(new CouncilEvent(CouncilEventKind.Tool, line));
+        }
+
         private async Task<string> CallRoleAsync(
             string systemPrompt,
             string userInput,
             IProgress<CouncilEvent>? progress,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool streamTokens = false)
         {
+            // Prefer direct OpenRouter streaming when available so Architect/Critic tokens appear live.
+            if (streamTokens && _chat != null)
+            {
+                var messages = new List<OpenRouterMessage> { new("user", userInput, PreserveFullText: true) };
+                var collected = new StringBuilder();
+                OpenRouterChatResponse response = await _chat.SendConversationStreamAsync(
+                    messages,
+                    systemPrompt,
+                    thinkingEnabled: false,
+                    modelId: _modelId,
+                    tools: null,
+                    onToken: tok =>
+                    {
+                        collected.Append(tok);
+                        progress?.Report(new CouncilEvent(CouncilEventKind.Token, tok));
+                    },
+                    cancellationToken);
+                return !string.IsNullOrEmpty(response.Text) ? response.Text : collected.ToString();
+            }
+
             var request = new ChatPipelineRequest(systemPrompt, userInput);
-            ChatPipelineResult result = await _pipeline.ExecuteAsync(request, onToken: null, cancellationToken);
+            ChatPipelineResult result = await _pipeline.ExecuteAsync(
+                request,
+                onToken: streamTokens
+                    ? tok => progress?.Report(new CouncilEvent(CouncilEventKind.Token, tok))
+                    : null,
+                cancellationToken);
             return result.ResponseText;
         }
 
