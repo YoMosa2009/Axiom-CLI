@@ -156,6 +156,26 @@ namespace Axiom.Core.Memory
             return true;
         }
 
+        /// <summary>Deletes every saved session JSON. Returns how many files were removed.</summary>
+        public int DeleteAll()
+        {
+            int n = 0;
+            try
+            {
+                foreach (string file in Directory.EnumerateFiles(_dir, "*.json"))
+                {
+                    try
+                    {
+                        File.Delete(file);
+                        n++;
+                    }
+                    catch { /* best effort */ }
+                }
+            }
+            catch { /* ignore */ }
+            return n;
+        }
+
         public static string NewId() => DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6];
 
         public static string MakeTitle(string? firstUserMessage)

@@ -488,23 +488,28 @@ internal static class Program
                     if (list.Count == 0)
                     {
                         Say("No saved sessions yet. Chats auto-save after each turn.");
+                        Say("Tip: /delete removes this chat’s save and starts fresh.");
                         return true;
                     }
                     Say("Saved sessions (auto-saved):");
                     int i = 1;
                     foreach (var item in list)
                     {
-                        Say($"  {i,2}. {item.Title}  ·  {item.UpdatedAt.ToLocalTime():g}  ·  {item.ModelLabel}  ·  id:{item.Id}");
+                        string cur = string.Equals(item.Id, tui.CurrentSessionId, StringComparison.OrdinalIgnoreCase)
+                            ? "  ← current"
+                            : "";
+                        Say($"  {i,2}. {item.Title}  ·  {item.UpdatedAt.ToLocalTime():g}  ·  {item.ModelLabel}{cur}");
                         i++;
                     }
-                    Say("Load: /session load <number|id>   Delete: /session delete <number|id>");
+                    Say("Load: /session load <n>   Delete one: /del <n>   Current: /del   All: /del all");
+                    Say("Or type / then pick “del 1” / “delete” from the menu.");
                     return true;
                 }
                 if ((action is "load" or "open" or "resume") && parts.Length >= 3)
                 {
                     string key = string.Join(' ', parts.Skip(2));
                     if (tui.TryLoadSession(key, out string err))
-                        Say($"Loaded session.");
+                        Say("Loaded session.");
                     else
                         Say(err);
                     return true;
@@ -512,20 +517,25 @@ internal static class Program
                 if ((action is "delete" or "rm" or "remove") && parts.Length >= 3)
                 {
                     string key = string.Join(' ', parts.Skip(2));
-                    if (tui.DeleteSession(key))
-                        Say($"Deleted session {key}.");
-                    else
-                        Say($"Could not delete session: {key}");
-                    return true;
+                    return HandleSessionDelete(tui, key);
                 }
-                Say("Usage: /sessions  ·  /session load <n|id>  ·  /session delete <n|id>");
+                Say("Usage: /sessions  ·  /session load <n>  ·  /del  ·  /del <n>  ·  /del all");
                 return true;
+            }
+
+            // Seamless delete: /del  ·  /delete  ·  /rm  ·  /del 2  ·  /del all
+            case "/delete":
+            case "/del":
+            case "/rm":
+            {
+                string key = parts.Length >= 2 ? string.Join(' ', parts.Skip(1)).Trim() : string.Empty;
+                return HandleSessionDelete(tui, key);
             }
 
             case "/clear":
                 session.History.Clear();
                 tui.ClearTranscript();
-                Say("Conversation cleared. (Previous session file kept — use /session delete to remove.)");
+                Say("Conversation cleared. (Saved file kept — use /del to remove it and start fresh.)");
                 return true;
 
             case "/help":
@@ -539,20 +549,57 @@ internal static class Program
                 Say("  /workspace pick       Same as /browse");
                 Say("  @                     Recent folders + Browse… (native picker)");
                 Say("  /sessions             List auto-saved sessions");
-                Say("  /session load <n|id>  Resume a saved session");
-                Say("  /session delete <n|id> Delete a saved session");
-                Say("  /clear                Clear the current chat transcript");
+                Say("  /session load <n>     Resume a saved session");
+                Say("  /del                  Delete current session + start fresh");
+                Say("  /del <n>              Delete session by list number");
+                Say("  /del all              Delete all saved sessions");
+                Say("  /clear                Clear transcript (keeps save file)");
                 Say("  Up/Down (empty input) Scroll chat history (also PgUp/PgDn, Shift+arrows, wheel)");
                 Say("  exit                  Leave chat");
-                Say("Tools: council (Architect → agentic Builder with file/shell tools → Critic) · web-search · calculator · sandbox");
-                Say("  Builder writes real files in the locked workspace (write_file / run_shell), not chat-only.");
-                Say("  When sandbox is on, council Critic also receives Python/Java execution logs.");
+                Say("Tools: council (Architect → agentic Builder → Critic inspect) · web-search · calculator · sandbox");
+                Say("  Builder writes real files; Critic can re-read the workspace to falsify claims.");
                 return true;
 
             default:
                 Say($"Unknown command: {parts[0]}  ·  type /help");
                 return true;
         }
+    }
+
+    private static bool HandleSessionDelete(ChatTui tui, string key)
+    {
+        key = (key ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(key) || key is "current" or "." or "this")
+        {
+            tui.DeleteCurrentAndStartFresh();
+            return true;
+        }
+
+        if (key is "all" or "*")
+        {
+            tui.DeleteAllSessionsAndStartFresh();
+            return true;
+        }
+
+        string currentId = tui.CurrentSessionId;
+        if (tui.DeleteSession(key))
+        {
+            bool wasCurrent = !tui.ListSessions().Any(s =>
+                string.Equals(s.Id, currentId, StringComparison.OrdinalIgnoreCase));
+            if (wasCurrent)
+            {
+                // File for this chat is gone — roll the UI to a blank session id.
+                tui.DeleteCurrentAndStartFresh();
+            }
+            else
+            {
+                tui.Notify($"Deleted session {key}.");
+            }
+            return true;
+        }
+
+        tui.Notify($"Could not delete session: {key}  ·  try /sessions then /del <number>");
+        return true;
     }
 
     private static string DescribeWorkspaceLock(string path)

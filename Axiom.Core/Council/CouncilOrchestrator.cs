@@ -90,26 +90,23 @@ namespace Axiom.Core.Council
                             : "Workspace flag set, but no local folder path was available.");
             }
 
+            CouncilTaskKind taskKind = CouncilRolePrompts.DetectTaskKind(request.UserPrompt);
             if (agentic)
                 Report(progress, CouncilEventKind.Status, "Council · Builder has agentic tools (files/shell).");
+            Report(progress, CouncilEventKind.Status, $"Council · task kind: {taskKind}.");
 
-            // ── Architect: plan ────────────────────────────────────────────────
+            // ── Architect: plan (desktop Workplace role contract) ─────────────
             Report(progress, CouncilEventKind.Status, "Architect is planning...");
             string architectSystem = FoundationSystemPrompt.Apply(
-                "You are the Architect. Read the user's request and any attached workspace context, then " +
-                "produce a concise numbered plan (3-8 steps). Do not write final code or long prose — only the plan.\n" +
-                "If [[CONNECTED WORKSPACE — YOU HAVE ACCESS]] is present, the user's local project IS connected: " +
-                "plan using the FILE INDEX and RELEVANT FILE CONTENTS. Never claim you lack access to their files.\n" +
-                (agentic
-                    ? "The Builder has agentic tools (write_file, run_shell, list_dir, read_file, search_files). " +
-                      "Plan concrete file/shell steps the Builder should execute on disk."
-                    : string.Empty));
+                CouncilRolePrompts.Architect(taskKind, workspaceConnected, agentic));
             string architectInput = BuildContextualInput(request.UserPrompt, workspaceContext);
-            string architectPlan = await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken);
+            string architectPlan = CouncilRolePrompts.StripRoleMarkers(
+                await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken));
             Report(progress, CouncilEventKind.ArchitectOutput, architectPlan);
 
             // ── Builder: implement (agentic tool loop when available) ──────────
-            string builderSystem = BuildBuilderSystemPrompt(workspaceConnected, expectPatch, agentic, looksLikeEdit);
+            string builderSystem = FoundationSystemPrompt.Apply(
+                CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, looksLikeEdit));
             string builderInput = BuildBuilderInput(request.UserPrompt, architectPlan, workspaceContext);
 
             Report(progress, CouncilEventKind.Status,
@@ -117,6 +114,7 @@ namespace Axiom.Core.Council
             _agentTools?.ClearWrittenPaths();
             (string builderOutput, int builderTools) = await CallBuilderAsync(
                 builderSystem, builderInput, agentic, progress, cancellationToken);
+            builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
             totalToolCalls += builderTools;
             CollectWrittenFiles(changedFiles);
             Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
@@ -153,7 +151,13 @@ namespace Axiom.Core.Council
 
                 Report(progress, CouncilEventKind.Status, "Critic is reviewing...");
                 string criticInput = BuildCriticInput(request.UserPrompt, patch != null, builderOutput, evidence);
-                string criticOutput = await CallRoleAsync(CriticSystemPrompt, criticInput, progress, cancellationToken);
+                bool criticInspect = agentic && workspaceConnected;
+                string criticSystem = FoundationSystemPrompt.Apply(
+                    CouncilRolePrompts.Critic(taskKind, workspaceConnected, criticInspect));
+                (string criticOutput, int criticTools) = await CallCriticAsync(
+                    criticSystem, criticInput, criticInspect, progress, cancellationToken);
+                criticOutput = CouncilRolePrompts.StripRoleMarkers(criticOutput);
+                totalToolCalls += criticTools;
                 Report(progress, CouncilEventKind.CriticOutput, criticOutput);
                 report = CriticContractParser.Parse(criticOutput);
 
@@ -191,6 +195,7 @@ namespace Axiom.Core.Council
 
                 (builderOutput, int revisionTools) = await CallBuilderAsync(
                     revisionSystem, revisionInput, agentic, progress, cancellationToken);
+                builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
                 totalToolCalls += revisionTools;
                 CollectWrittenFiles(changedFiles);
                 Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
@@ -416,12 +421,43 @@ namespace Axiom.Core.Council
                 systemPrompt,
                 userInput,
                 status => Report(progress, CouncilEventKind.Status, "Builder · " + status),
-                cancellationToken);
+                cancellationToken,
+                AgentToolExecutor.ToolScope.Full);
 
             if (result.ToolCallCount > 0)
             {
                 Report(progress, CouncilEventKind.Status,
                     $"Builder · {result.ToolCallCount} tool call(s) completed.");
+            }
+
+            return (result.FinalText, result.ToolCallCount);
+        }
+
+        private async Task<(string Text, int ToolCalls)> CallCriticAsync(
+            string systemPrompt,
+            string userInput,
+            bool inspectTools,
+            IProgress<CouncilEvent>? progress,
+            CancellationToken cancellationToken)
+        {
+            if (!inspectTools || _chat == null || _agentTools == null)
+            {
+                string text = await CallRoleAsync(systemPrompt, userInput, progress, cancellationToken);
+                return (text, 0);
+            }
+
+            var loop = new ToolCallingLoop(_chat, _agentTools, _modelId);
+            ToolCallingResult result = await loop.RunAsync(
+                systemPrompt,
+                userInput,
+                status => Report(progress, CouncilEventKind.Status, "Critic · " + status),
+                cancellationToken,
+                AgentToolExecutor.ToolScope.Inspect);
+
+            if (result.ToolCallCount > 0)
+            {
+                Report(progress, CouncilEventKind.Status,
+                    $"Critic · {result.ToolCallCount} inspect tool call(s).");
             }
 
             return (result.FinalText, result.ToolCallCount);
@@ -450,65 +486,6 @@ namespace Axiom.Core.Council
             return result.ResponseText;
         }
 
-        private static string BuildBuilderSystemPrompt(
-            bool workspaceConnected,
-            bool expectPatch,
-            bool agentic,
-            bool looksLikeEdit)
-        {
-            string role = "You are the Builder. Implement the Architect's plan completely — no " +
-                "TODO placeholders, no omitted sections, no pseudo-code.";
-
-            if (agentic)
-            {
-                string agenticNote = AgenticBuilderNote;
-                if (workspaceConnected)
-                    agenticNote += "\n" + WorkspaceAccessNote;
-                if (looksLikeEdit)
-                    agenticNote += "\n" + AgenticEditModeNote;
-                else if (workspaceConnected)
-                    agenticNote += "\n" + WorkspaceAnswerModeNote;
-                return FoundationSystemPrompt.Apply(role + "\n" + agenticNote);
-            }
-
-            if (workspaceConnected && expectPatch)
-                return FoundationSystemPrompt.Apply(role + "\n" + WorkspaceAccessNote + "\n" + WorkspacePatchModeNote);
-
-            if (workspaceConnected)
-                return FoundationSystemPrompt.Apply(role + "\n" + WorkspaceAccessNote + "\n" + WorkspaceAnswerModeNote);
-
-            return FoundationSystemPrompt.Apply(role);
-        }
-
-        private const string AgenticBuilderNote =
-            "[AGENTIC TOOLS] You have real tools: write_file, read_file, list_dir, search_files, " +
-            "run_shell, download_file, and web_search (when enabled).\n" +
-            "You MUST use these tools to create and edit files on disk when the plan requires " +
-            "implementation. Do NOT only paste full file contents into the chat as your final " +
-            "answer — call write_file (or run_shell) so the user's workspace actually changes.\n" +
-            "Workflow: list_dir/read_file to inspect → write_file/run_shell to implement → " +
-            "optionally run_shell for build/test → then summarize what you changed and how to run it.";
-
-        private const string AgenticEditModeNote =
-            "This turn expects real codebase changes. Prefer write_file / run_shell to apply them. " +
-            "You may ALSO emit a [[AXIOM_CODEBASE_PATCH]] envelope after tools as a structured " +
-            "summary of edits (optional when tools already wrote the files).";
-
-        private const string WorkspaceAccessNote =
-            "A local workspace is connected for this turn (see FILE INDEX / RELEVANT FILE CONTENTS). " +
-            "You HAVE access to those files. Never claim you cannot open the project or lack filesystem access.";
-
-        private const string WorkspacePatchModeNote =
-            "This turn expects codebase edits. Follow the patch envelope format in the workspace " +
-            "context exactly. Output ONLY the [[AXIOM_CODEBASE_PATCH]] envelope — no narration " +
-            "before or after it.";
-
-        private const string WorkspaceAnswerModeNote =
-            "This turn is Q&A / analysis / exploration (not a forced edit). Answer in clear prose " +
-            "using the connected FILE INDEX and RELEVANT FILE CONTENTS (and tools if available). " +
-            "If the user also wants code changes, use write_file tools and/or a " +
-            "[[AXIOM_CODEBASE_PATCH]] envelope after your explanation.";
-
         private static string TargetedPatchModeNote(bool patchMode, bool agentic) => agentic
             ? "[TARGETED FIX MODE] Fix ONLY the specific issues listed below using tools " +
               "(write_file / run_shell). Then summarize. Do not change unrelated files."
@@ -518,16 +495,6 @@ namespace Axiom.Core.Council
                   "and do not change anything not mentioned in the findings."
                 : "[TARGETED PATCH MODE] Fix ONLY the specific issues listed below. Output the complete " +
                   "corrected response and preserve unaffected content. Do not output a diff.";
-
-        private static string CriticSystemPrompt => FoundationSystemPrompt.Apply(
-            "You are the Critic. Review the Builder's output against the original request for " +
-            "correctness, completeness, and whether it actually implements what was asked. " +
-            "Be specific and evidence-based. When PRE-FLAGGED ISSUES or SANDBOX OUTPUT are " +
-            "present, confirm each finding and check for additional problems. Treat CRITICAL " +
-            "and RUNTIME findings as must-fix unless the sandbox output clearly shows they " +
-            "are false positives. If a connected workspace was provided, do not mark the Builder " +
-            "wrong for using those files — they were intentionally attached." + "\n" +
-            CriticContractParser.ContractInstruction);
 
         /// <summary>
         /// Heuristic: edit-like prompts require a patch envelope; explore/Q&A do not.

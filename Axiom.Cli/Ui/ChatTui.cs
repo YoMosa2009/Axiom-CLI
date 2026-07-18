@@ -127,7 +127,34 @@ internal sealed class ChatTui : IDisposable
 
     public IReadOnlyList<SessionListItem> ListSessions() => _sessionStore.List();
 
+    public string CurrentSessionId => _sessionId;
+
     public bool DeleteSession(string idOrPrefix) => _sessionStore.Delete(idOrPrefix);
+
+    /// <summary>Delete the current saved session file and start a blank chat (same window).</summary>
+    public bool DeleteCurrentAndStartFresh()
+    {
+        bool deleted = _sessionStore.Delete(_sessionId);
+        ClearTranscript();
+        if (_session != null)
+            _session.History.Clear();
+        PushSystem(deleted
+            ? "Session deleted. Fresh chat started."
+            : "No saved file for this chat (or already gone). Fresh chat started.");
+        return deleted;
+    }
+
+    public int DeleteAllSessionsAndStartFresh()
+    {
+        int n = _sessionStore.DeleteAll();
+        ClearTranscript();
+        if (_session != null)
+            _session.History.Clear();
+        PushSystem(n == 0
+            ? "No saved sessions to delete. Fresh chat started."
+            : $"Deleted {n} saved session(s). Fresh chat started.");
+        return n;
+    }
 
     public async Task<int> RunAsync(
         ChatSession session,
@@ -1167,10 +1194,11 @@ internal sealed class ChatTui : IDisposable
         head = head.ToLowerInvariant();
         return head is "/" or "/tools" or "/model" or "/clear" or "/help" or "/workspace" or "/ws"
             or "/sessions" or "/session" or "/browse" or "/folder" or "/open"
+            or "/delete" or "/del" or "/rm"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
             || head.StartsWith("/w") || head.StartsWith("/b") || head.StartsWith("/f")
-            || head.StartsWith("/o");
+            || head.StartsWith("/o") || head.StartsWith("/d") || head.StartsWith("/r");
     }
 
     private IReadOnlyList<ChatInput.MenuItem> GetMenuItems(MenuMode mode)
@@ -1185,7 +1213,7 @@ internal sealed class ChatTui : IDisposable
                 filter = filter["model ".Length..];
             else if (filter.StartsWith("tools", StringComparison.OrdinalIgnoreCase))
                 filter = filter.Length > 5 ? filter[5..].TrimStart() : string.Empty;
-            var all = ChatInput.BuildSlashItems(_session.Tools, _models);
+            var all = ChatInput.BuildSlashItems(_session.Tools, _models, _sessionStore.List(max: 12));
             return FilterItems(all, filter);
         }
 
@@ -1259,8 +1287,16 @@ internal sealed class ChatTui : IDisposable
         }
 
         // Commands that should run immediately (this was the /help bug: it only filled the buffer).
-        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse")
+        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse" or "delete")
             return "/" + pick.Id;
+
+        if (pick.Id.StartsWith("session-del:", StringComparison.Ordinal))
+        {
+            string key = pick.Id["session-del:".Length..];
+            return key.Equals("all", StringComparison.OrdinalIgnoreCase)
+                ? "/delete all"
+                : "/delete " + key;
+        }
 
         if (pick.Id.StartsWith("model:", StringComparison.Ordinal))
             return "/model " + pick.Id["model:".Length..];

@@ -798,7 +798,8 @@ internal static class ChatInput
 
     public static IReadOnlyList<MenuItem> BuildSlashItems(
         SessionToolSettings tools,
-        IReadOnlyList<(string Id, string Label, string Description)> models)
+        IReadOnlyList<(string Id, string Label, string Description)> models,
+        IReadOnlyList<Axiom.Core.Memory.SessionListItem>? sessions = null)
     {
         var items = new List<MenuItem>
         {
@@ -809,12 +810,34 @@ internal static class ChatInput
             new("workspace", "workspace", "Show / lock work folder", false, null, "slash"),
             new("browse", "browse", "Open folder picker (file explorer)", false, null, "slash"),
             new("sessions", "sessions", "List saved chat sessions", false, null, "slash"),
+            new("delete", "delete", "Delete current session + start fresh", false, null, "slash"),
         };
+
+        // One-tap delete rows for recent sessions (seamless — pick from / menu).
+        if (sessions is { Count: > 0 })
+        {
+            int i = 1;
+            foreach (var s in sessions.Take(10))
+            {
+                string title = string.IsNullOrWhiteSpace(s.Title) ? s.Id : s.Title;
+                if (title.Length > 36)
+                    title = title[..33] + "…";
+                items.Add(new(
+                    $"session-del:{i}",
+                    $"del {i}",
+                    $"Delete session: {title}",
+                    false,
+                    null,
+                    "slash"));
+                i++;
+            }
+            items.Add(new("session-del:all", "del all", "Delete ALL saved sessions", false, null, "slash"));
+        }
 
         foreach (var m in models)
             items.Add(new($"model:{m.Id}", m.Label, m.Description, false, null, "slash"));
 
-        items.Add(new("clear", "clear", "Reset conversation history", false, null, "slash"));
+        items.Add(new("clear", "clear", "Reset conversation history (keeps saved file)", false, null, "slash"));
         items.Add(new("help", "help", "Show command help", false, null, "slash"));
         items.Add(new("exit", "exit", "Leave chat", false, null, "slash"));
         return items;

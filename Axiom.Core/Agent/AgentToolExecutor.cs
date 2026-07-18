@@ -44,13 +44,23 @@ namespace Axiom.Core.Agent
             lock (_writeGate) _writtenPaths.Clear();
         }
 
-        public IReadOnlyList<OpenRouterToolDefinition> GetToolDefinitions()
+        public enum ToolScope
+        {
+            /// <summary>Full coding agent surface (Builder / solo agent).</summary>
+            Full,
+            /// <summary>Read/search/test only — Critic falsification pass (desktop-style).</summary>
+            Inspect
+        }
+
+        public IReadOnlyList<OpenRouterToolDefinition> GetToolDefinitions(ToolScope scope = ToolScope.Full)
         {
             var tools = new List<OpenRouterToolDefinition>
             {
                 new(
                     "run_shell",
-                    "Run a shell command in the workspace (build, install, git, scripts, tests, etc.).",
+                    scope == ToolScope.Inspect
+                        ? "Run a non-destructive shell command to verify work (tests, build, git status). Do not write files or install packages."
+                        : "Run a shell command in the workspace (build, install, git, scripts, tests, etc.).",
                     Schema(new JsonObject
                     {
                         ["command"] = Prop("string", "Shell command to execute"),
@@ -67,15 +77,6 @@ namespace Axiom.Core.Agent
                     }, required: ["path"])),
 
                 new(
-                    "write_file",
-                    "Create or overwrite a text file inside an attached workspace.",
-                    Schema(new JsonObject
-                    {
-                        ["path"] = Prop("string", "Target file path"),
-                        ["content"] = Prop("string", "Full file contents to write")
-                    }, required: ["path", "content"])),
-
-                new(
                     "list_dir",
                     "List files and folders in a directory under an attached workspace.",
                     Schema(new JsonObject
@@ -83,15 +84,6 @@ namespace Axiom.Core.Agent
                         ["path"] = Prop("string", "Directory path (default: primary workspace root)"),
                         ["recursive"] = Prop("boolean", "If true, list nested entries (capped)")
                     }, required: [])),
-
-                new(
-                    "download_file",
-                    "Download a URL into a path under an attached workspace.",
-                    Schema(new JsonObject
-                    {
-                        ["url"] = Prop("string", "HTTP/HTTPS URL"),
-                        ["path"] = Prop("string", "Destination file path inside the workspace")
-                    }, required: ["url", "path"])),
 
                 new(
                     "search_files",
@@ -104,18 +96,50 @@ namespace Axiom.Core.Agent
                     }, required: ["query"]))
             };
 
-            if (WebSearchEnabled)
+            if (scope == ToolScope.Full)
             {
-                tools.Add(new(
-                    "web_search",
-                    "Search the live web for current information, docs, news, or facts. Use when the answer needs up-to-date external data.",
+                tools.Insert(2, new(
+                    "write_file",
+                    "Create or overwrite a text file inside an attached workspace.",
                     Schema(new JsonObject
                     {
-                        ["query"] = Prop("string", "Search query in natural language")
-                    }, required: ["query"])));
+                        ["path"] = Prop("string", "Target file path"),
+                        ["content"] = Prop("string", "Full file contents to write")
+                    }, required: ["path", "content"])));
+
+                tools.Add(new(
+                    "download_file",
+                    "Download a URL into a path under an attached workspace.",
+                    Schema(new JsonObject
+                    {
+                        ["url"] = Prop("string", "HTTP/HTTPS URL"),
+                        ["path"] = Prop("string", "Destination file path inside the workspace")
+                    }, required: ["url", "path"])));
+
+                if (WebSearchEnabled)
+                {
+                    tools.Add(new(
+                        "web_search",
+                        "Search the live web for current information, docs, news, or facts. Use when the answer needs up-to-date external data.",
+                        Schema(new JsonObject
+                        {
+                            ["query"] = Prop("string", "Search query in natural language")
+                        }, required: ["query"])));
+                }
             }
 
             return tools;
+        }
+
+        public async Task<string> ExecuteAsync(string toolName, string argumentsJson, CancellationToken token, ToolScope scope = ToolScope.Full)
+        {
+            if (scope == ToolScope.Inspect
+                && toolName is "write_file" or "download_file" or "web_search")
+            {
+                return $"Error: tool '{toolName}' is not available in Critic inspect mode.";
+            }
+
+            return await ExecuteAsync(toolName, argumentsJson, token);
         }
 
         public async Task<string> ExecuteAsync(string toolName, string argumentsJson, CancellationToken token)

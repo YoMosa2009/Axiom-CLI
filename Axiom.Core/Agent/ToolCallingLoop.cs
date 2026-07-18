@@ -40,19 +40,23 @@ namespace Axiom.Core.Agent
             string systemPrompt,
             string userMessage,
             Action<string>? onStatus,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            AgentToolExecutor.ToolScope scope = AgentToolExecutor.ToolScope.Full)
         {
             var turnMessages = new List<OpenRouterMessage>
             {
                 new("user", userMessage, PreserveFullText: true)
             };
 
-            IReadOnlyList<OpenRouterToolDefinition> toolDefs = _tools.GetToolDefinitions();
+            IReadOnlyList<OpenRouterToolDefinition> toolDefs = _tools.GetToolDefinitions(scope);
             var toolLog = new List<string>();
             int toolCalls = 0;
             string finalText = string.Empty;
+            int maxRounds = scope == AgentToolExecutor.ToolScope.Inspect
+                ? Math.Min(_maxRounds, 6)
+                : _maxRounds;
 
-            for (int round = 0; round <= _maxRounds; round++)
+            for (int round = 0; round <= maxRounds; round++)
             {
                 onStatus?.Invoke(round == 0
                     ? "Thinking"
@@ -90,7 +94,7 @@ namespace Axiom.Core.Agent
                     toolCalls++;
                     string start = DescribeToolStart(call);
                     onStatus?.Invoke(start);
-                    string result = await _tools.ExecuteAsync(call.Name, call.ArgumentsJson, cancellationToken);
+                    string result = await _tools.ExecuteAsync(call.Name, call.ArgumentsJson, cancellationToken, scope);
                     string done = DescribeToolDone(call, result);
                     onStatus?.Invoke(done);
                     toolLog.Add($"{call.Name}: {SummarizeResult(result)}");
@@ -101,7 +105,7 @@ namespace Axiom.Core.Agent
                         PreserveFullText: true));
                 }
 
-                if (round == _maxRounds)
+                if (round == maxRounds)
                 {
                     onStatus?.Invoke("Tool round limit reached");
                     break;
