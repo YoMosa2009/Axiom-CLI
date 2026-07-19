@@ -51,7 +51,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Run 'axiom config' to set your OpenRouter API key, then 'axiom chat' or 'axiom code `"<task>`"'."
+    Write-Host "Run 'axiom config' to set your OpenRouter API key, then 'axiom' or 'axiom code `"<task>`"'."
 }
 finally {
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue

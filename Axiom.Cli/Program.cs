@@ -34,13 +34,16 @@ internal static class Program
         args = args.Where(a => !a.Equals("--owned", StringComparison.OrdinalIgnoreCase)).ToArray();
 
         string? modelOverride = ExtractModelFlag(ref args);
-        string command = args.Length > 0 ? args[0].ToLowerInvariant() : "chat";
+        // Bare `axiom` (no subcommand) opens the chat TUI. `axiom chat` remains an alias.
+        string command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+        bool isChatEntry = command is "" or "chat";
         UpdateInstaller.CleanupPendingBackups();
         ConsoleUi.ConfigureConsole();
 
-        if (command == "chat" && !ownedFlag && !SessionLauncher.IsOwnedSession)
+        if (isChatEntry && !ownedFlag && !SessionLauncher.IsOwnedSession)
         {
-            var launchArgs = new List<string>(args);
+            var launchArgs = new List<string>();
+            // Prefer launching without a redundant "chat" token so the child is also bare `axiom`.
             if (!string.IsNullOrWhiteSpace(modelOverride))
             {
                 launchArgs.Add("--model");
@@ -63,8 +66,8 @@ internal static class Program
             return command switch
             {
                 "config" => await RunConfigAsync(),
-                "chat" => await RunChatAsync(modelOverride),
-                "code" => await RunCodeAsync(string.Join(' ', args[1..]), modelOverride),
+                "" or "chat" => await RunChatAsync(modelOverride),
+                "code" => await RunCodeAsync(string.Join(' ', args.Skip(1)), modelOverride),
                 "update" => await RunUpdateAsync(),
                 "help" or "--help" or "-h" => ShowHelp(),
                 _ => ShowUnknownCommand(command)
@@ -104,13 +107,13 @@ internal static class Program
         string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
         AnsiConsole.MarkupLine($"[bold]axiom[/] [{muted}]— Axiom CLI (cloud mode)[/]");
         AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine($"  [{gold}]axiom[/] [[--model <id>]]            Full-window TUI chat (default)");
         AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom chat[/] [[--model <id>]]     Full-window TUI chat (Windows/macOS/Linux)");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--model <id>]] <task>   Architect/Builder/Critic council on the current dir");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--model <id>]] <task>   Architect/Builder/Critic on the current dir");
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
         AnsiConsole.MarkupLine($"  [{gold}]axiom help[/]                    Show this help");
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[{muted}]Chat: /help · @ lock folder · /sessions · ↑↓ scroll · same TUI on every OS[/]");
+        AnsiConsole.MarkupLine($"[{muted}]Alias: axiom chat  ·  In chat: /help · @ folders · /sessions · Esc stop[/]");
         return 0;
     }
 
@@ -149,6 +152,7 @@ internal static class Program
     private static int ShowUnknownCommand(string command)
     {
         AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Unknown command:[/] {command.EscapeMarkup()}");
+        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Tip: run [/][{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom[/][{AxiomTheme.Hex(AxiomTheme.SystemMuted)}] with no args to open chat.[/]");
         ShowHelp();
         return 1;
     }
@@ -176,7 +180,7 @@ internal static class Program
         }
 
         db.SaveOpenRouterApiKey(apiKey);
-        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Saved.[/] Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom chat[/] to start chatting.");
+        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Saved.[/] Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom[/] to start chatting.");
         return Task.FromResult(0);
     }
 

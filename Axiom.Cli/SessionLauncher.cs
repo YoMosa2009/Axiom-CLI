@@ -41,24 +41,18 @@ internal static class SessionLauncher
             return false;
 
         var childArgs = new List<string>(prefixArgs);
-        bool sawChat = false;
         for (int i = 0; i < originalArgs.Count; i++)
         {
             string arg = originalArgs[i];
             if (arg.Equals("--owned", StringComparison.OrdinalIgnoreCase))
                 continue;
+            // Drop legacy "chat" subcommand — bare process entry is the chat TUI.
             if (i == 0 && arg.Equals("chat", StringComparison.OrdinalIgnoreCase))
-            {
-                sawChat = true;
-                childArgs.Add("chat");
                 continue;
-            }
             childArgs.Add(arg);
         }
 
-        if (!sawChat)
-            childArgs.Insert(prefixArgs.Count, "chat");
-
+        // Child runs bare `axiom` (optionally with --model); Main treats empty command as chat.
         childArgs.Add("--owned");
 
         try

@@ -70,4 +70,4 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "Run 'axiom config' to set your OpenRouter API key, then 'axiom chat' or 'axiom code \"<task>\"'."
+echo "Run 'axiom config' to set your OpenRouter API key, then 'axiom' or 'axiom code \"<task>\"'."

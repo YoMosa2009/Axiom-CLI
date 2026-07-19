@@ -32,7 +32,7 @@ Both scripts detect your OS/architecture, download the matching release from
 
 ```sh
 axiom config              # paste in an OpenRouter API key (openrouter.ai/keys)
-axiom chat                # full-window TUI (Windows, macOS, Linux)
+axiom                     # full-window TUI chat (Windows, macOS, Linux)
 axiom code "add input validation to the signup form"   # coding agent, run inside a repo
 ```
 
@@ -43,17 +43,19 @@ when a newer version is available.
 
 | Command | What it does |
 |---|---|
+| `axiom [--model <id>]` | Full-window TUI chat (default). `/` tools · `@` lock folder · `/help` |
 | `axiom config` | Store your OpenRouter API key (encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
-| `axiom chat [--model <id>]` | Full-window TUI chat on every OS. `/` tools · `@` lock folder · `/help` |
 | `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
 | `axiom update` | Download and install the latest release for your platform |
+
+`axiom chat` remains a supported alias for the default TUI.
 
 Available models: `eidos` (Eidos 1, general-purpose reasoning) and `hepha` (Hepha 1,
 code-specialized) — the same aliases as the desktop app. `axiom code` uses the desktop app's
 Workplace Council default model unless `--model` is given.
 
 ### Cross-platform chat TUI
-`axiom chat` paints its own interface (alternate screen) on **Windows, macOS, and Linux** so the
+`axiom` paints its own interface (alternate screen) on **Windows, macOS, and Linux** so the
 host terminal scrollbar is not part of the UX:
 
 - Fixed header (◆ Axiom), scrollable transcript (PgUp/PgDn), pinned prompt at the bottom
