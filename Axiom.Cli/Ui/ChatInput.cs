@@ -824,6 +824,8 @@ internal static class ChatInput
             new("pr", "pr", "Push branch + open GitHub PR", false, null, "slash"),
             new("network", "network", "Network: on | off | ask", false, null, "slash"),
             new("policy", "policy", "Shell policy + secret redaction info", false, null, "slash"),
+            new("spec", "spec", "Write SPEC.md from this chat", false, null, "slash"),
+            new("map", "map", "Show repo map", false, null, "slash"),
             new("mode", "mode", "Set approval: auto | ask | plan", false, null, "slash"),
             new("continue", "continue", "Resume last task after stop/error", false, null, "slash"),
             new("rename", "rename", "Name this session", false, null, "slash"),

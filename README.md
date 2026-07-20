@@ -65,6 +65,7 @@ host terminal scrollbar is not part of the UX:
 - Ctrl+K command palette · Ctrl+Shift+M cycle approval mode (`auto` / `ask` / `plan`)
 - Workflow: `/checkpoint` · `/plan` · `/changes` · `/accept` · `/reject` · `/replay` · `/jobs` · `/watch` · `/sticky` · `/pr`
 - Tools: `str_replace` / `apply_patch` / `write_files` · `fetch_url` · `run_tests` · `find_symbol` · `/network` · `/policy` · secret redaction
+- Intelligence: repo map + retrieval · history compaction · Critic evidence rules · auto diagnostics · `/spec` · `/map`
 - Optional: set `AXIOM_CLI_NO_NEW_WINDOW=1` to always run in the current terminal; `AXIOM_CLI_MOUSE=1` enables mouse tracking
 
 

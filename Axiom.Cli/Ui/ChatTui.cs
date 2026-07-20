@@ -923,9 +923,15 @@ internal sealed class ChatTui : IDisposable
                 else if (assistantIndex >= 0)
                     lock (_gate) _messages[assistantIndex].Text = result.ResponseText ?? collected.ToString();
 
+                if (!string.IsNullOrWhiteSpace(result.BudgetWarning))
+                    PushSystem(result.BudgetWarning);
+
                 string summary = ActivityStatus.SummarizeTurn(result.Elapsed, result.ToolCallCount, result.Failed || result.Cancelled);
                 if (result.Cancelled)
                     summary += " · stopped";
+                string budget = ConversationCompactor.BudgetStatus(result.EstimatedPromptTokens, result.ContextWindowTokens);
+                if (!string.IsNullOrEmpty(budget))
+                    summary += " · " + budget;
                 PushStatus(summary);
             }
 
@@ -1315,6 +1321,47 @@ internal sealed class ChatTui : IDisposable
             : $"  Optional overrides: create {path} with {{ \"allow\": [], \"deny\": [] }}");
         PushSystem("  Secrets in tool output are auto-redacted (API keys, tokens, JWTs).");
         PushSystem($"  Network: {(_session.ToolExecutor.Network.Offline ? "offline" : _session.ToolExecutor.Network.RequireApproval ? "ask" : "on")}");
+        var fails = _session.ToolExecutor.Workflow.FailedTests;
+        if (fails.Count > 0)
+            PushSystem("  Regression guard: " + string.Join(", ", fails.Take(6)));
+    }
+
+    public void HandleSpec(string? title)
+    {
+        if (_session == null)
+            return;
+        string root = _session.Workspace.PrimaryRoot;
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        {
+            PushSystem("Lock a folder first (/browse) so SPEC.md has a place to land.");
+            return;
+        }
+
+        string md = IntelligenceHelpers.BuildSpecMarkdown(_session.History, title);
+        string path = Path.Combine(root, "SPEC.md");
+        try
+        {
+            File.WriteAllText(path, md);
+            PushSystem($"Wrote {path} from this session. Ask Axiom to implement from SPEC.md when ready.");
+        }
+        catch (Exception ex)
+        {
+            PushSystem("Could not write SPEC.md: " + ex.Message);
+        }
+    }
+
+    public void HandleRepoMap()
+    {
+        if (_session == null)
+            return;
+        string root = _session.Workspace.PrimaryRoot;
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        {
+            PushSystem("Lock a folder first (/browse).");
+            return;
+        }
+        string map = RepoMapService.Build(root, maxChars: 2500);
+        PushSystem(string.IsNullOrWhiteSpace(map) ? "(empty repo map)" : map);
     }
 
     private bool DrainWorkflowNotifications()
@@ -2172,6 +2219,7 @@ internal sealed class ChatTui : IDisposable
             or "/continue" or "/cont" or "/rename" or "/export" or "/pick" or "/picker" or "/palette"
             or "/checkpoint" or "/cp" or "/plan" or "/changes" or "/accept" or "/reject"
             or "/replay" or "/jobs" or "/watch" or "/sticky" or "/pr" or "/network" or "/offline" or "/policy"
+            or "/spec" or "/map"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
             || head.StartsWith("/w") || head.StartsWith("/b") || head.StartsWith("/f")

@@ -475,7 +475,7 @@ namespace Axiom.Core.Agent
                         token),
                     "diagnostics" => await DiagnosticsService.RunAsync(
                         _workspace.PrimaryRoot, token, GetString(root, "prefer")),
-                    "run_tests" => await RunTestsAsync(root, token),
+                    "run_tests" => await RunTestsTrackedAsync(root, token),
                     "read_csv" => ReadCsvTool(root),
                     "read_notebook" => ReadNotebookTool(root),
                     "package_install" => await PackageInstallAsync(root, token),
@@ -1147,6 +1147,21 @@ namespace Axiom.Core.Agent
             else
                 sb.AppendLine(text);
             return sb.ToString().TrimEnd();
+        }
+
+        private async Task<string> RunTestsTrackedAsync(JsonElement root, CancellationToken token)
+        {
+            string filter = GetString(root, "filter");
+            string output = await RunTestsAsync(root, token);
+            bool failed = output.Contains("FAILED", StringComparison.OrdinalIgnoreCase)
+                || (output.Contains("exit_code: ", StringComparison.Ordinal)
+                    && !output.Contains("exit_code: 0", StringComparison.Ordinal));
+            if (failed)
+                _workflow.NoteFailedTest(string.IsNullOrWhiteSpace(filter) ? "run_tests" : filter);
+            else if (output.Contains("exit_code: 0", StringComparison.Ordinal)
+                     || output.Contains("Passed!", StringComparison.OrdinalIgnoreCase))
+                _workflow.NoteTestsPassedClear(string.IsNullOrWhiteSpace(filter) ? null : filter);
+            return output;
         }
 
         private async Task<string> RunTestsAsync(JsonElement root, CancellationToken token)

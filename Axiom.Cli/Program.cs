@@ -761,6 +761,14 @@ internal static class Program
                 tui.HandlePolicy();
                 return true;
 
+            case "/spec":
+                tui.HandleSpec(parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : null);
+                return true;
+
+            case "/map":
+                tui.HandleRepoMap();
+                return true;
+
             case "/continue":
             case "/cont":
                 // Fire-and-forget continuation on the TUI loop.
@@ -863,6 +871,8 @@ internal static class Program
                 Say("  /pr [title]           Push + open GitHub PR via gh");
                 Say("  /network [on|off|ask] Network tools: online / offline / ask");
                 Say("  /policy               Show shell policy path + builtins");
+                Say("  /spec [title]         Write SPEC.md from this chat");
+                Say("  /map                  Show repo map for locked folder");
                 Say("  /clear                Clear transcript (keeps save file)");
                 Say("  Esc                   Stop in-flight agent/council turn");
                 Say("  ↑↓ scroll             (also PgUp/PgDn, Shift+arrows, wheel)");

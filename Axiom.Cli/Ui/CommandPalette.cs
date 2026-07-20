@@ -42,6 +42,8 @@ internal static class CommandPalette
             new() { Id = "network-off", Label = "Network offline", Description = "Block download/fetch/web", Action = "/network off" },
             new() { Id = "network-ask", Label = "Network ask", Description = "Confirm outbound tools", Action = "/network ask" },
             new() { Id = "policy", Label = "Shell policy", Description = "Show allow/deny policy", Action = "/policy" },
+            new() { Id = "spec", Label = "Write SPEC.md", Description = "Spec from chat history", Action = "/spec" },
+            new() { Id = "map", Label = "Repo map", Description = "Structural outline of workspace", Action = "/map" },
             new() { Id = "continue", Label = "Continue last task", Description = "Re-run last goal after stop/error", Action = "/continue" },
             new() { Id = "browse", Label = "Browse folder", Description = "Native folder picker", Action = "/browse" },
             new() { Id = "workspace", Label = "Workspace", Description = "Show locked folder", Action = "/workspace" },

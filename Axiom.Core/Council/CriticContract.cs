@@ -49,7 +49,10 @@ namespace Axiom.Core.Council
         public static string ContractInstruction =>
             "\n[STRUCTURED OUTPUT CONTRACT] Output valid JSON only with this schema: " +
             "{\"status\":\"ok|issues\",\"issues\":[{\"severity\":\"low|medium|high|critical\",\"summary\":\"...\",\"evidence\":\"...\",\"suggestedFix\":\"...\"}]} " +
-            "If there are no issues, output exactly: {\"status\":\"ok\",\"issues\":[]}.";
+            "If there are no issues, output exactly: {\"status\":\"ok\",\"issues\":[]}. " +
+            "EVIDENCE RULE: every issue MUST include concrete evidence (file:line, test name + output, or sandbox log). " +
+            "Never use vague evidence like 'looks fine' or 'seems correct'. " +
+            "A clean pass (status=ok) should only be used when you verified against source/tools or the task is pure prose.";
 
         public static CriticReport Parse(string criticOutput)
         {

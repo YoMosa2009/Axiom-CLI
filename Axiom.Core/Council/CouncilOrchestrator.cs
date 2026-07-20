@@ -92,10 +92,12 @@ namespace Axiom.Core.Council
             }
 
             CouncilTaskKind taskKind = CouncilRolePrompts.DetectTaskKind(request.UserPrompt);
+            TaskSpecialty specialty = IntelligenceHelpers.DetectSpecialty(request.UserPrompt);
             GoalContract goal = GoalContract.FromPrompt(request.UserPrompt);
             string memoryBlock = string.Empty;
-            if (workspaceConnected && !string.IsNullOrWhiteSpace(request.Workspace?.RootPath))
-                memoryBlock = ProjectMemory.BuildContextBlock(request.Workspace!.RootPath);
+            string rootPath = request.Workspace?.RootPath ?? "";
+            if (workspaceConnected && !string.IsNullOrWhiteSpace(rootPath))
+                memoryBlock = ProjectMemory.BuildContextBlock(rootPath);
             if (!string.IsNullOrWhiteSpace(memoryBlock))
             {
                 workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
@@ -111,9 +113,44 @@ namespace Axiom.Core.Council
                     : goalBlock + "\n\n" + workspaceContext;
             }
 
+            // Repo map + lexical retrieval for smarter planning
+            if (workspaceConnected && !string.IsNullOrWhiteSpace(rootPath))
+            {
+                try
+                {
+                    string map = RepoMapService.Build(rootPath);
+                    string ret = RepoRetrievalService.Retrieve(rootPath, request.UserPrompt);
+                    string intel = string.Join("\n\n", new[] { map, ret }.Where(s => !string.IsNullOrWhiteSpace(s)));
+                    if (!string.IsNullOrWhiteSpace(intel))
+                    {
+                        workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
+                            ? intel
+                            : intel + "\n\n" + workspaceContext;
+                        Report(progress, CouncilEventKind.Status, "Repo map / retrieval attached.");
+                    }
+                }
+                catch { /* optional */ }
+            }
+
+            string specialtyBlock = IntelligenceHelpers.SpecialtyPromptBlock(specialty);
+            if (!string.IsNullOrWhiteSpace(specialtyBlock))
+            {
+                workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
+                    ? specialtyBlock
+                    : specialtyBlock + "\n\n" + workspaceContext;
+            }
+
+            string? regression = _agentTools?.Workflow.RegressionGuardBlock();
+            if (!string.IsNullOrWhiteSpace(regression))
+            {
+                workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
+                    ? regression
+                    : regression + "\n\n" + workspaceContext;
+            }
+
             if (agentic)
                 Report(progress, CouncilEventKind.Status, "Council · Builder has agentic tools (files/shell/git).");
-            Report(progress, CouncilEventKind.Status, $"Council · task kind: {taskKind}.");
+            Report(progress, CouncilEventKind.Status, $"Council · task kind: {taskKind} · specialty: {specialty}.");
 
             _agentTools?.BeginUndoTurn("council");
             bool cancelled = false;
@@ -129,6 +166,21 @@ namespace Axiom.Core.Council
             string architectInput = BuildContextualInput(request.UserPrompt, workspaceContext);
             architectPlan = CouncilRolePrompts.StripRoleMarkers(
                 await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken, streamTokens: true));
+
+            // Architect plan validation — one repair pass if empty/unusable (coding/edit only)
+            string planErr = IntelligenceHelpers.ArchitectValidationError(
+                architectPlan, taskKind, codingPathsRequired: looksLikeEdit || taskKind == CouncilTaskKind.Coding);
+            if (!string.IsNullOrEmpty(planErr)
+                && (taskKind == CouncilTaskKind.Coding || looksLikeEdit))
+            {
+                Report(progress, CouncilEventKind.Warning, "Architect plan weak: " + planErr + " — asking for a clearer plan.");
+                string repairInput = architectInput
+                    + "\n\n[PLAN VALIDATION FAILED]\n" + planErr
+                    + "\nRewrite a numbered plan only. For coding tasks name concrete file paths. No vague verbs.";
+                architectPlan = CouncilRolePrompts.StripRoleMarkers(
+                    await CallRoleAsync(architectSystem, repairInput, progress, cancellationToken, streamTokens: true));
+            }
+
             Report(progress, CouncilEventKind.ArchitectOutput, architectPlan);
 
             // Seed plan board from Architect numbered steps (user can /plan; Builder can plan_board).
@@ -161,6 +213,32 @@ namespace Axiom.Core.Council
             builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
             totalToolCalls += builderTools;
             CollectWrittenFiles(changedFiles);
+
+            // Builder self-check: auto diagnostics after writes before Critic
+            if (agentic && _agentTools != null && _agentTools.Workflow.AutoDiagnosticsAfterWrite
+                && _agentTools.WrittenPaths.Count > 0
+                && !string.IsNullOrWhiteSpace(rootPath))
+            {
+                try
+                {
+                    Report(progress, CouncilEventKind.Status, "Builder self-check · diagnostics…");
+                    string diag = await DiagnosticsService.RunAsync(rootPath, cancellationToken);
+                    totalToolCalls++;
+                    if (!string.IsNullOrWhiteSpace(diag))
+                    {
+                        builderOutput = builderOutput.TrimEnd()
+                            + "\n\n[[BUILDER SELF-CHECK DIAGNOSTICS]]\n"
+                            + (diag.Length > 6000 ? diag[..6000] + "\n..." : diag)
+                            + "\n[[END BUILDER SELF-CHECK]]";
+                        NoteSessionTestOutcomes(diag);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Report(progress, CouncilEventKind.Warning, "Self-check diagnostics skipped: " + ex.Message);
+                }
+            }
+
             Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
 
             WorkspacePatchProposal? patch = null;
@@ -207,6 +285,31 @@ namespace Axiom.Core.Council
 
                 // Deterministic findings force an issues status even if the LLM clean-passes.
                 report = MergeDeterministicFindings(report, evidence);
+
+                // Evidence quality rails: annotate missing evidence; only reject vague clean-pass
+                // when Builder actually changed files (real agentic run), not scripted unit tests.
+                bool hadRails = evidence.Findings.Count > 0 || !string.IsNullOrWhiteSpace(evidence.SandboxLogs);
+                report = IntelligenceHelpers.EnforceCriticEvidence(
+                    report, codingTask: taskKind == CouncilTaskKind.Coding || looksLikeEdit, hadRails);
+                bool builderChangedDisk = _agentTools != null && _agentTools.WrittenPaths.Count > 0;
+                if (builderChangedDisk
+                    && IntelligenceHelpers.CriticOutputLacksEvidence(criticOutput, report)
+                    && (taskKind == CouncilTaskKind.Coding || looksLikeEdit)
+                    && retries == 0)
+                {
+                    report.Issues ??= new List<CriticIssue>();
+                    report.Issues.Add(new CriticIssue
+                    {
+                        Severity = "medium",
+                        Summary = "Critic clean-pass lacked file:line or test evidence",
+                        Evidence = "No path:line citation or diagnostics reference in review",
+                        SuggestedFix = "Re-read Builder changes and cite concrete evidence, or re-run tests."
+                    });
+                    report.Status = "issues";
+                    report.HasIssues = true;
+                    report.FindingsCount = report.Issues.Count;
+                    Report(progress, CouncilEventKind.Warning, "Critic evidence rule: vague clean-pass rejected.");
+                }
 
                 int issueCount = report.Issues?.Count ?? 0;
                 if (issueCount == 0)
@@ -529,6 +632,20 @@ namespace Axiom.Core.Council
             }
 
             return (result.FinalText, result.ToolCallCount);
+        }
+
+        private void NoteSessionTestOutcomes(string output)
+        {
+            if (_agentTools == null || string.IsNullOrWhiteSpace(output))
+                return;
+            bool failed = output.Contains("FAILED", StringComparison.OrdinalIgnoreCase)
+                || (output.Contains("exit_code: ", StringComparison.Ordinal)
+                    && !output.Contains("exit_code: 0", StringComparison.Ordinal));
+            if (failed)
+                _agentTools.Workflow.NoteFailedTest("council-diagnostics");
+            else if (output.Contains("exit_code: 0", StringComparison.Ordinal)
+                     || output.Contains("Passed!", StringComparison.OrdinalIgnoreCase))
+                _agentTools.Workflow.NoteTestsPassedClear("council-diagnostics");
         }
 
         private void CollectWrittenFiles(List<string> changedFiles)

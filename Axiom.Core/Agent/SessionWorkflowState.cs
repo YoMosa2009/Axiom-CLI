@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 
 namespace Axiom.Core.Agent
 {
@@ -20,6 +23,13 @@ namespace Axiom.Core.Agent
         /// <summary>When true (or auto with large write), require approval for big mutations.</summary>
         public int BigDiffLineThreshold { get; set; } = 120;
         public int BigDiffFileThreshold { get; set; } = 5;
+
+        /// <summary>Failed test filters/names observed this session (regression guard).</summary>
+        private readonly List<string> _failedTests = new();
+        private readonly object _failGate = new();
+
+        public bool AutoDiagnosticsAfterWrite { get; set; } = true;
+        public bool DualPassQa { get; set; } = true;
 
         public void SetSticky(string task, int turns)
         {
@@ -49,6 +59,54 @@ namespace Axiom.Core.Agent
             if (string.IsNullOrWhiteSpace(StickyTask))
                 return "No sticky task. Set with /sticky <goal> [turns]";
             return $"Sticky ({StickyTurnsRemaining} turn(s) left): {StickyTask}";
+        }
+
+        public void NoteFailedTest(string nameOrFilter)
+        {
+            if (string.IsNullOrWhiteSpace(nameOrFilter))
+                return;
+            string n = nameOrFilter.Trim();
+            if (n.Length > 120)
+                n = n[..117] + "…";
+            lock (_failGate)
+            {
+                if (!_failedTests.Any(x => string.Equals(x, n, StringComparison.OrdinalIgnoreCase)))
+                    _failedTests.Add(n);
+                while (_failedTests.Count > 20)
+                    _failedTests.RemoveAt(0);
+            }
+        }
+
+        public void NoteTestsPassedClear(string? filter = null)
+        {
+            lock (_failGate)
+            {
+                if (string.IsNullOrWhiteSpace(filter))
+                    _failedTests.Clear();
+                else
+                    _failedTests.RemoveAll(x => x.Contains(filter, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        public IReadOnlyList<string> FailedTests
+        {
+            get { lock (_failGate) return _failedTests.ToList(); }
+        }
+
+        public string? RegressionGuardBlock()
+        {
+            List<string> fails;
+            lock (_failGate) fails = _failedTests.ToList();
+            if (fails.Count == 0)
+                return null;
+            var sb = new StringBuilder();
+            sb.AppendLine("[[REGRESSION GUARD]]");
+            sb.AppendLine("These tests/filters failed earlier in the session — re-run before finishing:");
+            foreach (string f in fails.Take(8))
+                sb.AppendLine("  - " + f);
+            sb.AppendLine("Use run_tests with filter when possible.");
+            sb.AppendLine("[[END REGRESSION GUARD]]");
+            return sb.ToString();
         }
     }
 }
