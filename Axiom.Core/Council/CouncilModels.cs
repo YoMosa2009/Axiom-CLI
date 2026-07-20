@@ -16,11 +16,9 @@ namespace Axiom.Core.Council
         bool WebSearchEnabled = true,
         bool AgenticBuilderEnabled = true,
         CriticSeverityPolicy SeverityPolicy = CriticSeverityPolicy.Strict,
-        CouncilDepth Depth = CouncilDepth.Full,
         bool ParallelExplore = true,
         bool UserInLoopCritic = false,
-        bool PostMergeCritic = true,
-        bool ArbiterEnabled = true)
+        bool PostMergeCritic = true)
     {
         public static CouncilToolOptions Default { get; } = new();
     }
@@ -46,7 +44,6 @@ namespace Axiom.Core.Council
         BuilderOutput,
         CriticOutput,
         ExploreOutput,
-        ArbiterOutput,
         Tool,
         Token,
         Warning,
@@ -65,6 +62,5 @@ namespace Axiom.Core.Council
         IReadOnlyList<string>? ChangedFiles = null,
         string? ApplySummary = null,
         bool Cancelled = false,
-        string? ExploreSummary = null,
-        string? ArbiterNote = null);
+        string? ExploreSummary = null);
 }

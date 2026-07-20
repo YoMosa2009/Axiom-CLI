@@ -17,14 +17,6 @@ namespace Axiom.Core.Council
         CriticalOnly = 2
     }
 
-    public enum CouncilDepth
-    {
-        /// <summary>Full Architect → Builder → Critic with retries.</summary>
-        Full = 0,
-        /// <summary>Fewer round-trips: combined implement + light review for simple work.</summary>
-        Lite = 1
-    }
-
     public enum CouncilRoleVisibility
     {
         /// <summary>Show Architect / Critic cards in the TUI.</summary>

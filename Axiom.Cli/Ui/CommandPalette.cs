@@ -44,8 +44,6 @@ internal static class CommandPalette
             new() { Id = "policy", Label = "Shell policy", Description = "Show allow/deny policy", Action = "/policy" },
             new() { Id = "spec", Label = "Write SPEC.md", Description = "Spec from chat history", Action = "/spec" },
             new() { Id = "map", Label = "Repo map", Description = "Structural outline of workspace", Action = "/map" },
-            new() { Id = "council-full", Label = "Council full", Description = "Architect→Builder→Critic", Action = "/council full" },
-            new() { Id = "council-lite", Label = "Council lite", Description = "Fewer round-trips", Action = "/council lite" },
             new() { Id = "council-sev-strict", Label = "Critic: strict", Description = "Any issue blocks", Action = "/council severity strict" },
             new() { Id = "council-sev-high", Label = "Critic: high+", Description = "Medium+ ignored", Action = "/council severity high" },
             new() { Id = "council-sev-crit", Label = "Critic: critical-only", Description = "Only critical blocks", Action = "/council severity critical" },

@@ -877,7 +877,7 @@ internal static class Program
                 Say("  /policy               Show shell policy path + builtins");
                 Say("  /spec [title]         Write SPEC.md from this chat");
                 Say("  /map                  Show repo map for locked folder");
-                Say("  /council […]          depth, severity, explore, loop, roles, arbiter");
+                Say("  /council […]          severity, explore, loop, post-merge, roles");
                 Say("  /clear                Clear transcript (keeps save file)");
                 Say("  Esc                   Stop in-flight agent/council turn");
                 Say("  ↑↓ scroll             (also PgUp/PgDn, Shift+arrows, wheel)");

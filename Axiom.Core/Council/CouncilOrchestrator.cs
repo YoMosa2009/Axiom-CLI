@@ -160,63 +160,17 @@ namespace Axiom.Core.Council
             if (agentic)
                 Report(progress, CouncilEventKind.Status, "Council · Builder has agentic tools (files/shell/git).");
             Report(progress, CouncilEventKind.Status,
-                $"Council · {tools.Depth} · severity {CriticSeverity.Describe(tools.SeverityPolicy)} · " +
+                $"Council · severity {CriticSeverity.Describe(tools.SeverityPolicy)} · " +
                 $"task {taskKind} · specialty {specialty}.");
 
             _agentTools?.BeginUndoTurn("council");
             bool cancelled = false;
             string? exploreSummary = null;
-            string? arbiterNote = null;
 
             string architectPlan = string.Empty;
             string builderOutput = string.Empty;
             try
             {
-            // ── Council lite: single implement loop for simple non-edit work ───
-            if (tools.Depth == CouncilDepth.Lite
-                && !(taskKind == CouncilTaskKind.Coding && looksLikeEdit && expectPatch && !agentic))
-            {
-                Report(progress, CouncilEventKind.Status, "Council lite · plan+implement in one lane…");
-                string liteSystem = FoundationSystemPrompt.Apply(
-                    CouncilRolePrompts.Lite(taskKind, workspaceConnected, agentic));
-                string liteInput = BuildContextualInput(request.UserPrompt, workspaceContext);
-                _agentTools?.ClearWrittenPaths();
-                (builderOutput, int liteTools) = await CallBuilderAsync(
-                    liteSystem, liteInput, agentic, progress, cancellationToken);
-                builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
-                totalToolCalls += liteTools;
-                CollectWrittenFiles(changedFiles);
-                Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
-
-                // Light Critic only when files changed or coding
-                CriticReport liteReport = new() { Status = "ok", Issues = new List<CriticIssue>() };
-                if ((looksLikeEdit || taskKind == CouncilTaskKind.Coding || changedFiles.Count > 0)
-                    && !string.IsNullOrWhiteSpace(builderOutput))
-                {
-                    CriticEvidence liteEvidence = await GatherCriticEvidenceAsync(
-                        builderOutput, workspaceConnected, tools, progress, cancellationToken);
-                    string criticInput = BuildCriticInput(request.UserPrompt, false, builderOutput, liteEvidence);
-                    if (!string.IsNullOrWhiteSpace(acceptance))
-                        criticInput = acceptance + "\n\n" + criticInput;
-                    string criticSystem = FoundationSystemPrompt.Apply(
-                        CouncilRolePrompts.Critic(taskKind, workspaceConnected, agentic && workspaceConnected));
-                    (string criticOut, int ct) = await CallCriticAsync(
-                        criticSystem, criticInput, agentic && workspaceConnected, progress, cancellationToken);
-                    totalToolCalls += ct;
-                    Report(progress, CouncilEventKind.CriticOutput, criticOut);
-                    liteReport = MergeDeterministicFindings(CriticContractParser.Parse(criticOut), liteEvidence);
-                    liteReport = FilterReportBySeverity(liteReport, tools.SeverityPolicy);
-                }
-
-                Report(progress, CouncilEventKind.Completed,
-                    totalToolCalls > 0
-                        ? $"Council lite complete · {totalToolCalls} tool call(s)."
-                        : "Council lite complete.");
-                return new CouncilResult(
-                    true, builderOutput, null, liteReport, totalToolCalls,
-                    changedFiles.Count > 0 ? changedFiles : null, applySummary, cancelled);
-            }
-
             // ── Parallel explore lane (while Architect plans) ─────────────────
             Task<(string Summary, int Tools)>? exploreTask = null;
             if (tools.ParallelExplore && agentic && workspaceConnected && _chat != null && _agentTools != null
@@ -570,33 +524,6 @@ namespace Axiom.Core.Council
                 }
             }
 
-            // ── Arbiter: residual disagreement / remaining blocking issues ─────
-            var residual = CriticSeverity.FilterBlocking(report.Issues, tools.SeverityPolicy);
-            // Arbiter only when full agentic council (avoids consuming scripted pipeline responses in unit tests).
-            if (tools.ArbiterEnabled && agentic && residual.Count > 0 && retries >= MaxBuilderRetryAttempts)
-            {
-                Report(progress, CouncilEventKind.Status, "Arbiter resolving residual issues…");
-                string arbSystem = FoundationSystemPrompt.Apply(CouncilRolePrompts.Arbiter(taskKind));
-                var arbSb = new StringBuilder();
-                arbSb.AppendLine("[ORIGINAL REQUEST]").AppendLine(request.UserPrompt);
-                arbSb.AppendLine().AppendLine("[ARCHITECT PLAN]").AppendLine(architectPlan);
-                arbSb.AppendLine().AppendLine("[BUILDER OUTPUT SUMMARY]");
-                arbSb.AppendLine(builderOutput.Length > 6000 ? builderOutput[..6000] + "…" : builderOutput);
-                arbSb.AppendLine().AppendLine("[RESIDUAL CRITIC ISSUES]");
-                for (int i = 0; i < residual.Count; i++)
-                {
-                    var iss = residual[i];
-                    arbSb.AppendLine($"{i + 1}. [{iss.Severity}] {iss.Summary}");
-                    if (!string.IsNullOrWhiteSpace(iss.Evidence))
-                        arbSb.AppendLine("   evidence: " + iss.Evidence);
-                }
-                arbiterNote = CouncilRolePrompts.StripRoleMarkers(
-                    await CallRoleAsync(arbSystem, arbSb.ToString(), progress, cancellationToken, streamTokens: true));
-                Report(progress, CouncilEventKind.ArbiterOutput, arbiterNote);
-                builderOutput = builderOutput.TrimEnd()
-                    + "\n\n--- Arbiter ---\n" + arbiterNote;
-            }
-
             Report(progress, CouncilEventKind.Completed,
                 totalToolCalls > 0
                     ? $"Council run complete · {totalToolCalls} tool call(s)."
@@ -610,8 +537,7 @@ namespace Axiom.Core.Council
                 changedFiles.Count > 0 ? changedFiles : null,
                 applySummary,
                 cancelled,
-                exploreSummary,
-                arbiterNote);
+                exploreSummary);
             }
             catch (OperationCanceledException)
             {
@@ -626,8 +552,7 @@ namespace Axiom.Core.Council
                     changedFiles.Count > 0 ? changedFiles : null,
                     applySummary,
                     Cancelled: true,
-                    exploreSummary,
-                    arbiterNote);
+                    exploreSummary);
             }
             finally
             {
@@ -670,25 +595,6 @@ namespace Axiom.Core.Council
             {
                 return ("Explore failed: " + ex.Message, 0);
             }
-        }
-
-        private static CriticReport FilterReportBySeverity(CriticReport report, CriticSeverityPolicy policy)
-        {
-            // Keep all issues for display; mark status ok if none block
-            var blocking = CriticSeverity.FilterBlocking(report.Issues, policy);
-            if (blocking.Count == 0)
-            {
-                report.Status = "ok";
-                report.HasIssues = false;
-                // Keep Issues list for transparency of non-blocking notes
-            }
-            else
-            {
-                report.Status = "issues";
-                report.HasIssues = true;
-            }
-            report.FindingsCount = report.Issues?.Count ?? 0;
-            return report;
         }
 
         private static string FormatIssuesForRevision(IReadOnlyList<CriticIssue> issues, string fallbackCriticOutput)

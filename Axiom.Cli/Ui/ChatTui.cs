@@ -1458,9 +1458,8 @@ internal sealed class ChatTui : IDisposable
         if (string.IsNullOrEmpty(a) || a is "status" or "?")
         {
             PushSystem($"Council: {(t.CouncilEnabled ? "on" : "off")} · {t.CouncilLabel}");
-            PushSystem($"  depth: {(t.CouncilDepth == CouncilDepth.Lite ? "lite" : "full")}   ·  /council lite|full");
             PushSystem($"  severity: {CriticSeverity.Describe(t.CriticSeverity)}   ·  /council severity strict|high|critical");
-            PushSystem($"  explore: {(t.ParallelExplore ? "on" : "off")}  ·  loop: {(t.UserInLoopCritic ? "on" : "off")}  ·  post-merge: {(t.PostMergeCritic ? "on" : "off")}  ·  arbiter: {(t.ArbiterEnabled ? "on" : "off")}");
+            PushSystem($"  explore: {(t.ParallelExplore ? "on" : "off")}  ·  loop: {(t.UserInLoopCritic ? "on" : "off")}  ·  post-merge: {(t.PostMergeCritic ? "on" : "off")}");
             PushSystem($"  roles: {(t.RoleVisibility == CouncilRoleVisibility.FinalOnly ? "final" : "full")}   ·  /council roles full|final");
             PushSystem("  acceptance: .axiom/acceptance.md (auto-loaded when present)");
             return;
@@ -1476,16 +1475,6 @@ internal sealed class ChatTui : IDisposable
             case "off":
                 t.CouncilEnabled = head == "on";
                 PushSystem($"Council {(t.CouncilEnabled ? "on" : "off")}.");
-                break;
-            case "lite":
-                t.CouncilDepth = CouncilDepth.Lite;
-                t.CouncilEnabled = true;
-                PushSystem("Council depth → lite (fewer round-trips).");
-                break;
-            case "full":
-                t.CouncilDepth = CouncilDepth.Full;
-                t.CouncilEnabled = true;
-                PushSystem("Council depth → full (Architect → Builder → Critic).");
                 break;
             case "severity":
             case "sev":
@@ -1518,12 +1507,6 @@ internal sealed class ChatTui : IDisposable
                     t.PostMergeCritic = false;
                 PushSystem($"Post-merge Critic → {(t.PostMergeCritic ? "on" : "off")}");
                 break;
-            case "arbiter":
-                t.ArbiterEnabled = val is null or "on" or "1" or "true";
-                if (val is "off" or "0" or "false")
-                    t.ArbiterEnabled = false;
-                PushSystem($"Arbiter → {(t.ArbiterEnabled ? "on" : "off")}");
-                break;
             case "roles":
             case "visibility":
                 if (val is "final" or "finalonly" or "collapse")
@@ -1538,7 +1521,7 @@ internal sealed class ChatTui : IDisposable
                 }
                 break;
             default:
-                PushSystem("Usage: /council [status|lite|full|severity …|explore on|loop on|post on|arbiter on|roles full|final]");
+                PushSystem("Usage: /council [status|severity …|explore on|loop on|post on|roles full|final]");
                 break;
         }
     }
@@ -1618,10 +1601,6 @@ internal sealed class ChatTui : IDisposable
                     SetActivity("Council · Explore done");
                     if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
                         PushSystem("Explore lane\n" + Truncate(evt.Message, 800));
-                    break;
-                case CouncilEventKind.ArbiterOutput:
-                    SetActivity("Council · Arbiter");
-                    PushSystem("Arbiter\n" + Truncate(evt.Message, 1000));
                     break;
                 case CouncilEventKind.Completed:
                     SetActivity("Council · Finished");
