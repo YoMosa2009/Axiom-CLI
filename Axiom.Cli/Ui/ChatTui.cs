@@ -9,9 +9,9 @@ using Axiom.Core.Agent;
 using Axiom.Core.Chat;
 using Axiom.Core.Council;
 using Axiom.Core.Memory;
+using Axiom.Core.Persistence;
 using Axiom.Core.Tools;
 using Axiom.Core.Workspace;
-// ProjectMemory, ToolEvent, ToolCallingLoop, ApprovalMode from Axiom.Core.Agent
 
 namespace Axiom.Cli.Ui;
 
@@ -57,6 +57,18 @@ internal sealed class ChatTui : IDisposable
     private TaskCompletionSource<bool>? _approvalTcs;
     private string _approvalPrompt = string.Empty;
 
+    // Workflow UX (#1)
+    private bool _paletteOpen;
+    private string _paletteQuery = string.Empty;
+    private int _paletteIndex;
+    private bool _sessionPickerOpen;
+    private int _sessionPickerIndex;
+    private string? _sessionTitle; // custom name from /rename
+    private string? _lastUserTask; // for /continue
+    private string _profileName = "default";
+    private Axiom.Core.Persistence.UserProfileStore? _profiles;
+    private Axiom.Core.Persistence.UserProfile? _profile;
+
     // Session bindings
     private ChatSession? _session;
     private (string Id, string Label, string Description)[] _models = Array.Empty<(string, string, string)>();
@@ -78,6 +90,129 @@ internal sealed class ChatTui : IDisposable
         // New blank session id so the next auto-save doesn't overwrite the previous file.
         _sessionId = SessionStore.NewId();
         _sessionCreated = DateTime.UtcNow;
+        _sessionTitle = null;
+        _lastUserTask = null;
+    }
+
+    public void SetProfile(string name, Axiom.Core.Persistence.UserProfileStore store, Axiom.Core.Persistence.UserProfile profile)
+    {
+        _profileName = name;
+        _profiles = store;
+        _profile = profile;
+    }
+
+    public string? LastUserTask => _lastUserTask;
+
+    public bool TryRenameCurrentSession(string title, out string error)
+    {
+        error = string.Empty;
+        title = (title ?? string.Empty).Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (title.Length == 0)
+        {
+            error = "Title is empty. Usage: /rename my topic";
+            return false;
+        }
+        if (title.Length > 80)
+            title = title[..77] + "...";
+        _sessionTitle = title;
+        if (!_sessionStore.TryRename(_sessionId, title, out error))
+        {
+            // Session file may not exist yet — still keep in-memory title for next save.
+            error = string.Empty;
+        }
+        PushSystem($"Session renamed → {_sessionTitle}");
+        AutoSave();
+        return true;
+    }
+
+    public string ExportTranscript(bool lastTurnOnly)
+    {
+        List<Msg> snap;
+        lock (_gate) snap = _messages.ToList();
+        if (lastTurnOnly)
+        {
+            int lastUser = snap.FindLastIndex(m => m.Role == Role.User);
+            if (lastUser >= 0)
+                snap = snap.Skip(lastUser).ToList();
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("# Axiom session export");
+        sb.AppendLine();
+        sb.AppendLine($"- Id: `{_sessionId}`");
+        sb.AppendLine($"- Title: {_sessionTitle ?? "(auto)"}");
+        sb.AppendLine($"- Model: {_session?.ModelLabel}");
+        sb.AppendLine($"- Exported: {DateTime.Now:yyyy-MM-dd HH:mm}");
+        sb.AppendLine();
+        foreach (Msg m in snap)
+        {
+            string role = m.Role switch
+            {
+                Role.User => "You",
+                Role.Assistant => "Axiom",
+                Role.Error => "Error",
+                Role.Status => "Status",
+                _ => "System"
+            };
+            sb.AppendLine($"## {role}");
+            sb.AppendLine();
+            sb.AppendLine(m.Text);
+            sb.AppendLine();
+        }
+
+        string dir = System.IO.Path.Combine(Axiom.Core.AppPaths.Root, "Exports");
+        System.IO.Directory.CreateDirectory(dir);
+        string file = System.IO.Path.Combine(dir,
+            $"axiom-{_sessionId}-{(lastTurnOnly ? "last" : "full")}-{DateTime.Now:yyyyMMdd-HHmmss}.md");
+        System.IO.File.WriteAllText(file, sb.ToString());
+        PushSystem($"Exported → {file}");
+        return file;
+    }
+
+    public async Task ContinueLastTaskAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_lastUserTask))
+        {
+            PushSystem("Nothing to continue — no prior user task in this session.");
+            return;
+        }
+        if (_busy)
+        {
+            PushSystem("Already busy — wait or Esc to stop.");
+            return;
+        }
+        PushSystem("Continuing last task…");
+        await SubmitAsync(_lastUserTask + "\n\n[CONTINUE] Resume and finish this task. Use workspace state and prior progress; do not restart from scratch unless necessary.");
+    }
+
+    public void CycleApprovalMode()
+    {
+        if (_session == null)
+            return;
+        _session.Tools.ApprovalMode = _session.Tools.ApprovalMode switch
+        {
+            ApprovalMode.Auto => ApprovalMode.Ask,
+            ApprovalMode.Ask => ApprovalMode.Plan,
+            _ => ApprovalMode.Auto
+        };
+        _session.ApplyToolSettings();
+        PersistProfileFromSession();
+        PushSystem($"Approval mode → {_session.Tools.ApprovalLabel}  (Ctrl+Shift+M to cycle)");
+    }
+
+    public void OpenSessionPicker()
+    {
+        _sessionPickerOpen = true;
+        _sessionPickerIndex = 0;
+        _paletteOpen = false;
+    }
+
+    public void OpenCommandPalette()
+    {
+        _paletteOpen = true;
+        _paletteQuery = string.Empty;
+        _paletteIndex = 0;
+        _sessionPickerOpen = false;
     }
 
     public bool TryLoadSession(string idOrPrefix, out string error)
@@ -116,6 +251,9 @@ internal sealed class ChatTui : IDisposable
 
         _sessionId = stored.Id;
         _sessionCreated = stored.CreatedAt == default ? DateTime.UtcNow : stored.CreatedAt;
+        _sessionTitle = string.IsNullOrWhiteSpace(stored.Title) || stored.Title.StartsWith("Untitled", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : stored.Title;
         if (!string.IsNullOrWhiteSpace(stored.ModelId))
             _session.ModelId = stored.ModelId;
         if (!string.IsNullOrWhiteSpace(stored.ModelLabel))
@@ -194,6 +332,11 @@ internal sealed class ChatTui : IDisposable
             }
             session.ChatService.SetApiKey(key.Trim());
             PushSystem("OpenRouter API key saved.");
+            MarkOnboarding("api_key");
+        }
+        else
+        {
+            MarkOnboarding("api_key");
         }
 
         // Resume last session if present (Claude Code-style continuity).
@@ -201,11 +344,14 @@ internal sealed class ChatTui : IDisposable
 
         string mode = session.Tools.ApprovalLabel;
         PushSystem(
-            $"Axiom ready · {session.ModelLabel} · council {(session.Tools.CouncilEnabled ? "on" : "off")} · mode {mode} · Esc stops · /undo · /help");
+            $"Axiom ready · {session.ModelLabel} · council {(session.Tools.CouncilEnabled ? "on" : "off")} · mode {mode} · profile @{_profileName}");
+        PushSystem("Ctrl+K palette · Ctrl+Shift+M mode · Esc stop · /continue · /export · /sessions");
 
         var memFiles = ProjectMemory.ListLoadedFiles(session.Workspace.PrimaryRoot);
         if (memFiles.Count > 0)
             PushSystem("Project memory: " + string.Join(", ", memFiles));
+
+        ShowOnboardingIfNeeded();
 
         // Wire approval prompts for Ask mode.
         session.ToolExecutor.ApprovalHandler = PromptToolApprovalAsync;
@@ -389,6 +535,30 @@ internal sealed class ChatTui : IDisposable
     private async Task<bool> HandleKeyAsync(ConsoleKeyInfo key)
     {
         MenuMode mode = GetMenuMode(_input, _cursor);
+
+        // Ctrl+K — command palette
+        if (!_busy && key.Key == ConsoleKey.K && key.Modifiers.HasFlag(ConsoleModifiers.Control)
+            && !key.Modifiers.HasFlag(ConsoleModifiers.Shift)
+            && !key.Modifiers.HasFlag(ConsoleModifiers.Alt))
+        {
+            OpenCommandPalette();
+            return true;
+        }
+
+        // Ctrl+Shift+M — cycle approval mode
+        if (!_busy && key.Key == ConsoleKey.M
+            && key.Modifiers.HasFlag(ConsoleModifiers.Control)
+            && key.Modifiers.HasFlag(ConsoleModifiers.Shift))
+        {
+            CycleApprovalMode();
+            return true;
+        }
+
+        if (_paletteOpen)
+            return await HandlePaletteKeyAsync(key);
+
+        if (_sessionPickerOpen)
+            return await HandleSessionPickerKeyAsync(key);
 
         // Mouse wheel / incomplete ESC sequences (SGR mouse) when mouse tracking is on.
         if (TryConsumeMouseWheel(key, out int wheelDelta))
@@ -671,7 +841,11 @@ internal sealed class ChatTui : IDisposable
         }
 
         PushUser(input);
+        _lastUserTask = input;
+        MarkOnboarding("first_message");
         _attachPaths?.Invoke(input, _session);
+        if (_session.Workspace.IsExclusive || _session.Workspace.Roots.Count > 0)
+            MarkOnboarding("folder");
         _scrollFromBottom = 0;
         Paint(force: true);
 
@@ -1041,7 +1215,9 @@ internal sealed class ChatTui : IDisposable
             var stored = new StoredSession
             {
                 Id = _sessionId,
-                Title = SessionStore.MakeTitle(firstUser),
+                Title = !string.IsNullOrWhiteSpace(_sessionTitle)
+                    ? _sessionTitle!
+                    : SessionStore.MakeTitle(firstUser),
                 CreatedAt = _sessionCreated,
                 UpdatedAt = DateTime.UtcNow,
                 ModelId = _session.ModelId,
@@ -1071,6 +1247,252 @@ internal sealed class ChatTui : IDisposable
     {
         _activity = status;
         _animFrames = ResolveAnim(status);
+    }
+
+    private void PersistProfileFromSession()
+    {
+        if (_session == null || _profiles == null || _profile == null)
+            return;
+        try
+        {
+            _profile.DefaultModelId = _session.ModelId;
+            _profile.DefaultModelLabel = _session.ModelLabel;
+            _profile.ApprovalMode = UserProfileStore.FormatApproval(_session.Tools.ApprovalMode);
+            _profile.CouncilEnabled = _session.Tools.CouncilEnabled;
+            _profile.WebSearchEnabled = _session.Tools.WebSearchEnabled;
+            _profile.SandboxEnabled = _session.Tools.SandboxEnabled;
+            _profile.CalculatorEnabled = _session.Tools.CalculatorEnabled;
+            _profile.WorkspaceRoots = _session.Workspace.Roots.ToList();
+            _profile.WorkspaceExclusive = _session.Workspace.IsExclusive;
+            _profiles.Save(_profile);
+        }
+        catch { /* never break chat */ }
+    }
+
+    private void MarkOnboarding(string step)
+    {
+        if (_profile == null || _profiles == null || _profile.OnboardingComplete)
+            return;
+        if (_profile.OnboardingStepsDone.Add(step))
+        {
+            if (_profile.OnboardingStepsDone.Contains("api_key")
+                && _profile.OnboardingStepsDone.Contains("folder")
+                && _profile.OnboardingStepsDone.Contains("first_message")
+                && _profile.OnboardingStepsDone.Contains("hints"))
+            {
+                _profile.OnboardingComplete = true;
+            }
+            try { _profiles.Save(_profile); } catch { /* ignore */ }
+        }
+    }
+
+    public void ShowOnboardingIfNeeded()
+    {
+        if (_session == null || _profile == null || _profile.OnboardingComplete)
+            return;
+
+        PushSystem("── Getting started ──────────────────────────────────");
+        bool hasKey = _session.ChatService.HasValidKey;
+        bool hasFolder = _session.Workspace.IsExclusive || _session.Workspace.Roots.Count > 0;
+        PushSystem($"{(hasKey ? "✓" : "1.")} API key  {(hasKey ? "(done)" : "— paste when prompted or /help")}");
+        PushSystem($"{(hasFolder ? "✓" : "2.")} Lock a folder  — /browse or @ Browse…");
+        PushSystem("3. Send a message  — ask Axiom to edit or explain something");
+        PushSystem("4. Keys: Esc stop · Ctrl+K palette · Ctrl+Shift+M mode · /undo · /mode ask");
+        PushSystem("────────────────────────────────────────────────────");
+        if (hasKey)
+            MarkOnboarding("api_key");
+        if (hasFolder)
+            MarkOnboarding("folder");
+        MarkOnboarding("hints");
+    }
+
+    private async Task<bool> HandlePaletteKeyAsync(ConsoleKeyInfo key)
+    {
+        if (key.Key == ConsoleKey.Escape)
+        {
+            _paletteOpen = false;
+            _paletteQuery = string.Empty;
+            return true;
+        }
+
+        var items = CommandPalette.Filter(CommandPalette.BuildCore(), _paletteQuery);
+        if (key.Key == ConsoleKey.UpArrow)
+        {
+            if (items.Count > 0)
+                _paletteIndex = (_paletteIndex - 1 + items.Count) % items.Count;
+            return true;
+        }
+        if (key.Key == ConsoleKey.DownArrow)
+        {
+            if (items.Count > 0)
+                _paletteIndex = (_paletteIndex + 1) % items.Count;
+            return true;
+        }
+        if (key.Key == ConsoleKey.Enter)
+        {
+            if (items.Count == 0)
+                return true;
+            var pick = items[Math.Clamp(_paletteIndex, 0, items.Count - 1)];
+            _paletteOpen = false;
+            _paletteQuery = string.Empty;
+            await RunPaletteActionAsync(pick.Action);
+            return true;
+        }
+        if (key.Key == ConsoleKey.Backspace)
+        {
+            if (_paletteQuery.Length > 0)
+            {
+                _paletteQuery = _paletteQuery[..^1];
+                _paletteIndex = 0;
+            }
+            return true;
+        }
+        if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar))
+        {
+            _paletteQuery += key.KeyChar;
+            _paletteIndex = 0;
+            return true;
+        }
+        return true;
+    }
+
+    private async Task RunPaletteActionAsync(string action)
+    {
+        if (action == "__cycle_mode__")
+        {
+            CycleApprovalMode();
+            return;
+        }
+        if (action == "__session_picker__")
+        {
+            OpenSessionPicker();
+            return;
+        }
+        if (action == "/exit" || action.Equals("exit", StringComparison.OrdinalIgnoreCase))
+        {
+            _running = false;
+            return;
+        }
+        if (action.StartsWith('/') && _handleSlash != null && _session != null)
+        {
+            // Commands that need free text stay as prefilled input.
+            if (action is "/rename ")
+            {
+                _input = "/rename ";
+                _cursor = _input.Length;
+                return;
+            }
+            await _handleSlash(action.Trim(), _session);
+            if (action.StartsWith("/mode", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("/tools", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("/model", StringComparison.OrdinalIgnoreCase))
+                PersistProfileFromSession();
+            return;
+        }
+        await SubmitAsync(action);
+    }
+
+    private async Task<bool> HandleSessionPickerKeyAsync(ConsoleKeyInfo key)
+    {
+        var list = _sessionStore.List(max: 40);
+        if (key.Key == ConsoleKey.Escape)
+        {
+            _sessionPickerOpen = false;
+            return true;
+        }
+        if (list.Count == 0)
+            return true;
+
+        if (key.Key == ConsoleKey.UpArrow)
+        {
+            _sessionPickerIndex = (_sessionPickerIndex - 1 + list.Count) % list.Count;
+            return true;
+        }
+        if (key.Key == ConsoleKey.DownArrow)
+        {
+            _sessionPickerIndex = (_sessionPickerIndex + 1) % list.Count;
+            return true;
+        }
+        if (key.Key == ConsoleKey.Enter)
+        {
+            var item = list[Math.Clamp(_sessionPickerIndex, 0, list.Count - 1)];
+            _sessionPickerOpen = false;
+            if (TryLoadSession(item.Id, out string err))
+                PushSystem($"Loaded: {item.Title}");
+            else
+                PushError(err);
+            return true;
+        }
+        if (key.KeyChar is 'd' or 'D' or 'x' or 'X')
+        {
+            var item = list[Math.Clamp(_sessionPickerIndex, 0, list.Count - 1)];
+            bool wasCurrent = string.Equals(item.Id, _sessionId, StringComparison.OrdinalIgnoreCase);
+            if (_sessionStore.Delete(item.Id))
+            {
+                PushSystem($"Deleted: {item.Title}");
+                if (wasCurrent)
+                    DeleteCurrentAndStartFresh();
+                if (_sessionPickerIndex >= Math.Max(1, list.Count - 1))
+                    _sessionPickerIndex = Math.Max(0, list.Count - 2);
+            }
+            return true;
+        }
+        await Task.CompletedTask;
+        return true;
+    }
+
+    private void PaintCommandPalette(string[] rows, int top, int height, int w)
+    {
+        var items = CommandPalette.Filter(CommandPalette.BuildCore(), _paletteQuery);
+        rows[top] = Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold
+            + Ansi.ClipPad($" ⌘ Command palette  / {_paletteQuery}█", w) + Ansi.Reset;
+        int show = Math.Max(1, height - 1);
+        int sel = items.Count == 0 ? 0 : Math.Clamp(_paletteIndex, 0, items.Count - 1);
+        int from = Math.Clamp(sel - show / 2, 0, Math.Max(0, items.Count - show));
+        for (int i = 0; i < show; i++)
+        {
+            int row = top + 1 + i;
+            if (row >= rows.Length)
+                break;
+            if (from + i >= items.Count)
+            {
+                rows[row] = string.Empty;
+                continue;
+            }
+            var item = items[from + i];
+            bool active = from + i == sel;
+            string line = $" {(active ? "❯" : " ")} {item.Label,-22}  {item.Description}";
+            rows[row] = (active ? Ansi.Fg(AxiomTheme.Gold) : Ansi.Fg(AxiomTheme.TextSecondary))
+                + Ansi.ClipPad(line, w) + Ansi.Reset;
+        }
+    }
+
+    private void PaintSessionPicker(string[] rows, int top, int height, int w)
+    {
+        var list = _sessionStore.List(max: 40);
+        rows[top] = Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold
+            + Ansi.ClipPad(" ☰ Sessions  ·  Enter load  ·  d delete", w) + Ansi.Reset;
+        if (list.Count == 0)
+        {
+            rows[top + 1] = Ansi.Fg(AxiomTheme.SystemMuted) + Ansi.ClipPad("  (no saved sessions)", w) + Ansi.Reset;
+            return;
+        }
+        int show = Math.Max(1, height - 1);
+        int sel = Math.Clamp(_sessionPickerIndex, 0, list.Count - 1);
+        int from = Math.Clamp(sel - show / 2, 0, Math.Max(0, list.Count - show));
+        for (int i = 0; i < show; i++)
+        {
+            int row = top + 1 + i;
+            if (row >= rows.Length || from + i >= list.Count)
+                continue;
+            var item = list[from + i];
+            bool active = from + i == sel;
+            bool cur = string.Equals(item.Id, _sessionId, StringComparison.OrdinalIgnoreCase);
+            string line = $" {(active ? "❯" : " ")} {from + i + 1,2}. {item.Title}  ·  {item.UpdatedAt.ToLocalTime():g}"
+                + (cur ? "  ← current" : "");
+            rows[row] = (active ? Ansi.Fg(AxiomTheme.Gold) : Ansi.Fg(AxiomTheme.TextSecondary))
+                + Ansi.ClipPad(line, w) + Ansi.Reset;
+        }
     }
 
     private static string[] ResolveAnim(string label)
@@ -1123,24 +1545,46 @@ internal sealed class ChatTui : IDisposable
         for (int i = 0; i < h; i++)
             rows[i] = string.Empty;
 
-        // ── Header ──────────────────────────────────────────────
+        // ── Header (always: model · mode · council · workspace · profile · context) ──
         var session = _session;
         (int used, int max) = session?.EstimateContext() ?? (0, 0);
-        string tools = session != null ? ConsoleUi.ToolChipsPlain(session.Tools) : "";
         string model = session?.ModelLabel ?? "—";
         string ctx = ConsoleUi.FormatContext(used, max);
-        // Minimal mark top-left (◆) — small, non-disruptive brand anchor.
-        string mark = "◆";
+        string modeLabel = session?.Tools.ApprovalLabel ?? "auto";
+        string council = session == null ? "—" : (session.Tools.CouncilEnabled ? "council" : "agent");
         string wsHint = session?.Workspace.Roots.Count > 0
-            ? ShortName(session.Workspace.PrimaryRoot)
+            ? (session.Workspace.IsExclusive ? "🔒 " : "") + ShortName(session.Workspace.PrimaryRoot)
             : "no-folder";
-        string left = $" {mark} Axiom  v{GetVersion()}  ·  {model}  ·  {wsHint}";
-        string header = ConsoleUi.LayoutThree(left, tools, $"{ctx} ", w);
-        rows[0] = Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold + mark + Ansi.Reset
-            + Ansi.Fg(AxiomTheme.TextPrimary) + Ansi.ClipPad(header.Length > 1 ? header[1..] : header, Math.Max(1, w - 1)) + Ansi.Reset;
-        // Re-paint full header line cleanly (mark already included in left).
+        string titleBit = !string.IsNullOrWhiteSpace(_sessionTitle) ? $" · {_sessionTitle}" : "";
+        string left = $" ◆ Axiom v{GetVersion()} · {model} · {modeLabel} · {council} · {wsHint}{titleBit}";
+        string right = $"@{_profileName}  {ctx} ";
+        string header = ConsoleUi.LayoutThree(left, "", right, w);
         rows[0] = Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold + Ansi.ClipPad(header, w) + Ansi.Reset;
         rows[1] = Ansi.Fg(AxiomTheme.Border) + new string('═', w) + Ansi.Reset;
+
+        // Palette / session picker overlays take the viewport when open.
+        if (_paletteOpen)
+        {
+            PaintCommandPalette(rows, headerH, viewportH, w);
+            int activityRowP = headerH + viewportH;
+            rows[activityRowP] = Ansi.Fg(AxiomTheme.SystemMuted)
+                + Ansi.ClipPad(" Ctrl+K palette · ↑↓ · Enter run · Esc close · type to filter ", w) + Ansi.Reset;
+            int boxTopP = h - inputH;
+            PaintInputBox(rows, boxTopP, w, model, ctx);
+            _screen.Paint(rows);
+            return;
+        }
+        if (_sessionPickerOpen)
+        {
+            PaintSessionPicker(rows, headerH, viewportH, w);
+            int activityRowS = headerH + viewportH;
+            rows[activityRowS] = Ansi.Fg(AxiomTheme.SystemMuted)
+                + Ansi.ClipPad(" Sessions · ↑↓ · Enter load · d delete · Esc close ", w) + Ansi.Reset;
+            int boxTopS = h - inputH;
+            PaintInputBox(rows, boxTopS, w, model, ctx);
+            _screen.Paint(rows);
+            return;
+        }
 
         // ── Message viewport ────────────────────────────────────
         List<string> transcript = BuildTranscriptLines(w);
@@ -1177,7 +1621,7 @@ internal sealed class ChatTui : IDisposable
         {
             string tip = !string.IsNullOrEmpty(_approvalPrompt)
                 ? " " + _approvalPrompt
-                : " ↑↓ scroll · Esc stop · /mode auto|ask|plan · /undo · /del · exit ";
+                : " Ctrl+K palette · Ctrl+Shift+M mode · ↑↓ scroll · Esc stop · /continue · /export ";
             rows[activityRow] = Ansi.Fg(AxiomTheme.SystemMuted) + Ansi.ClipPad(tip, w) + Ansi.Reset;
         }
 
@@ -1396,11 +1840,12 @@ internal sealed class ChatTui : IDisposable
         return head is "/" or "/tools" or "/model" or "/clear" or "/help" or "/workspace" or "/ws"
             or "/sessions" or "/session" or "/browse" or "/folder" or "/open"
             or "/delete" or "/del" or "/rm" or "/undo" or "/mode" or "/resume"
+            or "/continue" or "/cont" or "/rename" or "/export" or "/pick" or "/picker" or "/palette"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
             || head.StartsWith("/w") || head.StartsWith("/b") || head.StartsWith("/f")
             || head.StartsWith("/o") || head.StartsWith("/d") || head.StartsWith("/r")
-            || head.StartsWith("/u");
+            || head.StartsWith("/u") || head.StartsWith("/p") || head.StartsWith("/e");
     }
 
     private IReadOnlyList<ChatInput.MenuItem> GetMenuItems(MenuMode mode)
@@ -1489,8 +1934,11 @@ internal sealed class ChatTui : IDisposable
         }
 
         // Commands that should run immediately (this was the /help bug: it only filled the buffer).
-        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse" or "delete" or "undo" or "mode")
-            return pick.Id == "mode" ? "/mode" : "/" + pick.Id;
+        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse" or "delete" or "undo" or "mode"
+            or "continue" or "export" or "pick")
+            return pick.Id == "mode" ? "/mode" : pick.Id == "rename" ? "/rename " : "/" + pick.Id;
+        if (pick.Id == "rename")
+            return "/rename ";
 
         if (pick.Id.StartsWith("session-del:", StringComparison.Ordinal))
         {

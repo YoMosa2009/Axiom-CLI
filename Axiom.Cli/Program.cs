@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,7 +35,23 @@ internal static class Program
         bool ownedFlag = args.Any(a => a.Equals("--owned", StringComparison.OrdinalIgnoreCase));
         args = args.Where(a => !a.Equals("--owned", StringComparison.OrdinalIgnoreCase)).ToArray();
 
-        string? modelOverride = ExtractModelFlag(ref args);
+        string? modelOverride = ExtractFlag(ref args, "--model");
+        string? profileOverride = ExtractFlag(ref args, "--profile") ?? ExtractFlag(ref args, "-p");
+        bool yesFlag = ExtractSwitch(ref args, "--yes") || ExtractSwitch(ref args, "-y");
+        bool jsonFlag = ExtractSwitch(ref args, "--json");
+
+        // Deep link: `axiom .` or `axiom C:\repo` locks that folder and opens chat.
+        string? bootstrapPath = null;
+        if (args.Length > 0 && !IsReservedCommand(args[0]) && LooksLikePathArg(args[0]))
+        {
+            bootstrapPath = args[0];
+            args = args.Skip(1).ToArray();
+        }
+
+        string? modelOverride2 = ExtractFlag(ref args, "--model");
+        if (!string.IsNullOrWhiteSpace(modelOverride2))
+            modelOverride = modelOverride2;
+
         // Bare `axiom` (no subcommand) opens the chat TUI. `axiom chat` remains an alias.
         string command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         bool isChatEntry = command is "" or "chat";
@@ -43,7 +61,13 @@ internal static class Program
         if (isChatEntry && !ownedFlag && !SessionLauncher.IsOwnedSession)
         {
             var launchArgs = new List<string>();
-            // Prefer launching without a redundant "chat" token so the child is also bare `axiom`.
+            if (!string.IsNullOrWhiteSpace(profileOverride))
+            {
+                launchArgs.Add("--profile");
+                launchArgs.Add(profileOverride);
+            }
+            if (!string.IsNullOrWhiteSpace(bootstrapPath))
+                launchArgs.Add(bootstrapPath);
             if (!string.IsNullOrWhiteSpace(modelOverride))
             {
                 launchArgs.Add("--model");
@@ -66,8 +90,8 @@ internal static class Program
             return command switch
             {
                 "config" => await RunConfigAsync(),
-                "" or "chat" => await RunChatAsync(modelOverride),
-                "code" => await RunCodeAsync(string.Join(' ', args.Skip(1)), modelOverride),
+                "" or "chat" => await RunChatAsync(modelOverride, profileOverride, bootstrapPath),
+                "code" => await RunCodeAsync(string.Join(' ', args.Skip(1)), modelOverride, yesFlag, jsonFlag, profileOverride),
                 "update" => await RunUpdateAsync(),
                 "help" or "--help" or "-h" => ShowHelp(),
                 _ => ShowUnknownCommand(command)
@@ -80,9 +104,36 @@ internal static class Program
         }
     }
 
-    private static string? ExtractModelFlag(ref string[] args)
+    private static bool IsReservedCommand(string arg)
     {
-        int index = Array.FindIndex(args, a => a.Equals("--model", StringComparison.OrdinalIgnoreCase));
+        string c = arg.ToLowerInvariant();
+        return c is "config" or "chat" or "code" or "update" or "help" or "--help" or "-h";
+    }
+
+    private static bool LooksLikePathArg(string arg)
+    {
+        if (string.IsNullOrWhiteSpace(arg))
+            return false;
+        if (arg is "." or ".." || arg.StartsWith("./") || arg.StartsWith(".\\") || arg.StartsWith("~/"))
+            return true;
+        if (arg.Length >= 2 && char.IsLetter(arg[0]) && arg[1] == ':')
+            return true;
+        if (arg.StartsWith('/') || arg.StartsWith('\\'))
+            return true;
+        try
+        {
+            string full = Path.GetFullPath(arg.Trim().Trim('"'));
+            return Directory.Exists(full) || File.Exists(full);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? ExtractFlag(ref string[] args, string name)
+    {
+        int index = Array.FindIndex(args, a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (index < 0 || index + 1 >= args.Length)
             return null;
 
@@ -90,6 +141,15 @@ internal static class Program
         args = args.Where((_, i) => i != index && i != index + 1).ToArray();
         return value;
     }
+
+    private static bool ExtractSwitch(ref string[] args, string name)
+    {
+        int before = args.Length;
+        args = args.Where(a => !a.Equals(name, StringComparison.OrdinalIgnoreCase)).ToArray();
+        return args.Length < before;
+    }
+
+    private static string? ExtractModelFlag(ref string[] args) => ExtractFlag(ref args, "--model");
 
     private static bool TryResolveModel(string query, out (string Id, string Label, string Description) model)
     {
@@ -107,13 +167,15 @@ internal static class Program
         string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
         AnsiConsole.MarkupLine($"[bold]axiom[/] [{muted}]— Axiom CLI (cloud mode)[/]");
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"  [{gold}]axiom[/] [[--model <id>]]            Full-window TUI chat (default)");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom[/] [[path]] [[--model <id>]] [[--profile <name>]]");
+        AnsiConsole.MarkupLine($"                              Full-window TUI (default). path locks workspace.");
         AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--model <id>]] <task>   Architect/Builder/Critic on the current dir");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--yes]] [[--json]] [[--model <id>]] <task>");
+        AnsiConsole.MarkupLine($"                              Council on cwd; --yes auto-apply patch; --json machine output");
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
         AnsiConsole.MarkupLine($"  [{gold}]axiom help[/]                    Show this help");
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[{muted}]Alias: axiom chat  ·  In chat: /help · @ folders · /sessions · Esc stop[/]");
+        AnsiConsole.MarkupLine($"[{muted}]Chat: Ctrl+K palette · /continue · /export · /rename · /mode · Esc stop[/]");
         return 0;
     }
 
@@ -200,7 +262,7 @@ internal static class Program
         return AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).AllowEmpty());
     }
 
-    private static async Task<int> RunChatAsync(string? modelOverride)
+    private static async Task<int> RunChatAsync(string? modelOverride, string? profileOverride, string? bootstrapPath)
     {
         // Update notice before entering the alt-screen TUI (so it isn't swallowed).
         await ShowUpdateNoticeIfAvailableAsync();
@@ -208,13 +270,44 @@ internal static class Program
         using var db = new DatabaseService();
         string? apiKey = db.IsReady ? db.LoadOpenRouterApiKey() : null;
 
+        var profiles = new UserProfileStore();
+        string profileName = profiles.ResolveActiveName(profileOverride);
+        UserProfileStore.ActiveProfileName = profileName;
+        UserProfile profile = profiles.Load(profileName);
+
         (string modelId, string modelLabel) = ResolveInitialModel(modelOverride);
+        if (string.IsNullOrWhiteSpace(modelOverride)
+            && !string.IsNullOrWhiteSpace(profile.DefaultModelId))
+        {
+            modelId = profile.DefaultModelId!;
+            modelLabel = string.IsNullOrWhiteSpace(profile.DefaultModelLabel)
+                ? modelId
+                : profile.DefaultModelLabel!;
+        }
+
         var chatService = new OpenRouterChatService();
         if (!string.IsNullOrWhiteSpace(apiKey))
             chatService.SetApiKey(apiKey);
 
         var recent = new RecentFoldersStore();
         var workspace = new WorkspaceSession(recent);
+        if (profile.WorkspaceRoots.Count > 0)
+            workspace.SetRoots(profile.WorkspaceRoots, profile.WorkspaceExclusive);
+
+        // Deep link: axiom .  /  axiom C:\repo
+        if (!string.IsNullOrWhiteSpace(bootstrapPath))
+        {
+            string path = bootstrapPath.Trim().Trim('"');
+            if (path is "." or "..")
+                path = Path.GetFullPath(path);
+            else if (!Path.IsPathRooted(path))
+                path = Path.GetFullPath(path);
+            if (File.Exists(path))
+                path = Path.GetDirectoryName(path) ?? path;
+            if (Directory.Exists(path))
+                workspace.TrySetExclusive(path);
+        }
+
         var toolExecutor = new AgentToolExecutor(workspace);
         var session = new ChatSession
         {
@@ -224,10 +317,15 @@ internal static class Program
             Workspace = workspace,
             ToolExecutor = toolExecutor
         };
+        session.Tools.CouncilEnabled = profile.CouncilEnabled;
+        session.Tools.WebSearchEnabled = profile.WebSearchEnabled;
+        session.Tools.SandboxEnabled = profile.SandboxEnabled;
+        session.Tools.CalculatorEnabled = profile.CalculatorEnabled;
+        session.Tools.ApprovalMode = UserProfileStore.ParseApproval(profile.ApprovalMode);
+        session.ApplyToolSettings();
 
-        // Full-window alternate-screen TUI — host scrollbar is not part of the UX.
-        // Missing API keys are collected via an in-TUI popup on first run.
         using var tui = new ChatTui();
+        tui.SetProfile(profileName, profiles, profile);
         return await tui.RunAsync(
             session,
             ModelCatalog,
@@ -265,13 +363,25 @@ internal static class Program
         return (OpenRouterChatService.Eidos1ModelId, "Eidos 1");
     }
 
-    private static async Task<int> RunCodeAsync(string task, string? modelOverride)
+    private static async Task<int> RunCodeAsync(
+        string task,
+        string? modelOverride,
+        bool yesFlag,
+        bool jsonFlag,
+        string? profileOverride)
     {
         await ShowUpdateNoticeIfAvailableAsync();
 
+        // Strip residual flags that may remain in the joined task string.
+        task = (task ?? string.Empty)
+            .Replace("--yes", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("-y", "", StringComparison.OrdinalIgnoreCase)
+            .Replace("--json", "", StringComparison.OrdinalIgnoreCase)
+            .Trim();
+
         if (string.IsNullOrWhiteSpace(task))
         {
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Usage:[/] axiom code \"<describe what you want done>\"");
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Usage:[/] axiom code [--yes] [--json] \"<task>\"");
             return 1;
         }
 
@@ -279,9 +389,18 @@ internal static class Program
         string? apiKey = db.IsReady ? db.LoadOpenRouterApiKey() : null;
         if (string.IsNullOrWhiteSpace(apiKey))
         {
+            if (jsonFlag)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new { ok = false, error = "No OpenRouter API key. Run axiom config." }));
+                return 1;
+            }
             AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Warning)}]No OpenRouter API key configured.[/] Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom config[/] first.");
             return 1;
         }
+
+        var profiles = new UserProfileStore();
+        string profileName = profiles.ResolveActiveName(profileOverride);
+        UserProfile profile = profiles.Load(profileName);
 
         string councilModelId = OpenRouterChatService.WorkplaceCouncilDefaultModelId;
         string councilModelLabel = "Workplace Council default";
@@ -290,6 +409,11 @@ internal static class Program
             councilModelId = match.Id;
             councilModelLabel = match.Label;
         }
+        else if (!string.IsNullOrWhiteSpace(profile.DefaultModelId))
+        {
+            councilModelId = profile.DefaultModelId!;
+            councilModelLabel = profile.DefaultModelLabel ?? councilModelId;
+        }
 
         var chatService = new OpenRouterChatService();
         chatService.SetApiKey(apiKey);
@@ -297,10 +421,13 @@ internal static class Program
         var workspaceAccess = new WorkspaceAccessService();
 
         string root = Environment.CurrentDirectory;
-        // Agentic Builder tools are sandboxed to this folder (same as chat exclusive lock).
         var workspaceSession = new WorkspaceSession(attachCwd: false);
         workspaceSession.TrySetExclusive(root, remember: false);
-        var agentTools = new AgentToolExecutor(workspaceSession) { WebSearchEnabled = true };
+        var agentTools = new AgentToolExecutor(workspaceSession)
+        {
+            WebSearchEnabled = profile.WebSearchEnabled,
+            ApprovalMode = yesFlag ? ApprovalMode.Auto : UserProfileStore.ParseApproval(profile.ApprovalMode)
+        };
         var orchestrator = new CouncilOrchestrator(
             pipeline,
             councilModelId,
@@ -310,20 +437,44 @@ internal static class Program
             agentTools: agentTools);
 
         ConnectedWorkspaceState workspaceState = workspaceAccess.CreateFolderConnection(root);
-        // Do not auto-apply patches here — show diffs first. write_file tools still write live.
-        workspaceState.AutoApplyCodebaseChanges = false;
+        // --yes: auto-apply patch envelopes (CI / non-interactive).
+        workspaceState.AutoApplyCodebaseChanges = yesFlag;
         string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
-        AnsiConsole.MarkupLine($"[{muted}]Connected workspace:[/] {root} [{muted}]({workspaceState.IndexedFileCount} files)[/]");
-        AnsiConsole.MarkupLine($"[{muted}]Model:[/] [{AxiomTheme.Hex(AxiomTheme.Gold)}]{councilModelLabel}[/]");
-        AnsiConsole.MarkupLine($"[{muted}]Builder tools:[/] write_file · run_shell · list_dir · read_file (live)");
+        if (!jsonFlag)
+        {
+            AnsiConsole.MarkupLine($"[{muted}]Connected workspace:[/] {root} [{muted}]({workspaceState.IndexedFileCount} files)[/]");
+            AnsiConsole.MarkupLine($"[{muted}]Model:[/] [{AxiomTheme.Hex(AxiomTheme.Gold)}]{councilModelLabel}[/]");
+            AnsiConsole.MarkupLine($"[{muted}]Flags:[/] yes={yesFlag}  json={jsonFlag}  profile={profileName}");
+        }
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var codeTools = new CouncilToolOptions(SandboxEnabled: true, AgenticBuilderEnabled: true);
+        var codeTools = new CouncilToolOptions(
+            SandboxEnabled: profile.SandboxEnabled || true,
+            WebSearchEnabled: profile.WebSearchEnabled,
+            AgenticBuilderEnabled: true);
         CouncilResult result = await orchestrator.RunAsync(
             new CouncilRequest(task, workspaceState, codeTools),
-            CouncilConsoleRenderer.Create(),
+            jsonFlag ? null : CouncilConsoleRenderer.Create(),
             CancellationToken.None);
         sw.Stop();
+
+        if (jsonFlag)
+        {
+            var payload = new
+            {
+                ok = result.Success || result.ToolCallCount > 0,
+                cancelled = result.Cancelled,
+                toolCalls = result.ToolCallCount,
+                changedFiles = result.ChangedFiles,
+                applySummary = result.ApplySummary,
+                finalText = result.FinalText,
+                hasPatch = result.Patch != null,
+                criticIssues = result.FinalCriticReport?.FindingsCount ?? 0,
+                elapsedMs = (int)sw.Elapsed.TotalMilliseconds
+            };
+            Console.WriteLine(JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }));
+            return payload.ok ? 0 : 1;
+        }
 
         if (!result.Success
             && result.Patch == null
@@ -342,6 +493,12 @@ internal static class Program
                 $"(files may already be written under {root})");
         }
 
+        if (result.ChangedFiles is { Count: > 0 })
+        {
+            foreach (string f in result.ChangedFiles)
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]  wrote[/] {f.EscapeMarkup()}");
+        }
+
         if (result.Patch == null)
         {
             if (!string.IsNullOrWhiteSpace(result.FinalText))
@@ -352,6 +509,13 @@ internal static class Program
             }
             ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, result.ToolCallCount));
             return result.Success || result.ToolCallCount > 0 ? 0 : 1;
+        }
+
+        if (yesFlag && result.ApplySummary != null)
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]{result.ApplySummary.EscapeMarkup()}[/]");
+            ConsoleUi.WriteTurnSummary(ActivityStatus.SummarizeTurn(sw.Elapsed, result.ToolCallCount));
+            return 0;
         }
 
         AnsiConsole.WriteLine();
@@ -505,8 +669,8 @@ internal static class Program
                         Say($"  {i,2}. {item.Title}  ·  {item.UpdatedAt.ToLocalTime():g}  ·  {item.ModelLabel}{cur}");
                         i++;
                     }
-                    Say("Load: /session load <n>   Delete one: /del <n>   Current: /del   All: /del all");
-                    Say("Or type / then pick “del 1” / “delete” from the menu.");
+                    Say("Load: /session load <n>   Pick UI: /pick   Delete: /del <n> · /del · /del all");
+                    Say("Rename: /rename title   ·   Or Ctrl+K → Session picker");
                     return true;
                 }
                 if ((action is "load" or "open" or "resume") && parts.Length >= 3)
@@ -546,12 +710,43 @@ internal static class Program
                 tui.UndoLastTurn();
                 return true;
 
+            case "/continue":
+            case "/cont":
+                // Fire-and-forget continuation on the TUI loop.
+                _ = tui.ContinueLastTaskAsync();
+                return true;
+
+            case "/rename":
+            {
+                string title = parts.Length >= 2 ? string.Join(' ', parts.Skip(1)).Trim().Trim('"') : string.Empty;
+                if (!tui.TryRenameCurrentSession(title, out string renErr))
+                    Say(string.IsNullOrEmpty(renErr) ? "Usage: /rename short title" : renErr);
+                return true;
+            }
+
+            case "/export":
+            {
+                bool lastOnly = parts.Length >= 2
+                    && parts[1].Equals("last", StringComparison.OrdinalIgnoreCase);
+                tui.ExportTranscript(lastOnly);
+                return true;
+            }
+
+            case "/pick":
+            case "/picker":
+                tui.OpenSessionPicker();
+                return true;
+
+            case "/palette":
+                tui.OpenCommandPalette();
+                return true;
+
             case "/mode":
             {
                 if (parts.Length >= 2 && session.Tools.TrySetApproval(parts[1]))
                 {
                     session.ApplyToolSettings();
-                    Say($"Approval mode → {session.Tools.ApprovalLabel}  (auto | ask | plan)");
+                    Say($"Approval mode → {session.Tools.ApprovalLabel}  (auto | ask | plan · Ctrl+Shift+M)");
                 }
                 else if (parts.Length >= 2)
                 {
@@ -563,7 +758,7 @@ internal static class Program
                     Say("  auto — write/shell freely in sandbox");
                     Say("  ask  — confirm each write/shell/download");
                     Say("  plan — no mutations; tools return Plan-only previews");
-                    Say("Set: /mode ask");
+                    Say("Set: /mode ask   ·   Cycle: Ctrl+Shift+M");
                 }
                 return true;
             }
@@ -587,25 +782,29 @@ internal static class Program
             case "/?":
                 Say("Commands:");
                 Say("  /help                 Show this help");
+                Say("  Ctrl+K                Command palette (all features)");
+                Say("  Ctrl+Shift+M          Cycle approval mode auto→ask→plan");
                 Say("  /tools [name on|off]  Toggle council / calculator / web-search / sandbox");
                 Say("  /mode [auto|ask|plan] Approval mode for writes/shell");
                 Say("  /model [eidos|hepha]  Switch cloud model");
                 Say("  /browse               Open file explorer and pick a work folder");
                 Say("  /workspace [path]     Show or lock the agent work folder");
-                Say("  /workspace pick       Same as /browse");
                 Say("  @                     Recent folders + Browse… (native picker)");
                 Say("  /sessions             List auto-saved sessions");
+                Say("  /pick                 Interactive session picker (↑↓ Enter · d delete)");
                 Say("  /session load <n>     Resume a saved session");
                 Say("  /resume               Resume most recent session");
+                Say("  /rename <title>       Name this session");
+                Say("  /export [last]        Export transcript markdown");
+                Say("  /continue             Re-run last task after stop/error");
                 Say("  /del · /del <n> · /del all   Delete sessions");
                 Say("  /undo                 Restore files from last agent turn");
                 Say("  /clear                Clear transcript (keeps save file)");
                 Say("  Esc                   Stop in-flight agent/council turn");
                 Say("  ↑↓ scroll             (also PgUp/PgDn, Shift+arrows, wheel)");
                 Say("  exit                  Leave chat");
-                Say("Agent tools: write/read/list/search · shell · git · diagnostics · worktree · subagents");
-                Say("Council: Architect → agentic Builder → Critic (inspect) + static validation");
-                Say("Project memory: AXIOM.md / AGENTS.md / .axiom/rules.md in the workspace root");
+                Say("CLI: axiom [path] · axiom --profile name · axiom code --yes --json \"task\"");
+                Say("Project memory: AXIOM.md / AGENTS.md / .axiom/rules.md");
                 return true;
 
             default:

@@ -156,6 +156,30 @@ namespace Axiom.Core.Memory
             return true;
         }
 
+        public bool TryRename(string idOrPrefix, string newTitle, out string error)
+        {
+            error = string.Empty;
+            StoredSession? s = Load(idOrPrefix);
+            if (s == null)
+            {
+                error = "Session not found.";
+                return false;
+            }
+
+            string title = (newTitle ?? string.Empty).Replace('\r', ' ').Replace('\n', ' ').Trim();
+            if (title.Length == 0)
+            {
+                error = "Title is empty.";
+                return false;
+            }
+            if (title.Length > 80)
+                title = title[..77] + "...";
+
+            s.Title = title;
+            Save(s);
+            return true;
+        }
+
         /// <summary>Deletes every saved session JSON. Returns how many files were removed.</summary>
         public int DeleteAll()
         {

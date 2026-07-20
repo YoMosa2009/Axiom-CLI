@@ -813,6 +813,10 @@ internal static class ChatInput
             new("delete", "delete", "Delete current session + start fresh", false, null, "slash"),
             new("undo", "undo", "Undo last agent file changes", false, null, "slash"),
             new("mode", "mode", "Set approval: auto | ask | plan", false, null, "slash"),
+            new("continue", "continue", "Resume last task after stop/error", false, null, "slash"),
+            new("rename", "rename", "Name this session", false, null, "slash"),
+            new("export", "export", "Export transcript as markdown", false, null, "slash"),
+            new("pick", "pick", "Interactive session picker", false, null, "slash"),
         };
 
         // One-tap delete rows for recent sessions (seamless — pick from / menu).
