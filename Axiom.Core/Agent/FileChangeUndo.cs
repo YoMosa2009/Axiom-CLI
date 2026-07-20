@@ -94,6 +94,20 @@ namespace Axiom.Core.Agent
             get { lock (_gate) return _stack.Count; }
         }
 
+        public UndoTurn? PeekLast()
+        {
+            lock (_gate)
+                return _stack.Count == 0 ? null : _stack[^1];
+        }
+
+        public IReadOnlyList<FileSnapshot> PeekLastFiles()
+        {
+            lock (_gate)
+                return _stack.Count == 0
+                    ? Array.Empty<FileSnapshot>()
+                    : _stack[^1].Files;
+        }
+
         /// <summary>Restores the most recent turn. Returns a human summary.</summary>
         public string UndoLast()
         {

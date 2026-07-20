@@ -710,6 +710,48 @@ internal static class Program
                 tui.UndoLastTurn();
                 return true;
 
+            case "/checkpoint":
+            case "/cp":
+                tui.HandleCheckpoint(parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : "");
+                return true;
+
+            case "/plan":
+                tui.HandlePlan(parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : "");
+                return true;
+
+            case "/changes":
+                tui.HandleChanges();
+                return true;
+
+            case "/accept":
+                tui.HandleAccept(parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : "all");
+                return true;
+
+            case "/reject":
+                tui.HandleReject(parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : "all");
+                return true;
+
+            case "/replay":
+                _ = tui.HandleReplayAsync();
+                return true;
+
+            case "/jobs":
+                tui.HandleJobs(parts.Length >= 2 ? parts[1] : null);
+                return true;
+
+            case "/watch":
+                tui.HandleWatch(parts.Length >= 2 ? parts[1] : null);
+                return true;
+
+            case "/sticky":
+                tui.HandleSticky(parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : "");
+                return true;
+
+            case "/pr":
+                _ = tui.HandlePrAsync(
+                    parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : "");
+                return true;
+
             case "/continue":
             case "/cont":
                 // Fire-and-forget continuation on the TUI loop.
@@ -799,6 +841,17 @@ internal static class Program
                 Say("  /continue             Re-run last task after stop/error");
                 Say("  /del · /del <n> · /del all   Delete sessions");
                 Say("  /undo                 Restore files from last agent turn");
+                Say("  /checkpoint [name]    Snapshot dirty/changed files");
+                Say("  /checkpoint list|restore <id>  List or restore");
+                Say("  /plan [clear]         Show multi-step plan board");
+                Say("  /changes              List last-turn file changes");
+                Say("  /accept [all|1,3]     Keep last-turn file changes");
+                Say("  /reject [all|2]       Revert selected last-turn files");
+                Say("  /replay               Re-run last mutating tool plan");
+                Say("  /jobs [id]            Background shell jobs");
+                Say("  /watch [on|off]       Watch workspace for external edits");
+                Say("  /sticky [goal] [n]    Sticky multi-turn goal (or clear)");
+                Say("  /pr [title]           Push + open GitHub PR via gh");
                 Say("  /clear                Clear transcript (keeps save file)");
                 Say("  Esc                   Stop in-flight agent/council turn");
                 Say("  ↑↓ scroll             (also PgUp/PgDn, Shift+arrows, wheel)");

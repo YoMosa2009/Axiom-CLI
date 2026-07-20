@@ -58,10 +58,12 @@ Workplace Council default model unless `--model` is given.
 `axiom` paints its own interface (alternate screen) on **Windows, macOS, and Linux** so the
 host terminal scrollbar is not part of the UX:
 
-- Fixed header (◆ Axiom), scrollable transcript (PgUp/PgDn), pinned prompt at the bottom
+- Fixed header (◆ Axiom), scrollable transcript (PgUp/PgDn / arrows / wheel), pinned prompt at the bottom
 - Shell tools use PowerShell/pwsh on Windows and bash/sh on macOS/Linux
 - `/workspace <path>` or `@` locks the agent to a folder (sandbox cannot leave it)
-- Sessions auto-save; `/sessions`, `/session load`, `/session delete`
+- Sessions auto-save; `/sessions`, `/pick`, `/del`, `/resume`
+- Ctrl+K command palette · Ctrl+Shift+M cycle approval mode (`auto` / `ask` / `plan`)
+- Workflow: `/checkpoint` · `/plan` · `/changes` · `/accept` · `/reject` · `/replay` · `/jobs` · `/watch` · `/sticky` · `/pr`
 - Optional: set `AXIOM_CLI_NO_NEW_WINDOW=1` to always run in the current terminal; `AXIOM_CLI_MOUSE=1` enables mouse tracking
 
 

@@ -131,6 +131,23 @@ namespace Axiom.Core.Council
                 await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken, streamTokens: true));
             Report(progress, CouncilEventKind.ArchitectOutput, architectPlan);
 
+            // Seed plan board from Architect numbered steps (user can /plan; Builder can plan_board).
+            if (_agentTools != null && !string.IsNullOrWhiteSpace(architectPlan))
+            {
+                _agentTools.Workflow.Plan.SetFromArchitectPlan(architectPlan);
+                if (_agentTools.Workflow.Plan.HasSteps)
+                    Report(progress, CouncilEventKind.Status, "Plan board loaded from Architect steps.");
+            }
+
+            // Sticky task + plan board + git branch context for Builder
+            string workflowExtra = await BuildWorkflowContextAsync(request, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(workflowExtra))
+            {
+                workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
+                    ? workflowExtra
+                    : workflowExtra + "\n\n" + workspaceContext;
+            }
+
             // ── Builder: implement (agentic tool loop when available) ──────────
             string builderSystem = FoundationSystemPrompt.Apply(
                 CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, looksLikeEdit));
@@ -634,6 +651,36 @@ namespace Axiom.Core.Council
         private static bool ContainsPatchEnvelope(string text)
             => !string.IsNullOrWhiteSpace(text)
                && text.Contains("[[AXIOM_CODEBASE_PATCH]]", StringComparison.OrdinalIgnoreCase);
+
+        private async Task<string> BuildWorkflowContextAsync(CouncilRequest request, CancellationToken token)
+        {
+            if (_agentTools == null)
+                return string.Empty;
+
+            var sb = new StringBuilder();
+            string? sticky = _agentTools.Workflow.ConsumeStickyPrefix();
+            if (!string.IsNullOrWhiteSpace(sticky))
+                sb.Append(sticky);
+
+            string plan = _agentTools.Workflow.Plan.ToPromptBlock();
+            if (!string.IsNullOrWhiteSpace(plan))
+                sb.AppendLine(plan);
+
+            string? root = request.Workspace?.RootPath;
+            if (!string.IsNullOrWhiteSpace(root))
+            {
+                try
+                {
+                    GitBranchSnapshot snap = await GitBranchContext.CaptureAsync(root, token);
+                    string git = GitBranchContext.ToPromptBlock(snap);
+                    if (!string.IsNullOrWhiteSpace(git))
+                        sb.AppendLine(git);
+                }
+                catch { /* optional */ }
+            }
+
+            return sb.ToString().Trim();
+        }
 
         private static string BuildContextualInput(string userPrompt, string workspaceContext)
         {

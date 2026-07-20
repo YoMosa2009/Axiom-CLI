@@ -145,11 +145,13 @@ namespace Axiom.Core.Council
             {
                 core +=
                     "\n\n[AGENTIC TOOLS] You have real tools: write_file, read_file, list_dir, search_files, " +
-                    "run_shell, download_file, and web_search when enabled.\n" +
+                    "run_shell, download_file, plan_board, run_background, open_pr, git_*, diagnostics, " +
+                    "worktree_*, spawn_subagent, and web_search when enabled.\n" +
                     "You MUST use these tools to create and edit files on disk when the plan requires " +
                     "implementation. Do NOT only paste full file contents into chat as the final answer — " +
                     "call write_file (or run_shell) so the user's workspace actually changes.\n" +
-                    "Workflow: list_dir/read_file → write_file/run_shell → optional build/test → summarize changes.";
+                    "When a [[PLAN BOARD]] is present, mark steps done/doing with plan_board as you complete them.\n" +
+                    "Workflow: list_dir/read_file → write_file/run_shell → plan_board done → optional build/test → summarize.";
 
                 if (looksLikeEdit)
                 {

@@ -524,10 +524,16 @@ internal sealed class ChatTui : IDisposable
             try { await Task.Delay(90, token); }
             catch (OperationCanceledException) { break; }
 
+            bool hadWorkflowEvents = DrainWorkflowNotifications();
+
             if (_busy)
             {
                 Interlocked.Increment(ref _animFrame);
                 Paint();
+            }
+            else if (hadWorkflowEvents)
+            {
+                Paint(force: true);
             }
         }
     }
@@ -1024,6 +1030,272 @@ internal sealed class ChatTui : IDisposable
         return summary;
     }
 
+    public void HandleCheckpoint(string args)
+    {
+        if (_session == null)
+            return;
+        var wf = _session.ToolExecutor.Workflow;
+        string a = (args ?? "").Trim();
+        string root = _session.Workspace.PrimaryRoot;
+
+        if (string.IsNullOrEmpty(a) || a.Equals("save", StringComparison.OrdinalIgnoreCase))
+        {
+            var paths = _session.ToolExecutor.WrittenPaths.ToList();
+            if (paths.Count == 0)
+            {
+                var last = _session.ToolExecutor.Undo.PeekLastFiles();
+                paths = last.Select(f => f.Path).ToList();
+            }
+            string id = wf.Checkpoints.CreateFromPaths("manual", root, paths);
+            PushSystem($"Checkpoint saved: {id}  ({paths.Count} file(s)).  Restore: /checkpoint restore {id}");
+            return;
+        }
+
+        string[] parts = a.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        string sub = parts[0].ToLowerInvariant();
+        if (sub is "list" or "ls")
+        {
+            var list = wf.Checkpoints.List();
+            if (list.Count == 0)
+            {
+                PushSystem("No checkpoints yet. Create with /checkpoint [name]");
+                return;
+            }
+            PushSystem("Checkpoints:");
+            int i = 1;
+            foreach (var c in list)
+                PushSystem($"  {i++}. {c.Id}  ·  {c.Name}  ·  {c.FileCount} file(s)  ·  {c.Utc.ToLocalTime():g}");
+            PushSystem("Restore: /checkpoint restore <id|n>");
+            return;
+        }
+        if (sub is "restore" or "load" or "apply")
+        {
+            string key = parts.Length >= 2 ? parts[1].Trim() : "";
+            if (string.IsNullOrEmpty(key))
+            {
+                PushSystem("Usage: /checkpoint restore <id|n>");
+                return;
+            }
+            PushSystem(wf.Checkpoints.Restore(key));
+            return;
+        }
+
+        // /checkpoint <name> — named snapshot
+        string name = a;
+        var namedPaths = _session.ToolExecutor.WrittenPaths.ToList();
+        if (namedPaths.Count == 0)
+            namedPaths = _session.ToolExecutor.Undo.PeekLastFiles().Select(f => f.Path).ToList();
+        string namedId = wf.Checkpoints.CreateFromPaths(name, root, namedPaths);
+        PushSystem($"Checkpoint “{name}” saved: {namedId}  ({namedPaths.Count} file(s))");
+    }
+
+    public void HandlePlan(string args)
+    {
+        if (_session == null)
+            return;
+        var plan = _session.ToolExecutor.Workflow.Plan;
+        string a = (args ?? "").Trim().ToLowerInvariant();
+        if (a is "clear" or "reset")
+        {
+            plan.Clear();
+            PushSystem("Plan board cleared.");
+            return;
+        }
+        PushSystem(plan.ToDisplayBlock());
+    }
+
+    public void HandleChanges()
+    {
+        if (_session == null)
+            return;
+        PushSystem(_session.ToolExecutor.Workflow.Changes.Summarize());
+    }
+
+    public void HandleAccept(string args)
+    {
+        if (_session == null)
+            return;
+        var ch = _session.ToolExecutor.Workflow.Changes;
+        string a = (args ?? "all").Trim().ToLowerInvariant();
+        if (a is "all" or "*" or "")
+        {
+            PushSystem(ch.AcceptAll());
+            return;
+        }
+        PushSystem(ch.Accept(ParseIndexList(a)));
+    }
+
+    public void HandleReject(string args)
+    {
+        if (_session == null)
+            return;
+        var ch = _session.ToolExecutor.Workflow.Changes;
+        string a = (args ?? "all").Trim().ToLowerInvariant();
+        if (a is "all" or "*" or "")
+        {
+            PushSystem(ch.RejectAll());
+            return;
+        }
+        PushSystem(ch.Reject(ParseIndexList(a)));
+    }
+
+    public async Task HandleReplayAsync()
+    {
+        if (_session == null)
+            return;
+        if (!_session.ToolExecutor.Workflow.Replay.HasReplay)
+        {
+            PushSystem("No tool plan to replay. Run an agent turn first.");
+            return;
+        }
+        PushSystem(_session.ToolExecutor.Workflow.Replay.Describe());
+        SetActivity("Replaying tools…");
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            string result = await _session.ToolExecutor.Workflow.Replay.ReplayAsync(
+                _session.ToolExecutor, cts.Token);
+            PushSystem(result);
+        }
+        catch (Exception ex)
+        {
+            PushSystem("Replay failed: " + ex.Message);
+        }
+        finally
+        {
+            SetActivity(string.Empty);
+            Paint(force: true);
+        }
+    }
+
+    public void HandleJobs(string? id)
+    {
+        if (_session == null)
+            return;
+        PushSystem(_session.ToolExecutor.Workflow.Jobs.Status(id));
+    }
+
+    public void HandleWatch(string? arg)
+    {
+        if (_session == null)
+            return;
+        var watch = _session.ToolExecutor.Workflow.Watch;
+        string a = (arg ?? "").Trim().ToLowerInvariant();
+        string root = _session.Workspace.PrimaryRoot;
+        if (a is "off" or "stop" or "0" or "false")
+        {
+            watch.Stop();
+            PushSystem("Workspace watch stopped.");
+            return;
+        }
+        if (a is "on" or "start" or "1" or "true" || string.IsNullOrEmpty(a))
+        {
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+            {
+                PushSystem("Lock a folder first (/browse) before enabling watch.");
+                return;
+            }
+            watch.Start(root);
+            PushSystem(watch.IsEnabled
+                ? $"Watching {root} for external file changes."
+                : "Could not start file watcher for that folder.");
+            return;
+        }
+        if (a is "status" or "?")
+        {
+            PushSystem(watch.IsEnabled ? $"Watch on · {root}" : "Watch off.  /watch on");
+            return;
+        }
+        PushSystem("Usage: /watch [on|off|status]");
+    }
+
+    public void HandleSticky(string args)
+    {
+        if (_session == null)
+            return;
+        var wf = _session.ToolExecutor.Workflow;
+        string a = (args ?? "").Trim();
+        if (string.IsNullOrEmpty(a) || a.Equals("status", StringComparison.OrdinalIgnoreCase))
+        {
+            PushSystem(wf.StickyStatus());
+            return;
+        }
+        if (a.Equals("clear", StringComparison.OrdinalIgnoreCase)
+            || a.Equals("off", StringComparison.OrdinalIgnoreCase)
+            || a.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            wf.ClearSticky();
+            PushSystem("Sticky task cleared.");
+            return;
+        }
+
+        // Optional trailing turn count: /sticky fix the login flow 8
+        int turns = 8;
+        string task = a;
+        string[] words = a.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length >= 2 && int.TryParse(words[^1], out int n) && n > 0 && n <= 50)
+        {
+            turns = n;
+            task = string.Join(' ', words.Take(words.Length - 1));
+        }
+        wf.SetSticky(task, turns);
+        PushSystem($"Sticky for {turns} turn(s): {task}");
+    }
+
+    public async Task HandlePrAsync(string args)
+    {
+        if (_session == null)
+            return;
+        string title = string.IsNullOrWhiteSpace(args) ? "Axiom changes" : args.Trim();
+        string body = "Opened from Axiom CLI (`/pr`).";
+        SetActivity("Opening PR…");
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            string result = await GitBranchContext.CreatePullRequestAsync(
+                _session.Workspace.PrimaryRoot, title, body, cts.Token);
+            PushSystem(result);
+        }
+        catch (Exception ex)
+        {
+            PushSystem("PR failed: " + ex.Message);
+        }
+        finally
+        {
+            SetActivity(string.Empty);
+            Paint(force: true);
+        }
+    }
+
+    private bool DrainWorkflowNotifications()
+    {
+        if (_session == null)
+            return false;
+        var wf = _session.ToolExecutor.Workflow;
+        bool any = false;
+        foreach (string n in wf.Jobs.DrainNotifications())
+        {
+            PushSystem("⏳ " + n);
+            any = true;
+        }
+        var watchEvents = wf.Watch.Drain(8);
+        if (watchEvents.Count > 0)
+        {
+            PushSystem("👁 Workspace: " + string.Join(" · ", watchEvents));
+            any = true;
+        }
+        return any;
+    }
+
+    private static IEnumerable<int> ParseIndexList(string raw)
+    {
+        foreach (string part in raw.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (int.TryParse(part.Trim(), out int n) && n > 0)
+                yield return n;
+        }
+    }
+
     // Architect → Builder → Critic pipeline (mirrors desktop Workplace council control flow).
     private async Task RunCouncilTurnAsync(string grounded, Stopwatch sw, CancellationToken token)
     {
@@ -1297,7 +1569,7 @@ internal sealed class ChatTui : IDisposable
         PushSystem($"{(hasKey ? "✓" : "1.")} API key  {(hasKey ? "(done)" : "— paste when prompted or /help")}");
         PushSystem($"{(hasFolder ? "✓" : "2.")} Lock a folder  — /browse or @ Browse…");
         PushSystem("3. Send a message  — ask Axiom to edit or explain something");
-        PushSystem("4. Keys: Esc stop · Ctrl+K palette · Ctrl+Shift+M mode · /undo · /mode ask");
+        PushSystem("4. Keys: Esc stop · Ctrl+K · /checkpoint · /plan · /sticky · /undo · /mode ask");
         PushSystem("────────────────────────────────────────────────────");
         if (hasKey)
             MarkOnboarding("api_key");
@@ -1556,7 +1828,14 @@ internal sealed class ChatTui : IDisposable
             ? (session.Workspace.IsExclusive ? "🔒 " : "") + ShortName(session.Workspace.PrimaryRoot)
             : "no-folder";
         string titleBit = !string.IsNullOrWhiteSpace(_sessionTitle) ? $" · {_sessionTitle}" : "";
-        string left = $" ◆ Axiom v{GetVersion()} · {model} · {modeLabel} · {council} · {wsHint}{titleBit}";
+        string stickyBit = !string.IsNullOrWhiteSpace(session?.ToolExecutor.Workflow.StickyTask)
+            ? " · sticky"
+            : "";
+        string watchBit = session?.ToolExecutor.Workflow.Watch.IsEnabled == true ? " · watch" : "";
+        int runningJobs = session?.ToolExecutor.Workflow.Jobs.List()
+            .Count(j => j.State == BackgroundJobState.Running) ?? 0;
+        string jobsBit = runningJobs > 0 ? $" · jobs:{runningJobs}" : "";
+        string left = $" ◆ Axiom v{GetVersion()} · {model} · {modeLabel} · {council} · {wsHint}{stickyBit}{watchBit}{jobsBit}{titleBit}";
         string right = $"@{_profileName}  {ctx} ";
         string header = ConsoleUi.LayoutThree(left, "", right, w);
         rows[0] = Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold + Ansi.ClipPad(header, w) + Ansi.Reset;
@@ -1841,11 +2120,14 @@ internal sealed class ChatTui : IDisposable
             or "/sessions" or "/session" or "/browse" or "/folder" or "/open"
             or "/delete" or "/del" or "/rm" or "/undo" or "/mode" or "/resume"
             or "/continue" or "/cont" or "/rename" or "/export" or "/pick" or "/picker" or "/palette"
+            or "/checkpoint" or "/cp" or "/plan" or "/changes" or "/accept" or "/reject"
+            or "/replay" or "/jobs" or "/watch" or "/sticky" or "/pr"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
             || head.StartsWith("/w") || head.StartsWith("/b") || head.StartsWith("/f")
             || head.StartsWith("/o") || head.StartsWith("/d") || head.StartsWith("/r")
-            || head.StartsWith("/u") || head.StartsWith("/p") || head.StartsWith("/e");
+            || head.StartsWith("/u") || head.StartsWith("/p") || head.StartsWith("/e")
+            || head.StartsWith("/a") || head.StartsWith("/j") || head.StartsWith("/g");
     }
 
     private IReadOnlyList<ChatInput.MenuItem> GetMenuItems(MenuMode mode)

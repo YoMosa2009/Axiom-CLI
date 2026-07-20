@@ -25,6 +25,7 @@ namespace Axiom.Core.Agent
         private readonly List<string> _writtenPaths = new();
         private readonly object _writeGate = new();
         private readonly FileChangeUndo _undo = new();
+        private readonly SessionWorkflowState _workflow = new();
 
         public AgentToolExecutor(WorkspaceSession workspace)
         {
@@ -43,6 +44,7 @@ namespace Axiom.Core.Agent
         public Func<SubagentKind, string, CancellationToken, Task<SubagentResult>>? SubagentHandler { get; set; }
 
         public FileChangeUndo Undo => _undo;
+        public SessionWorkflowState Workflow => _workflow;
 
         /// <summary>Absolute paths successfully written via write_file since last <see cref="ClearWrittenPaths"/>.</summary>
         public IReadOnlyList<string> WrittenPaths
@@ -55,9 +57,18 @@ namespace Axiom.Core.Agent
             lock (_writeGate) _writtenPaths.Clear();
         }
 
-        public void BeginUndoTurn(string label) => _undo.BeginTurn(label);
+        public void BeginUndoTurn(string label)
+        {
+            _undo.BeginTurn(label);
+            _workflow.Replay.BeginTurn();
+            _workflow.Changes.BeginTurn();
+        }
 
-        public void CommitUndoTurn() => _undo.CommitTurn();
+        public void CommitUndoTurn()
+        {
+            _undo.CommitTurn();
+            _workflow.Replay.CommitTurn();
+        }
 
         public enum ToolScope
         {
@@ -214,6 +225,33 @@ namespace Axiom.Core.Agent
                         ["task"] = Prop("string", "What the subagent should do")
                     }, required: ["kind", "task"])));
 
+                tools.Add(new(
+                    "plan_board",
+                    "Update the multi-step plan board (list / done / doing / skip / set from text).",
+                    Schema(new JsonObject
+                    {
+                        ["action"] = Prop("string", "list | done | doing | skip | clear | set"),
+                        ["step"] = Prop("integer", "1-based step index for done/doing/skip"),
+                        ["text"] = Prop("string", "For action=set: numbered plan text to load")
+                    }, required: ["action"])));
+
+                tools.Add(new(
+                    "run_background",
+                    "Start a long shell command in the background (user can keep chatting; check with /jobs).",
+                    Schema(new JsonObject
+                    {
+                        ["command"] = Prop("string", "Shell command to run asynchronously")
+                    }, required: ["command"])));
+
+                tools.Add(new(
+                    "open_pr",
+                    "Push current branch and open a GitHub PR via gh (title + body).",
+                    Schema(new JsonObject
+                    {
+                        ["title"] = Prop("string", "PR title"),
+                        ["body"] = Prop("string", "PR body markdown")
+                    }, required: ["title"])));
+
                 if (WebSearchEnabled)
                 {
                     tools.Add(new(
@@ -234,7 +272,7 @@ namespace Axiom.Core.Agent
             if (scope == ToolScope.Inspect
                 && toolName is "write_file" or "download_file" or "web_search"
                     or "git_commit" or "git_checkout" or "worktree_create" or "worktree_remove"
-                    or "spawn_subagent")
+                    or "spawn_subagent" or "run_background" or "open_pr")
             {
                 return $"Error: tool '{toolName}' is not available in Critic inspect mode.";
             }
@@ -257,15 +295,23 @@ namespace Axiom.Core.Agent
                     if (ApprovalMode == ApprovalMode.Plan)
                         return $"Plan-only: would run {name} — {summary}";
 
-                    if (ApprovalMode == ApprovalMode.Ask && ApprovalHandler != null)
+                    bool forceAsk = ApprovalMode == ApprovalMode.Ask
+                        || (ApprovalMode == ApprovalMode.Auto && name == "write_file" && IsBigWrite(root));
+
+                    if (forceAsk && ApprovalHandler != null)
                     {
+                        string detail = name == "write_file"
+                            ? summary + " (large change — review recommended)"
+                            : summary;
                         bool ok = await ApprovalHandler(
-                            new ToolApprovalRequest(name, summary, argumentsJson ?? "{}"),
+                            new ToolApprovalRequest(name, detail, argumentsJson ?? "{}"),
                             token);
                         if (!ok)
                             return $"Denied: user rejected {name} ({summary})";
                     }
                 }
+
+                _workflow.Replay.Record(name, argumentsJson ?? "{}");
 
                 return name switch
                 {
@@ -299,6 +345,13 @@ namespace Axiom.Core.Agent
                     "worktree_remove" => await GitWorktreeService.RemoveAsync(
                         _workspace.PrimaryRoot, GetString(root, "path"), token),
                     "spawn_subagent" => await SpawnSubagentAsync(root, token),
+                    "plan_board" => PlanBoardAction(root),
+                    "run_background" => _workflow.Jobs.Start(GetString(root, "command"), _workspace.PrimaryRoot),
+                    "open_pr" => await GitBranchContext.CreatePullRequestAsync(
+                        _workspace.PrimaryRoot,
+                        GetString(root, "title"),
+                        GetString(root, "body"),
+                        token),
                     _ => $"Unknown tool: {toolName}"
                 };
             }
@@ -314,7 +367,49 @@ namespace Axiom.Core.Agent
 
         private static bool IsMutatingTool(string name) => name is
             "write_file" or "run_shell" or "download_file" or "git_commit" or "git_checkout"
-            or "worktree_create" or "worktree_remove" or "spawn_subagent";
+            or "worktree_create" or "worktree_remove" or "spawn_subagent" or "run_background" or "open_pr";
+
+        private bool IsBigWrite(JsonElement root)
+        {
+            string content = GetString(root, "content");
+            int lines = content.Split('\n').Length;
+            if (lines >= _workflow.BigDiffLineThreshold)
+                return true;
+            // Also treat as big if this turn already touched many files
+            return _workflow.Changes.Files.Count + 1 >= _workflow.BigDiffFileThreshold;
+        }
+
+        private string PlanBoardAction(JsonElement root)
+        {
+            string action = GetString(root, "action").Trim().ToLowerInvariant();
+            int step = root.TryGetProperty("step", out JsonElement s) && s.TryGetInt32(out int n) ? n : 0;
+            switch (action)
+            {
+                case "list":
+                case "":
+                    return _workflow.Plan.ToDisplayBlock();
+                case "clear":
+                    _workflow.Plan.Clear();
+                    return "Plan board cleared.";
+                case "set":
+                    _workflow.Plan.SetFromArchitectPlan(GetString(root, "text"));
+                    return _workflow.Plan.ToDisplayBlock();
+                case "done":
+                    return _workflow.Plan.TryMarkDone(step)
+                        ? _workflow.Plan.ToDisplayBlock()
+                        : $"Error: step {step} not found.";
+                case "doing":
+                    return _workflow.Plan.TrySetStatus(step, PlanStepStatus.Doing)
+                        ? _workflow.Plan.ToDisplayBlock()
+                        : $"Error: step {step} not found.";
+                case "skip":
+                    return _workflow.Plan.TrySetStatus(step, PlanStepStatus.Skipped)
+                        ? _workflow.Plan.ToDisplayBlock()
+                        : $"Error: step {step} not found.";
+                default:
+                    return "Error: action must be list|done|doing|skip|set|clear";
+            }
+        }
 
         private static string BuildApprovalSummary(string name, JsonElement root) => name switch
         {
@@ -510,16 +605,19 @@ namespace Axiom.Core.Agent
                 Directory.CreateDirectory(dir);
 
             string content = GetString(root, "content");
+            bool existed = File.Exists(path);
             _undo.RecordBeforeWrite(path);
             string? before = null;
             try
             {
-                if (File.Exists(path) && new FileInfo(path).Length < 400_000)
+                if (existed && new FileInfo(path).Length < 400_000)
                     before = File.ReadAllText(path);
             }
             catch { /* ignore */ }
 
+            _workflow.Changes.NoteBeforeWrite(path, before, existed);
             File.WriteAllText(path, content ?? string.Empty);
+            _workflow.Changes.NoteAfterWrite(path, content ?? string.Empty);
             lock (_writeGate)
             {
                 _writtenPaths.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));

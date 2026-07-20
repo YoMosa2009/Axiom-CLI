@@ -53,7 +53,22 @@ namespace Axiom.Core.Agent
             string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt(_tools.ApprovalMode));
             string workspaceBlock = _workspace.BuildContextBlock();
             string memory = ProjectMemory.BuildContextBlock(_workspace.PrimaryRoot);
-            string effectiveUser = userMessage;
+            string sticky = _tools.Workflow.ConsumeStickyPrefix() ?? string.Empty;
+            string planBlock = _tools.Workflow.Plan.ToPromptBlock();
+            string gitBlock = string.Empty;
+            try
+            {
+                GitBranchSnapshot gitSnap = await GitBranchContext.CaptureAsync(
+                    _workspace.PrimaryRoot, cancellationToken);
+                gitBlock = GitBranchContext.ToPromptBlock(gitSnap);
+            }
+            catch { /* optional */ }
+
+            string effectiveUser = sticky + userMessage;
+            if (!string.IsNullOrWhiteSpace(planBlock))
+                effectiveUser += "\n\n" + planBlock;
+            if (!string.IsNullOrWhiteSpace(gitBlock))
+                effectiveUser += "\n\n" + gitBlock;
             if (!string.IsNullOrWhiteSpace(memory))
                 effectiveUser += "\n\n" + memory;
             if (!string.IsNullOrWhiteSpace(workspaceBlock))
@@ -143,7 +158,9 @@ namespace Axiom.Core.Agent
                 "the user's local project is connected — use tools; never claim you lack access.\n" +
                 "Follow [[PROJECT MEMORY]] conventions when present (AXIOM.md / AGENTS.md).\n" +
                 "Tools include: write_file, read_file, list_dir, search_files (rg), run_shell, " +
-                "git_status/diff/log/commit/branch, diagnostics, worktree_*, spawn_subagent (explore|tests|fix), web_search.\n" +
+                "git_status/diff/log/commit/branch, diagnostics, worktree_*, spawn_subagent (explore|tests|fix), " +
+                "plan_board, run_background, open_pr, web_search.\n" +
+                "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n" +
                 "Prefer tools over guessing. Be concise in final answers.\n" +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +
                 "When done, answer clearly with what changed and how to run/test it.";
