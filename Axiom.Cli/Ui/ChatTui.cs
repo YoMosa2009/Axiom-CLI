@@ -56,6 +56,9 @@ internal sealed class ChatTui : IDisposable
     private int _streamAssistantIndex = -1;
     private TaskCompletionSource<bool>? _approvalTcs;
     private string _approvalPrompt = string.Empty;
+    private TaskCompletionSource<string>? _criticPickTcs;
+    private string _criticPickBuffer = string.Empty;
+    private string _criticPickPrompt = string.Empty;
 
     // Workflow UX (#1)
     private bool _paletteOpen;
@@ -393,6 +396,44 @@ internal sealed class ChatTui : IDisposable
                         Paint(force: true);
                         continue;
                     }
+                }
+
+                // Critic user-in-loop: type all | none | 1,3 then Enter
+                if (_criticPickTcs != null)
+                {
+                    if (key.Key == ConsoleKey.Enter)
+                    {
+                        _criticPickTcs.TrySetResult(_criticPickBuffer.Trim());
+                        _criticPickTcs = null;
+                        _criticPickBuffer = string.Empty;
+                        _criticPickPrompt = string.Empty;
+                        Paint(force: true);
+                        continue;
+                    }
+                    if (key.Key == ConsoleKey.Escape)
+                    {
+                        _criticPickTcs.TrySetResult("all");
+                        _criticPickTcs = null;
+                        _criticPickBuffer = string.Empty;
+                        _criticPickPrompt = string.Empty;
+                        Paint(force: true);
+                        continue;
+                    }
+                    if (key.Key == ConsoleKey.Backspace && _criticPickBuffer.Length > 0)
+                    {
+                        _criticPickBuffer = _criticPickBuffer[..^1];
+                        SetActivity(_criticPickPrompt + _criticPickBuffer);
+                        Paint(force: true);
+                        continue;
+                    }
+                    if (!char.IsControl(key.KeyChar))
+                    {
+                        _criticPickBuffer += key.KeyChar;
+                        SetActivity(_criticPickPrompt + _criticPickBuffer);
+                        Paint(force: true);
+                        continue;
+                    }
+                    continue;
                 }
 
                 // Esc stops the in-flight turn (Claude Code / Codex style).
@@ -985,6 +1026,50 @@ internal sealed class ChatTui : IDisposable
             SetActivity(ToolCallingLoop.DescribeToolStart(new OpenRouterToolCall("x", ev.ToolName, "{}")));
     }
 
+    private async Task<IReadOnlyList<int>?> PickCriticIssuesInteractiveAsync(
+        IReadOnlyList<CriticIssue> blockingIssues,
+        CancellationToken cancellationToken)
+    {
+        PushSystem("Critic findings (pick which to fix):");
+        for (int i = 0; i < blockingIssues.Count; i++)
+        {
+            var iss = blockingIssues[i];
+            PushSystem($"  {i + 1}. [{iss.Severity}] {iss.Summary}");
+            if (!string.IsNullOrWhiteSpace(iss.Evidence))
+                PushSystem($"      evidence: {Truncate(iss.Evidence, 120)}");
+        }
+        PushSystem("Type: all · none · 1,3  then Enter  (Esc = all)");
+
+        _criticPickPrompt = "Critic pick › ";
+        _criticPickBuffer = string.Empty;
+        _criticPickTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        SetActivity(_criticPickPrompt + _criticPickBuffer);
+        Paint(force: true);
+        using var reg = cancellationToken.Register(() => _criticPickTcs.TrySetResult("all"));
+        try
+        {
+            string answer = await _criticPickTcs.Task;
+            answer = (answer ?? "all").Trim().ToLowerInvariant();
+            if (answer is "none" or "skip" or "accept" or "0")
+                return Array.Empty<int>();
+            if (answer is "" or "all" or "*")
+                return null;
+            var indices = new List<int>();
+            foreach (string part in answer.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (int.TryParse(part.Trim(), out int n) && n > 0)
+                    indices.Add(n);
+            }
+            return indices.Count > 0 ? indices : null;
+        }
+        finally
+        {
+            _criticPickTcs = null;
+            _criticPickBuffer = string.Empty;
+            _criticPickPrompt = string.Empty;
+        }
+    }
+
     private async Task<bool> PromptToolApprovalAsync(ToolApprovalRequest req, CancellationToken token)
     {
         _approvalPrompt = $"Allow {req.ToolName}?  {Truncate(req.Summary, 60)}  [y/n]";
@@ -1364,6 +1449,100 @@ internal sealed class ChatTui : IDisposable
         PushSystem(string.IsNullOrWhiteSpace(map) ? "(empty repo map)" : map);
     }
 
+    public void HandleCouncil(string args)
+    {
+        if (_session == null)
+            return;
+        var t = _session.Tools;
+        string a = (args ?? "").Trim();
+        if (string.IsNullOrEmpty(a) || a is "status" or "?")
+        {
+            PushSystem($"Council: {(t.CouncilEnabled ? "on" : "off")} · {t.CouncilLabel}");
+            PushSystem($"  depth: {(t.CouncilDepth == CouncilDepth.Lite ? "lite" : "full")}   ·  /council lite|full");
+            PushSystem($"  severity: {CriticSeverity.Describe(t.CriticSeverity)}   ·  /council severity strict|high|critical");
+            PushSystem($"  explore: {(t.ParallelExplore ? "on" : "off")}  ·  loop: {(t.UserInLoopCritic ? "on" : "off")}  ·  post-merge: {(t.PostMergeCritic ? "on" : "off")}  ·  arbiter: {(t.ArbiterEnabled ? "on" : "off")}");
+            PushSystem($"  roles: {(t.RoleVisibility == CouncilRoleVisibility.FinalOnly ? "final" : "full")}   ·  /council roles full|final");
+            PushSystem("  acceptance: .axiom/acceptance.md (auto-loaded when present)");
+            return;
+        }
+
+        string[] parts = a.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        string head = parts[0].ToLowerInvariant();
+        string? val = parts.Length >= 2 ? parts[1].ToLowerInvariant() : null;
+
+        switch (head)
+        {
+            case "on":
+            case "off":
+                t.CouncilEnabled = head == "on";
+                PushSystem($"Council {(t.CouncilEnabled ? "on" : "off")}.");
+                break;
+            case "lite":
+                t.CouncilDepth = CouncilDepth.Lite;
+                t.CouncilEnabled = true;
+                PushSystem("Council depth → lite (fewer round-trips).");
+                break;
+            case "full":
+                t.CouncilDepth = CouncilDepth.Full;
+                t.CouncilEnabled = true;
+                PushSystem("Council depth → full (Architect → Builder → Critic).");
+                break;
+            case "severity":
+            case "sev":
+                if (val != null && CriticSeverity.TryParse(val, out var pol))
+                {
+                    t.CriticSeverity = pol;
+                    PushSystem($"Critic severity → {CriticSeverity.Describe(pol)}");
+                }
+                else
+                    PushSystem("Usage: /council severity strict|high|critical");
+                break;
+            case "explore":
+                t.ParallelExplore = val is null or "on" or "1" or "true";
+                if (val is "off" or "0" or "false")
+                    t.ParallelExplore = false;
+                PushSystem($"Parallel explore → {(t.ParallelExplore ? "on" : "off")}");
+                break;
+            case "loop":
+            case "interactive":
+                t.UserInLoopCritic = val is null or "on" or "1" or "true";
+                if (val is "off" or "0" or "false")
+                    t.UserInLoopCritic = false;
+                PushSystem($"User-in-loop Critic → {(t.UserInLoopCritic ? "on" : "off")}");
+                break;
+            case "post":
+            case "postmerge":
+            case "post-merge":
+                t.PostMergeCritic = val is null or "on" or "1" or "true";
+                if (val is "off" or "0" or "false")
+                    t.PostMergeCritic = false;
+                PushSystem($"Post-merge Critic → {(t.PostMergeCritic ? "on" : "off")}");
+                break;
+            case "arbiter":
+                t.ArbiterEnabled = val is null or "on" or "1" or "true";
+                if (val is "off" or "0" or "false")
+                    t.ArbiterEnabled = false;
+                PushSystem($"Arbiter → {(t.ArbiterEnabled ? "on" : "off")}");
+                break;
+            case "roles":
+            case "visibility":
+                if (val is "final" or "finalonly" or "collapse")
+                {
+                    t.RoleVisibility = CouncilRoleVisibility.FinalOnly;
+                    PushSystem("Role visibility → final only (hide Architect/Critic cards).");
+                }
+                else
+                {
+                    t.RoleVisibility = CouncilRoleVisibility.Full;
+                    PushSystem("Role visibility → full (show Architect/Critic/Explore).");
+                }
+                break;
+            default:
+                PushSystem("Usage: /council [status|lite|full|severity …|explore on|loop on|post on|arbiter on|roles full|final]");
+                break;
+        }
+    }
+
     private bool DrainWorkflowNotifications()
     {
         if (_session == null)
@@ -1421,7 +1600,8 @@ internal sealed class ChatTui : IDisposable
                 case CouncilEventKind.ArchitectOutput:
                     SetActivity("Council · Architect done");
                     FlushStreamAsSystem("Architect plan");
-                    PushSystem("Architect plan\n" + Truncate(evt.Message, 1200));
+                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
+                        PushSystem("Architect plan\n" + Truncate(evt.Message, 1200));
                     break;
                 case CouncilEventKind.BuilderOutput:
                     SetActivity("Council · Builder working");
@@ -1431,7 +1611,17 @@ internal sealed class ChatTui : IDisposable
                 case CouncilEventKind.CriticOutput:
                     SetActivity("Council · Critic reviewing");
                     FlushStreamAsSystem("Critic");
-                    PushSystem("Critic review\n" + Truncate(evt.Message, 800));
+                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
+                        PushSystem("Critic review\n" + Truncate(evt.Message, 800));
+                    break;
+                case CouncilEventKind.ExploreOutput:
+                    SetActivity("Council · Explore done");
+                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
+                        PushSystem("Explore lane\n" + Truncate(evt.Message, 800));
+                    break;
+                case CouncilEventKind.ArbiterOutput:
+                    SetActivity("Council · Arbiter");
+                    PushSystem("Arbiter\n" + Truncate(evt.Message, 1000));
                     break;
                 case CouncilEventKind.Completed:
                     SetActivity("Council · Finished");
@@ -1471,8 +1661,11 @@ internal sealed class ChatTui : IDisposable
         }
 
         CouncilOrchestrator council = _session.CreateCouncil();
+        CriticIssuePicker? picker = _session.Tools.UserInLoopCritic
+            ? PickCriticIssuesInteractiveAsync
+            : null;
         Task<CouncilResult> task = council.RunAsync(
-            new CouncilRequest(grounded, wsState, _session.CouncilTools()),
+            new CouncilRequest(grounded, wsState, _session.CouncilTools(), picker),
             progress,
             token);
 
@@ -1920,7 +2113,7 @@ internal sealed class ChatTui : IDisposable
         string model = session?.ModelLabel ?? "—";
         string ctx = ConsoleUi.FormatContext(used, max);
         string modeLabel = session?.Tools.ApprovalLabel ?? "auto";
-        string council = session == null ? "—" : (session.Tools.CouncilEnabled ? "council" : "agent");
+        string council = session == null ? "—" : session.Tools.CouncilLabel;
         string wsHint = session?.Workspace.Roots.Count > 0
             ? (session.Workspace.IsExclusive ? "🔒 " : "") + ShortName(session.Workspace.PrimaryRoot)
             : "no-folder";
@@ -2219,7 +2412,7 @@ internal sealed class ChatTui : IDisposable
             or "/continue" or "/cont" or "/rename" or "/export" or "/pick" or "/picker" or "/palette"
             or "/checkpoint" or "/cp" or "/plan" or "/changes" or "/accept" or "/reject"
             or "/replay" or "/jobs" or "/watch" or "/sticky" or "/pr" or "/network" or "/offline" or "/policy"
-            or "/spec" or "/map"
+            or "/spec" or "/map" or "/council"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
             || head.StartsWith("/w") || head.StartsWith("/b") || head.StartsWith("/f")

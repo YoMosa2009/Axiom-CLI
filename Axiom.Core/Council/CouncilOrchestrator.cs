@@ -148,17 +148,84 @@ namespace Axiom.Core.Council
                     : regression + "\n\n" + workspaceContext;
             }
 
+            string acceptance = AcceptanceCriteria.Load(rootPath);
+            if (!string.IsNullOrWhiteSpace(acceptance))
+            {
+                workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
+                    ? acceptance
+                    : acceptance + "\n\n" + workspaceContext;
+                Report(progress, CouncilEventKind.Status, "Acceptance criteria loaded (.axiom/acceptance.md).");
+            }
+
             if (agentic)
                 Report(progress, CouncilEventKind.Status, "Council · Builder has agentic tools (files/shell/git).");
-            Report(progress, CouncilEventKind.Status, $"Council · task kind: {taskKind} · specialty: {specialty}.");
+            Report(progress, CouncilEventKind.Status,
+                $"Council · {tools.Depth} · severity {CriticSeverity.Describe(tools.SeverityPolicy)} · " +
+                $"task {taskKind} · specialty {specialty}.");
 
             _agentTools?.BeginUndoTurn("council");
             bool cancelled = false;
+            string? exploreSummary = null;
+            string? arbiterNote = null;
 
             string architectPlan = string.Empty;
             string builderOutput = string.Empty;
             try
             {
+            // ── Council lite: single implement loop for simple non-edit work ───
+            if (tools.Depth == CouncilDepth.Lite
+                && !(taskKind == CouncilTaskKind.Coding && looksLikeEdit && expectPatch && !agentic))
+            {
+                Report(progress, CouncilEventKind.Status, "Council lite · plan+implement in one lane…");
+                string liteSystem = FoundationSystemPrompt.Apply(
+                    CouncilRolePrompts.Lite(taskKind, workspaceConnected, agentic));
+                string liteInput = BuildContextualInput(request.UserPrompt, workspaceContext);
+                _agentTools?.ClearWrittenPaths();
+                (builderOutput, int liteTools) = await CallBuilderAsync(
+                    liteSystem, liteInput, agentic, progress, cancellationToken);
+                builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
+                totalToolCalls += liteTools;
+                CollectWrittenFiles(changedFiles);
+                Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
+
+                // Light Critic only when files changed or coding
+                CriticReport liteReport = new() { Status = "ok", Issues = new List<CriticIssue>() };
+                if ((looksLikeEdit || taskKind == CouncilTaskKind.Coding || changedFiles.Count > 0)
+                    && !string.IsNullOrWhiteSpace(builderOutput))
+                {
+                    CriticEvidence liteEvidence = await GatherCriticEvidenceAsync(
+                        builderOutput, workspaceConnected, tools, progress, cancellationToken);
+                    string criticInput = BuildCriticInput(request.UserPrompt, false, builderOutput, liteEvidence);
+                    if (!string.IsNullOrWhiteSpace(acceptance))
+                        criticInput = acceptance + "\n\n" + criticInput;
+                    string criticSystem = FoundationSystemPrompt.Apply(
+                        CouncilRolePrompts.Critic(taskKind, workspaceConnected, agentic && workspaceConnected));
+                    (string criticOut, int ct) = await CallCriticAsync(
+                        criticSystem, criticInput, agentic && workspaceConnected, progress, cancellationToken);
+                    totalToolCalls += ct;
+                    Report(progress, CouncilEventKind.CriticOutput, criticOut);
+                    liteReport = MergeDeterministicFindings(CriticContractParser.Parse(criticOut), liteEvidence);
+                    liteReport = FilterReportBySeverity(liteReport, tools.SeverityPolicy);
+                }
+
+                Report(progress, CouncilEventKind.Completed,
+                    totalToolCalls > 0
+                        ? $"Council lite complete · {totalToolCalls} tool call(s)."
+                        : "Council lite complete.");
+                return new CouncilResult(
+                    true, builderOutput, null, liteReport, totalToolCalls,
+                    changedFiles.Count > 0 ? changedFiles : null, applySummary, cancelled);
+            }
+
+            // ── Parallel explore lane (while Architect plans) ─────────────────
+            Task<(string Summary, int Tools)>? exploreTask = null;
+            if (tools.ParallelExplore && agentic && workspaceConnected && _chat != null && _agentTools != null
+                && (taskKind == CouncilTaskKind.Coding || looksLikeEdit || specialty == TaskSpecialty.Debug))
+            {
+                Report(progress, CouncilEventKind.Status, "Explore lane starting in parallel with Architect…");
+                exploreTask = RunExploreLaneAsync(request.UserPrompt, progress, cancellationToken);
+            }
+
             // ── Architect: plan (desktop Workplace role contract) ─────────────
             Report(progress, CouncilEventKind.Status, "Architect is planning...");
             string architectSystem = FoundationSystemPrompt.Apply(
@@ -198,6 +265,27 @@ namespace Axiom.Core.Council
                 workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
                     ? workflowExtra
                     : workflowExtra + "\n\n" + workspaceContext;
+            }
+
+            // Merge parallel explore results into Builder context
+            if (exploreTask != null)
+            {
+                try
+                {
+                    (string exploreText, int exploreTools) = await exploreTask;
+                    totalToolCalls += exploreTools;
+                    if (!string.IsNullOrWhiteSpace(exploreText))
+                    {
+                        exploreSummary = exploreText.Length > 4000 ? exploreText[..4000] + "…" : exploreText;
+                        Report(progress, CouncilEventKind.ExploreOutput, exploreSummary);
+                        workspaceContext += "\n\n[[EXPLORE LANE FINDINGS]]\n" + exploreSummary + "\n[[END EXPLORE LANE]]";
+                        Report(progress, CouncilEventKind.Status, "Explore lane merged into Builder context.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Report(progress, CouncilEventKind.Warning, "Explore lane failed: " + ex.Message);
+                }
             }
 
             // ── Builder: implement (agentic tool loop when available) ──────────
@@ -273,6 +361,8 @@ namespace Axiom.Core.Council
 
                 Report(progress, CouncilEventKind.Status, "Critic is reviewing...");
                 string criticInput = BuildCriticInput(request.UserPrompt, patch != null, builderOutput, evidence);
+                if (!string.IsNullOrWhiteSpace(acceptance))
+                    criticInput = acceptance + "\n\n" + criticInput;
                 bool criticInspect = agentic && workspaceConnected;
                 string criticSystem = FoundationSystemPrompt.Apply(
                     CouncilRolePrompts.Critic(taskKind, workspaceConnected, criticInspect));
@@ -311,18 +401,54 @@ namespace Axiom.Core.Council
                     Report(progress, CouncilEventKind.Warning, "Critic evidence rule: vague clean-pass rejected.");
                 }
 
-                int issueCount = report.Issues?.Count ?? 0;
+                // Severity policy: only blocking issues force revision
+                var blocking = CriticSeverity.FilterBlocking(report.Issues, tools.SeverityPolicy);
+                int issueCount = blocking.Count;
+                int totalIssues = report.Issues?.Count ?? 0;
+                if (totalIssues > issueCount)
+                {
+                    Report(progress, CouncilEventKind.Status,
+                        $"Critic: {totalIssues} finding(s), {issueCount} block under severity={CriticSeverity.Describe(tools.SeverityPolicy)}.");
+                }
+
                 if (issueCount == 0)
                 {
-                    Report(progress, CouncilEventKind.Status, "Critic found no issues.");
+                    Report(progress, CouncilEventKind.Status,
+                        totalIssues == 0
+                            ? "Critic found no issues."
+                            : "No blocking issues at current severity — continuing.");
                     break;
+                }
+
+                // User-in-the-loop: let host pick which blocking issues to fix
+                if (tools.UserInLoopCritic && request.OnPickCriticIssues != null)
+                {
+                    Report(progress, CouncilEventKind.Status,
+                        "Waiting for you to pick Critic findings to fix (all / none / 1,3)…");
+                    IReadOnlyList<int>? picked = await request.OnPickCriticIssues(blocking, cancellationToken);
+                    if (picked != null && picked.Count == 0)
+                    {
+                        Report(progress, CouncilEventKind.Status, "User accepted remaining Critic findings — stopping revisions.");
+                        break;
+                    }
+                    if (picked is { Count: > 0 })
+                    {
+                        var selected = new List<CriticIssue>();
+                        foreach (int idx in picked)
+                        {
+                            if (idx >= 1 && idx <= blocking.Count)
+                                selected.Add(blocking[idx - 1]);
+                        }
+                        if (selected.Count > 0)
+                            blocking = selected;
+                    }
                 }
 
                 if (retries >= MaxBuilderRetryAttempts)
                 {
                     Report(progress, CouncilEventKind.Warning,
                         $"Builder retry limit reached ({MaxBuilderRetryAttempts}); keeping current output. " +
-                        $"{issueCount} Critic finding(s) remain.");
+                        $"{issueCount} blocking Critic finding(s) remain.");
                     break;
                 }
 
@@ -331,14 +457,16 @@ namespace Axiom.Core.Council
                     || evidence.SandboxFailed;
                 Report(progress, CouncilEventKind.Status,
                     fullRevision
-                        ? $"Critic found {issueCount} issues — running full revision ({retries}/{MaxBuilderRetryAttempts})..."
-                        : $"Critic found {issueCount} issue(s) — running targeted patch ({retries}/{MaxBuilderRetryAttempts})...");
+                        ? $"Critic found {issueCount} blocking issues — running full revision ({retries}/{MaxBuilderRetryAttempts})..."
+                        : $"Critic found {issueCount} blocking issue(s) — running targeted patch ({retries}/{MaxBuilderRetryAttempts})...");
 
+                // Revision prompt focuses on blocking (and user-selected) issues
+                string focusedCritic = FormatIssuesForRevision(blocking, criticOutput);
                 string revisionSystem = fullRevision
                     ? builderSystem
                     : builderSystem + "\n" + TargetedPatchModeNote(expectPatch || patch != null, agentic);
                 string revisionInput = BuildRevisionInput(
-                    request.UserPrompt, architectPlan, workspaceContext, builderOutput, criticOutput, fullRevision, evidence);
+                    request.UserPrompt, architectPlan, workspaceContext, builderOutput, focusedCritic, fullRevision, evidence);
 
                 (builderOutput, int revisionTools) = await CallBuilderAsync(
                     revisionSystem, revisionInput, agentic, progress, cancellationToken);
@@ -388,6 +516,87 @@ namespace Axiom.Core.Council
                 }
             }
 
+            // ── Post-merge Critic: re-check after apply / disk writes ──────────
+            bool wroteSomething = changedFiles.Count > 0
+                || (_agentTools?.WrittenPaths.Count ?? 0) > 0;
+            if (tools.PostMergeCritic && wroteSomething && workspaceConnected)
+            {
+                try
+                {
+                    Report(progress, CouncilEventKind.Status, "Post-merge Critic · re-checking changes…");
+                    string postBody = builderOutput;
+                    if (!string.IsNullOrWhiteSpace(rootPath))
+                    {
+                        try
+                        {
+                            string diag = await DiagnosticsService.RunAsync(rootPath, cancellationToken);
+                            totalToolCalls++;
+                            postBody += "\n\n[[POST-MERGE DIAGNOSTICS]]\n"
+                                + (diag.Length > 4000 ? diag[..4000] + "…" : diag);
+                            NoteSessionTestOutcomes(diag);
+                        }
+                        catch { /* optional */ }
+                    }
+
+                    CriticEvidence postEv = await GatherCriticEvidenceAsync(
+                        postBody, true, tools, progress, cancellationToken);
+                    string postInput = BuildCriticInput(request.UserPrompt, true, postBody, postEv);
+                    if (!string.IsNullOrWhiteSpace(acceptance))
+                        postInput = acceptance + "\n\n" + postInput;
+                    postInput += "\n\n[POST-MERGE] Review the applied changes and diagnostics. " +
+                                 "Flag regressions only.";
+                    string postSystem = FoundationSystemPrompt.Apply(
+                        CouncilRolePrompts.Critic(taskKind, true, agentic));
+                    (string postCritic, int postTools) = await CallCriticAsync(
+                        postSystem, postInput, agentic, progress, cancellationToken);
+                    totalToolCalls += postTools;
+                    Report(progress, CouncilEventKind.CriticOutput, postCritic);
+                    var postReport = MergeDeterministicFindings(CriticContractParser.Parse(postCritic), postEv);
+                    var postBlocking = CriticSeverity.FilterBlocking(postReport.Issues, tools.SeverityPolicy);
+                    if (postBlocking.Count > 0)
+                    {
+                        report = postReport;
+                        Report(progress, CouncilEventKind.Warning,
+                            $"Post-merge Critic: {postBlocking.Count} blocking finding(s) after apply.");
+                    }
+                    else
+                    {
+                        Report(progress, CouncilEventKind.Status, "Post-merge Critic: no blocking findings.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Report(progress, CouncilEventKind.Warning, "Post-merge Critic skipped: " + ex.Message);
+                }
+            }
+
+            // ── Arbiter: residual disagreement / remaining blocking issues ─────
+            var residual = CriticSeverity.FilterBlocking(report.Issues, tools.SeverityPolicy);
+            // Arbiter only when full agentic council (avoids consuming scripted pipeline responses in unit tests).
+            if (tools.ArbiterEnabled && agentic && residual.Count > 0 && retries >= MaxBuilderRetryAttempts)
+            {
+                Report(progress, CouncilEventKind.Status, "Arbiter resolving residual issues…");
+                string arbSystem = FoundationSystemPrompt.Apply(CouncilRolePrompts.Arbiter(taskKind));
+                var arbSb = new StringBuilder();
+                arbSb.AppendLine("[ORIGINAL REQUEST]").AppendLine(request.UserPrompt);
+                arbSb.AppendLine().AppendLine("[ARCHITECT PLAN]").AppendLine(architectPlan);
+                arbSb.AppendLine().AppendLine("[BUILDER OUTPUT SUMMARY]");
+                arbSb.AppendLine(builderOutput.Length > 6000 ? builderOutput[..6000] + "…" : builderOutput);
+                arbSb.AppendLine().AppendLine("[RESIDUAL CRITIC ISSUES]");
+                for (int i = 0; i < residual.Count; i++)
+                {
+                    var iss = residual[i];
+                    arbSb.AppendLine($"{i + 1}. [{iss.Severity}] {iss.Summary}");
+                    if (!string.IsNullOrWhiteSpace(iss.Evidence))
+                        arbSb.AppendLine("   evidence: " + iss.Evidence);
+                }
+                arbiterNote = CouncilRolePrompts.StripRoleMarkers(
+                    await CallRoleAsync(arbSystem, arbSb.ToString(), progress, cancellationToken, streamTokens: true));
+                Report(progress, CouncilEventKind.ArbiterOutput, arbiterNote);
+                builderOutput = builderOutput.TrimEnd()
+                    + "\n\n--- Arbiter ---\n" + arbiterNote;
+            }
+
             Report(progress, CouncilEventKind.Completed,
                 totalToolCalls > 0
                     ? $"Council run complete · {totalToolCalls} tool call(s)."
@@ -400,7 +609,9 @@ namespace Axiom.Core.Council
                 totalToolCalls,
                 changedFiles.Count > 0 ? changedFiles : null,
                 applySummary,
-                cancelled);
+                cancelled,
+                exploreSummary,
+                arbiterNote);
             }
             catch (OperationCanceledException)
             {
@@ -414,13 +625,95 @@ namespace Axiom.Core.Council
                     totalToolCalls,
                     changedFiles.Count > 0 ? changedFiles : null,
                     applySummary,
-                    Cancelled: true);
+                    Cancelled: true,
+                    exploreSummary,
+                    arbiterNote);
             }
             finally
             {
                 _agentTools?.CommitUndoTurn();
             }
         }
+
+        private async Task<(string Summary, int Tools)> RunExploreLaneAsync(
+            string userPrompt,
+            IProgress<CouncilEvent>? progress,
+            CancellationToken cancellationToken)
+        {
+            if (_chat == null || _agentTools == null)
+                return ("", 0);
+
+            string system = FoundationSystemPrompt.Apply(
+                "You are a read-only Explore lane running in parallel with the Architect. " +
+                "Map the relevant files, symbols, and risks for the user request. " +
+                "Use list_dir, read_file, search_files, find_symbol only. Do not modify files. " +
+                "Return a compact bullet list of paths and findings.");
+            string input = userPrompt + "\n\n" + (_agentTools != null
+                ? "" // tools see workspace via executor
+                : "");
+            // Attach workspace block via primary path memory if available
+            try
+            {
+                // Subagent-style inspect loop
+                var loop = new ToolCallingLoop(_chat, _agentTools, _modelId, maxRounds: 6);
+                ToolCallingResult result = await loop.RunAsync(
+                    system,
+                    userPrompt + "\n\nExplore the connected workspace for this request. Summarize relevant paths only.",
+                    status => Report(progress, CouncilEventKind.Status, "Explore · " + status),
+                    cancellationToken,
+                    AgentToolExecutor.ToolScope.Inspect,
+                    onToolEvent: ev => ReportToolEvent(progress, "Explore", ev),
+                    onToken: null);
+                return (result.FinalText ?? "", result.ToolCallCount);
+            }
+            catch (Exception ex)
+            {
+                return ("Explore failed: " + ex.Message, 0);
+            }
+        }
+
+        private static CriticReport FilterReportBySeverity(CriticReport report, CriticSeverityPolicy policy)
+        {
+            // Keep all issues for display; mark status ok if none block
+            var blocking = CriticSeverity.FilterBlocking(report.Issues, policy);
+            if (blocking.Count == 0)
+            {
+                report.Status = "ok";
+                report.HasIssues = false;
+                // Keep Issues list for transparency of non-blocking notes
+            }
+            else
+            {
+                report.Status = "issues";
+                report.HasIssues = true;
+            }
+            report.FindingsCount = report.Issues?.Count ?? 0;
+            return report;
+        }
+
+        private static string FormatIssuesForRevision(IReadOnlyList<CriticIssue> issues, string fallbackCriticOutput)
+        {
+            if (issues == null || issues.Count == 0)
+                return fallbackCriticOutput;
+            var sb = new StringBuilder();
+            sb.AppendLine("{\"status\":\"issues\",\"issues\":[");
+            for (int i = 0; i < issues.Count; i++)
+            {
+                var iss = issues[i];
+                if (i > 0) sb.Append(',');
+                sb.Append('{')
+                    .Append("\"severity\":\"").Append(EscapeJson(iss.Severity)).Append("\",")
+                    .Append("\"summary\":\"").Append(EscapeJson(iss.Summary)).Append("\",")
+                    .Append("\"evidence\":\"").Append(EscapeJson(iss.Evidence)).Append("\",")
+                    .Append("\"suggestedFix\":\"").Append(EscapeJson(iss.SuggestedFix)).Append("\"")
+                    .Append('}');
+            }
+            sb.Append("]}");
+            return sb.ToString();
+        }
+
+        private static string EscapeJson(string? s)
+            => (s ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "");
 
         private async Task<CriticEvidence> GatherCriticEvidenceAsync(
             string builderOutput,

@@ -238,6 +238,50 @@ namespace Axiom.Core.Council
             return core;
         }
 
+        /// <summary>Combined Architect+Builder+self-check for Council lite (fewer round-trips).</summary>
+        public static string Lite(CouncilTaskKind kind, bool workspaceConnected, bool agentic)
+        {
+            string core =
+                "You are Axiom Council Lite: plan briefly, implement, then self-review in ONE turn series. " +
+                "Start with a short numbered plan (max 5 steps), then implement immediately. " +
+                "End with a one-line self-check: what you verified and residual risk." +
+                EnvironmentBriefing + RoleBoundary + CloudDeliberation;
+
+            if (workspaceConnected)
+            {
+                core +=
+                    "\nYou HAVE access to the connected workspace. Never claim you lack filesystem access.";
+            }
+
+            if (agentic)
+            {
+                core +=
+                    "\nUse tools (str_replace/write_file/read_file/run_tests) to land real changes. " +
+                    "Prefer str_replace for edits.";
+            }
+
+            if (kind == CouncilTaskKind.Coding)
+            {
+                core +=
+                    "\nFor code tasks name concrete files in the plan and implement them.";
+            }
+
+            return core;
+        }
+
+        public static string Arbiter(CouncilTaskKind kind)
+        {
+            return
+                "You are the Arbiter. Architect, Builder, and Critic disagree or residual issues remain. " +
+                "Decide the smallest safe next action: (a) accept output with noted residual risk, " +
+                "(b) list at most 3 must-fix items with file:line evidence, or (c) stop and ask the user one question. " +
+                "Output plain text, concise. Do not re-plan the whole task." +
+                EnvironmentBriefing + RoleBoundary +
+                (kind == CouncilTaskKind.Coding
+                    ? "\nPrefer code correctness and tests over style nits."
+                    : "");
+        }
+
         public static string StripRoleMarkers(string text)
         {
             if (string.IsNullOrEmpty(text))

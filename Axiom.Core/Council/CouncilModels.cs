@@ -1,4 +1,7 @@
+using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Axiom.Core.Workspace;
 
 namespace Axiom.Core.Council
@@ -11,15 +14,30 @@ namespace Axiom.Core.Council
         bool SandboxEnabled = false,
         bool CalculatorEnabled = true,
         bool WebSearchEnabled = true,
-        bool AgenticBuilderEnabled = true)
+        bool AgenticBuilderEnabled = true,
+        CriticSeverityPolicy SeverityPolicy = CriticSeverityPolicy.Strict,
+        CouncilDepth Depth = CouncilDepth.Full,
+        bool ParallelExplore = true,
+        bool UserInLoopCritic = false,
+        bool PostMergeCritic = true,
+        bool ArbiterEnabled = true)
     {
         public static CouncilToolOptions Default { get; } = new();
     }
 
+    /// <summary>
+    /// Host callback for user-in-the-loop Critic: return 1-based indices of issues to fix.
+    /// Empty list = accept remaining and stop. Null = fix all blocking issues.
+    /// </summary>
+    public delegate Task<IReadOnlyList<int>?> CriticIssuePicker(
+        IReadOnlyList<CriticIssue> blockingIssues,
+        CancellationToken cancellationToken);
+
     public sealed record CouncilRequest(
         string UserPrompt,
         ConnectedWorkspaceState? Workspace,
-        CouncilToolOptions? Tools = null);
+        CouncilToolOptions? Tools = null,
+        CriticIssuePicker? OnPickCriticIssues = null);
 
     public enum CouncilEventKind
     {
@@ -27,6 +45,8 @@ namespace Axiom.Core.Council
         ArchitectOutput,
         BuilderOutput,
         CriticOutput,
+        ExploreOutput,
+        ArbiterOutput,
         Tool,
         Token,
         Warning,
@@ -44,5 +64,7 @@ namespace Axiom.Core.Council
         int ToolCallCount = 0,
         IReadOnlyList<string>? ChangedFiles = null,
         string? ApplySummary = null,
-        bool Cancelled = false);
+        bool Cancelled = false,
+        string? ExploreSummary = null,
+        string? ArbiterNote = null);
 }

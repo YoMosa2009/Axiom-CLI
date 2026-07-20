@@ -769,6 +769,10 @@ internal static class Program
                 tui.HandleRepoMap();
                 return true;
 
+            case "/council":
+                tui.HandleCouncil(parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : "");
+                return true;
+
             case "/continue":
             case "/cont":
                 // Fire-and-forget continuation on the TUI loop.
@@ -873,6 +877,7 @@ internal static class Program
                 Say("  /policy               Show shell policy path + builtins");
                 Say("  /spec [title]         Write SPEC.md from this chat");
                 Say("  /map                  Show repo map for locked folder");
+                Say("  /council […]          depth, severity, explore, loop, roles, arbiter");
                 Say("  /clear                Clear transcript (keeps save file)");
                 Say("  Esc                   Stop in-flight agent/council turn");
                 Say("  ↑↓ scroll             (also PgUp/PgDn, Shift+arrows, wheel)");

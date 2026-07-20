@@ -48,11 +48,7 @@ internal sealed class ChatSession
             agentTools: ToolExecutor);
     }
 
-    public CouncilToolOptions CouncilTools() => new(
-        SandboxEnabled: Tools.SandboxEnabled,
-        CalculatorEnabled: Tools.CalculatorEnabled,
-        WebSearchEnabled: Tools.WebSearchEnabled,
-        AgenticBuilderEnabled: true);
+    public CouncilToolOptions CouncilTools() => Tools.ToCouncilTools();
 
     public (int Used, int Max) EstimateContext()
     {

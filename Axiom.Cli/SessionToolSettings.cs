@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Axiom.Core.Agent;
+using Axiom.Core.Council;
 
 namespace Axiom.Cli;
 
@@ -13,6 +14,14 @@ internal sealed class SessionToolSettings
 
     /// <summary>Auto | Ask | Plan — how freely tools may mutate the workspace.</summary>
     public ApprovalMode ApprovalMode { get; set; } = ApprovalMode.Auto;
+
+    public CriticSeverityPolicy CriticSeverity { get; set; } = CriticSeverityPolicy.Strict;
+    public CouncilDepth CouncilDepth { get; set; } = CouncilDepth.Full;
+    public bool ParallelExplore { get; set; } = true;
+    public bool UserInLoopCritic { get; set; }
+    public bool PostMergeCritic { get; set; } = true;
+    public bool ArbiterEnabled { get; set; } = true;
+    public CouncilRoleVisibility RoleVisibility { get; set; } = CouncilRoleVisibility.Full;
 
     public IEnumerable<(string Name, bool Enabled)> AsList()
     {
@@ -28,6 +37,18 @@ internal sealed class SessionToolSettings
         ApprovalMode.Plan => "plan",
         _ => "auto"
     };
+
+    public string CouncilLabel
+    {
+        get
+        {
+            if (!CouncilEnabled)
+                return "agent";
+            string depth = CouncilDepth == CouncilDepth.Lite ? "lite" : "full";
+            string sev = Axiom.Core.Council.CriticSeverity.Describe(CriticSeverity);
+            return $"council:{depth}/{sev}";
+        }
+    }
 
     public bool TrySetApproval(string name)
     {
@@ -112,4 +133,16 @@ internal sealed class SessionToolSettings
                 return false;
         }
     }
+
+    public CouncilToolOptions ToCouncilTools() => new(
+        SandboxEnabled: SandboxEnabled,
+        CalculatorEnabled: CalculatorEnabled,
+        WebSearchEnabled: WebSearchEnabled,
+        AgenticBuilderEnabled: true,
+        SeverityPolicy: CriticSeverity,
+        Depth: CouncilDepth,
+        ParallelExplore: ParallelExplore,
+        UserInLoopCritic: UserInLoopCritic,
+        PostMergeCritic: PostMergeCritic,
+        ArbiterEnabled: ArbiterEnabled);
 }
