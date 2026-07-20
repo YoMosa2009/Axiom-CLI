@@ -157,9 +157,11 @@ namespace Axiom.Core.Agent
                 "When a message includes [[ATTACHED WORKSPACES — YOU HAVE ACCESS]] or [[PROJECT MEMORY]], " +
                 "the user's local project is connected — use tools; never claim you lack access.\n" +
                 "Follow [[PROJECT MEMORY]] conventions when present (AXIOM.md / AGENTS.md).\n" +
-                "Tools include: write_file, read_file, list_dir, search_files (rg), run_shell, " +
-                "git_status/diff/log/commit/branch, diagnostics, worktree_*, spawn_subagent (explore|tests|fix), " +
-                "plan_board, run_background, open_pr, web_search.\n" +
+                "Tools include: write_file, str_replace (preferred for small edits), apply_patch, write_files, " +
+                "read_file (offset/limit), list_dir, search_files, find_symbol, run_shell, " +
+                "git_*, diagnostics, run_tests, package_install, docker_run, fetch_url, read_csv, read_notebook, " +
+                "worktree_*, spawn_subagent, plan_board, run_background, open_pr, web_search.\n" +
+                "Prefer str_replace/apply_patch over full-file write_file when editing existing files.\n" +
                 "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n" +
                 "Prefer tools over guessing. Be concise in final answers.\n" +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +

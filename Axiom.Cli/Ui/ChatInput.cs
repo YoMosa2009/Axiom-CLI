@@ -822,6 +822,8 @@ internal static class ChatInput
             new("watch", "watch", "Watch workspace for external edits", false, null, "slash"),
             new("sticky", "sticky", "Sticky multi-turn goal", false, null, "slash"),
             new("pr", "pr", "Push branch + open GitHub PR", false, null, "slash"),
+            new("network", "network", "Network: on | off | ask", false, null, "slash"),
+            new("policy", "policy", "Shell policy + secret redaction info", false, null, "slash"),
             new("mode", "mode", "Set approval: auto | ask | plan", false, null, "slash"),
             new("continue", "continue", "Resume last task after stop/error", false, null, "slash"),
             new("rename", "rename", "Name this session", false, null, "slash"),

@@ -752,6 +752,15 @@ internal static class Program
                     parts.Length >= 2 ? string.Join(' ', parts.Skip(1)) : "");
                 return true;
 
+            case "/network":
+            case "/offline":
+                tui.HandleNetwork(parts.Length >= 2 ? parts[1] : (cmd == "/offline" ? "off" : null));
+                return true;
+
+            case "/policy":
+                tui.HandlePolicy();
+                return true;
+
             case "/continue":
             case "/cont":
                 // Fire-and-forget continuation on the TUI loop.
@@ -852,6 +861,8 @@ internal static class Program
                 Say("  /watch [on|off]       Watch workspace for external edits");
                 Say("  /sticky [goal] [n]    Sticky multi-turn goal (or clear)");
                 Say("  /pr [title]           Push + open GitHub PR via gh");
+                Say("  /network [on|off|ask] Network tools: online / offline / ask");
+                Say("  /policy               Show shell policy path + builtins");
                 Say("  /clear                Clear transcript (keeps save file)");
                 Say("  Esc                   Stop in-flight agent/council turn");
                 Say("  ↑↓ scroll             (also PgUp/PgDn, Shift+arrows, wheel)");

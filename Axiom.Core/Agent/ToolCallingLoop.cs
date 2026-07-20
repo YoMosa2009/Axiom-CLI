@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -98,40 +99,61 @@ namespace Axiom.Core.Agent
                     ToolCalls: calls,
                     PreserveFullText: true));
 
-                foreach (OpenRouterToolCall call in calls)
+                // Parallel-safe reads can run concurrently; mutating tools stay serial.
+                bool allParallelSafe = calls.Count > 1
+                    && calls.All(c => AgentToolExecutor.IsParallelSafeTool(c.Name ?? ""));
+
+                if (allParallelSafe)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    toolCalls++;
-                    string detail = ExtractDetail(call.Name, call.ArgumentsJson);
-                    onToolEvent?.Invoke(new ToolEvent(ToolEventPhase.Started, call.Name, detail));
-                    onStatus?.Invoke(DescribeToolStart(call));
+                    onStatus?.Invoke($"Running {calls.Count} tools in parallel");
+                    foreach (OpenRouterToolCall call in calls)
+                    {
+                        string detail = ExtractDetail(call.Name, call.ArgumentsJson);
+                        onToolEvent?.Invoke(new ToolEvent(ToolEventPhase.Started, call.Name, detail));
+                    }
 
-                    string result = await _tools.ExecuteAsync(
-                        call.Name, call.ArgumentsJson, cancellationToken, scope);
+                    var tasks = calls.Select(async call =>
+                    {
+                        string result = await _tools.ExecuteAsync(
+                            call.Name, call.ArgumentsJson, cancellationToken, scope);
+                        return (call, result);
+                    }).ToList();
 
-                    bool isError = (result ?? string.Empty).StartsWith("Error", StringComparison.OrdinalIgnoreCase)
-                        || ((result ?? string.Empty).Contains("exit_code: ", StringComparison.Ordinal)
-                            && !(result ?? string.Empty).Contains("exit_code: 0", StringComparison.Ordinal));
-                    bool denied = (result ?? string.Empty).StartsWith("Denied:", StringComparison.OrdinalIgnoreCase)
-                        || (result ?? string.Empty).StartsWith("Plan-only:", StringComparison.OrdinalIgnoreCase);
+                    (OpenRouterToolCall call, string result)[] finished = await Task.WhenAll(tasks);
+                    foreach (var (call, resultRaw) in finished)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        toolCalls++;
+                        string result = SecretRedaction.Redact(resultRaw);
+                        string detail = ExtractDetail(call.Name, call.ArgumentsJson);
+                        EmitToolFinished(call, detail, result, onToolEvent, onStatus, toolLog);
+                        turnMessages.Add(new OpenRouterMessage(
+                            "tool",
+                            result,
+                            ToolCallId: call.Id,
+                            PreserveFullText: true));
+                    }
+                }
+                else
+                {
+                    foreach (OpenRouterToolCall call in calls)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        toolCalls++;
+                        string detail = ExtractDetail(call.Name, call.ArgumentsJson);
+                        onToolEvent?.Invoke(new ToolEvent(ToolEventPhase.Started, call.Name, detail));
+                        onStatus?.Invoke(DescribeToolStart(call));
 
-                    onToolEvent?.Invoke(new ToolEvent(
-                        denied ? (result!.StartsWith("Plan-only:", StringComparison.OrdinalIgnoreCase)
-                            ? ToolEventPhase.Planned
-                            : ToolEventPhase.Denied)
-                            : ToolEventPhase.Finished,
-                        call.Name,
-                        detail,
-                        SummarizeResult(result),
-                        isError));
+                        string result = SecretRedaction.Redact(await _tools.ExecuteAsync(
+                            call.Name, call.ArgumentsJson, cancellationToken, scope));
 
-                    onStatus?.Invoke(DescribeToolDone(call, result));
-                    toolLog.Add($"{call.Name}: {SummarizeResult(result)}");
-                    turnMessages.Add(new OpenRouterMessage(
-                        "tool",
-                        result,
-                        ToolCallId: call.Id,
-                        PreserveFullText: true));
+                        EmitToolFinished(call, detail, result, onToolEvent, onStatus, toolLog);
+                        turnMessages.Add(new OpenRouterMessage(
+                            "tool",
+                            result,
+                            ToolCallId: call.Id,
+                            PreserveFullText: true));
+                    }
                 }
 
                 if (round == maxRounds)
@@ -144,6 +166,34 @@ namespace Axiom.Core.Agent
             return new ToolCallingResult(finalText, toolCalls, toolLog, cancelled);
         }
 
+        private static void EmitToolFinished(
+            OpenRouterToolCall call,
+            string detail,
+            string result,
+            Action<ToolEvent>? onToolEvent,
+            Action<string>? onStatus,
+            List<string> toolLog)
+        {
+            bool isError = (result ?? string.Empty).StartsWith("Error", StringComparison.OrdinalIgnoreCase)
+                || ((result ?? string.Empty).Contains("exit_code: ", StringComparison.Ordinal)
+                    && !(result ?? string.Empty).Contains("exit_code: 0", StringComparison.Ordinal));
+            bool denied = (result ?? string.Empty).StartsWith("Denied:", StringComparison.OrdinalIgnoreCase)
+                || (result ?? string.Empty).StartsWith("Plan-only:", StringComparison.OrdinalIgnoreCase);
+
+            onToolEvent?.Invoke(new ToolEvent(
+                denied ? (result!.StartsWith("Plan-only:", StringComparison.OrdinalIgnoreCase)
+                    ? ToolEventPhase.Planned
+                    : ToolEventPhase.Denied)
+                    : ToolEventPhase.Finished,
+                call.Name,
+                detail,
+                SummarizeResult(result),
+                isError));
+
+            onStatus?.Invoke(DescribeToolDone(call, result));
+            toolLog.Add($"{call.Name}: {SummarizeResult(result)}");
+        }
+
         public static string DescribeToolStart(OpenRouterToolCall call)
         {
             string name = call.Name ?? string.Empty;
@@ -153,10 +203,20 @@ namespace Axiom.Core.Agent
                 "run_shell" => string.IsNullOrWhiteSpace(detail) ? "Running command" : $"Running · {Truncate(detail, 48)}",
                 "read_file" => string.IsNullOrWhiteSpace(detail) ? "Reading files" : $"Reading · {Truncate(detail, 48)}",
                 "write_file" => string.IsNullOrWhiteSpace(detail) ? "Writing files" : $"Writing · {Truncate(detail, 48)}",
+                "str_replace" => string.IsNullOrWhiteSpace(detail) ? "Patching file" : $"Patch · {Truncate(detail, 48)}",
+                "apply_patch" => "Applying patch",
+                "write_files" => "Writing files (batch)",
                 "list_dir" => string.IsNullOrWhiteSpace(detail) ? "Listing files" : $"Listing · {Truncate(detail, 48)}",
                 "download_file" => string.IsNullOrWhiteSpace(detail) ? "Downloading" : $"Downloading · {Truncate(detail, 48)}",
+                "fetch_url" => string.IsNullOrWhiteSpace(detail) ? "Fetching URL" : $"Fetch · {Truncate(detail, 48)}",
                 "search_files" => string.IsNullOrWhiteSpace(detail) ? "Searching" : $"Searching · {Truncate(detail, 48)}",
+                "find_symbol" => string.IsNullOrWhiteSpace(detail) ? "Finding symbol" : $"Symbol · {Truncate(detail, 48)}",
                 "web_search" => string.IsNullOrWhiteSpace(detail) ? "Searching web" : $"Web · {Truncate(detail, 48)}",
+                "run_tests" => "Running tests",
+                "package_install" => string.IsNullOrWhiteSpace(detail) ? "Installing package" : $"Install · {Truncate(detail, 40)}",
+                "docker_run" => "Docker run",
+                "read_csv" => "Reading CSV",
+                "read_notebook" => "Reading notebook",
                 "git_status" => "Git status",
                 "git_diff" => "Git diff",
                 "git_log" => "Git log",
@@ -209,14 +269,16 @@ namespace Axiom.Core.Agent
                 JsonElement root = doc.RootElement;
                 return toolName.ToLowerInvariant() switch
                 {
-                    "run_shell" => GetProp(root, "command"),
-                    "read_file" or "write_file" => GetProp(root, "path"),
+                    "run_shell" or "docker_run" => GetProp(root, "command"),
+                    "read_file" or "write_file" or "str_replace" or "read_csv" or "read_notebook" => GetProp(root, "path"),
                     "list_dir" => GetProp(root, "path"),
-                    "download_file" => GetProp(root, "url"),
+                    "download_file" or "fetch_url" => GetProp(root, "url"),
                     "search_files" or "web_search" => GetProp(root, "query"),
+                    "find_symbol" => GetProp(root, "symbol"),
+                    "package_install" => GetProp(root, "ecosystem") + " " + GetProp(root, "package"),
                     "git_commit" => GetProp(root, "message"),
                     "spawn_subagent" => GetProp(root, "kind") + " " + GetProp(root, "task"),
-                    "diagnostics" => GetProp(root, "prefer"),
+                    "diagnostics" or "run_tests" => GetProp(root, "prefer"),
                     "worktree_create" => GetProp(root, "branch"),
                     "worktree_remove" => GetProp(root, "path"),
                     _ => string.Empty

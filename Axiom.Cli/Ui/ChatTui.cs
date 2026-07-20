@@ -1267,6 +1267,56 @@ internal sealed class ChatTui : IDisposable
         }
     }
 
+    public void HandleNetwork(string? arg)
+    {
+        if (_session == null)
+            return;
+        var net = _session.ToolExecutor.Network;
+        string a = (arg ?? "").Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(a) || a is "status" or "?")
+        {
+            string mode = net.Offline ? "offline" : (net.RequireApproval ? "ask" : "on");
+            PushSystem($"Network: {mode}  ·  /network on | off | ask");
+            return;
+        }
+        if (a is "on" or "online" or "1" or "true")
+        {
+            net.Offline = false;
+            net.RequireApproval = false;
+            PushSystem("Network on — download/fetch/web_search allowed (still respect approval mode).");
+            return;
+        }
+        if (a is "off" or "offline" or "0" or "false")
+        {
+            net.Offline = true;
+            PushSystem("Network offline — outbound tools blocked.");
+            return;
+        }
+        if (a is "ask" or "prompt")
+        {
+            net.Offline = false;
+            net.RequireApproval = true;
+            PushSystem("Network ask — outbound tools require confirmation.");
+            return;
+        }
+        PushSystem("Usage: /network [on|off|ask|status]");
+    }
+
+    public void HandlePolicy()
+    {
+        if (_session == null)
+            return;
+        _session.ToolExecutor.ReloadPolicies();
+        string path = Path.Combine(_session.Workspace.PrimaryRoot, ".axiom", "shell-policy.json");
+        PushSystem("Shell policy:");
+        PushSystem("  Built-in denies: force-push, rm -rf /, curl|sh, drop database, …");
+        PushSystem(File.Exists(path)
+            ? $"  Project overrides: {path}"
+            : $"  Optional overrides: create {path} with {{ \"allow\": [], \"deny\": [] }}");
+        PushSystem("  Secrets in tool output are auto-redacted (API keys, tokens, JWTs).");
+        PushSystem($"  Network: {(_session.ToolExecutor.Network.Offline ? "offline" : _session.ToolExecutor.Network.RequireApproval ? "ask" : "on")}");
+    }
+
     private bool DrainWorkflowNotifications()
     {
         if (_session == null)
@@ -2121,7 +2171,7 @@ internal sealed class ChatTui : IDisposable
             or "/delete" or "/del" or "/rm" or "/undo" or "/mode" or "/resume"
             or "/continue" or "/cont" or "/rename" or "/export" or "/pick" or "/picker" or "/palette"
             or "/checkpoint" or "/cp" or "/plan" or "/changes" or "/accept" or "/reject"
-            or "/replay" or "/jobs" or "/watch" or "/sticky" or "/pr"
+            or "/replay" or "/jobs" or "/watch" or "/sticky" or "/pr" or "/network" or "/offline" or "/policy"
             || head.StartsWith("/t") || head.StartsWith("/m") || head.StartsWith("/c")
             || head.StartsWith("/h") || head.StartsWith("/e") || head.StartsWith("/s")
             || head.StartsWith("/w") || head.StartsWith("/b") || head.StartsWith("/f")
