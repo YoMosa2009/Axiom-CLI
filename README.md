@@ -44,15 +44,18 @@ when a newer version is available.
 | Command | What it does |
 |---|---|
 | `axiom [--model <id>]` | Full-window TUI chat (default). `/` tools · `@` lock folder · `/help` |
-| `axiom config` | Store your OpenRouter API key (encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
+| `axiom config` | Store your OpenRouter API key and/or a self-hosted endpoint (encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
 | `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
 | `axiom update` | Download and install the latest release for your platform |
 
 `axiom chat` remains a supported alias for the default TUI.
 
-Available models: `eidos` (Eidos 1, general-purpose reasoning) and `hepha` (Hepha 1,
-code-specialized) — the same aliases as the desktop app. `axiom code` uses the desktop app's
-Workplace Council default model unless `--model` is given.
+Available models: `eidos` (Eidos 1, general-purpose reasoning), `hepha` (Hepha 1,
+code-specialized) — the same aliases as the desktop app — and `kestral` (Kestral 1), a
+self-hosted OpenAI-compatible endpoint you configure yourself via `axiom config` (base URL,
+model id, and API key). Kestral 1 runs on whatever machine you point it at — useful for using
+your own PC as inference compute from a laptop or another machine. `axiom code` uses the
+desktop app's Workplace Council default model unless `--model` is given.
 
 ### Cross-platform chat TUI
 `axiom` paints its own interface (alternate screen) on **Windows, macOS, and Linux** so the
@@ -91,8 +94,11 @@ No .NET runtime install is required — releases are self-contained.
 
 ## What's not in v1
 
-- **Local model inference.** This release is cloud-only via OpenRouter. The `IChatPipeline`
-  abstraction has a seam for a local backend, but it isn't implemented yet.
+- **In-process local model inference.** This release doesn't run a GGUF/llama.cpp model inside
+  the CLI itself — the `IChatPipeline` abstraction has a seam for that, but it isn't implemented
+  yet. (A self-hosted OpenAI-compatible endpoint you point the CLI at over the network — see
+  `kestral`/`axiom config` above — is supported today; it's still a network call, just to a
+  server you control instead of OpenRouter.)
 - **Visual/artifact rendering, KaTeX math, document ingestion.** These are GUI-specific features
   of the desktop app that don't have a terminal equivalent yet.
 - **MCP connectors** (GitHub/Google/Todoist integrations from the desktop app).

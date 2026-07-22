@@ -319,8 +319,10 @@ internal sealed class ChatTui : IDisposable
 
         _screen.Enter();
 
-        // First-run: popup to paste OpenRouter API key (Enter to submit).
-        if (!session.ChatService.HasValidKey)
+        // First-run: popup to paste OpenRouter API key (Enter to submit). Skipped entirely when
+        // a custom endpoint is already configured -- a custom-endpoint-only user has no
+        // OpenRouter key to enter and shouldn't be trapped behind this modal.
+        if (!session.ChatService.HasValidKey && !session.ChatService.HasValidCustomEndpoint)
         {
             string? key = await PromptApiKeyModalAsync();
             if (string.IsNullOrWhiteSpace(key))
@@ -1833,7 +1835,7 @@ internal sealed class ChatTui : IDisposable
             return;
 
         PushSystem("── Getting started ──────────────────────────────────");
-        bool hasKey = _session.ChatService.HasValidKey;
+        bool hasKey = _session.ChatService.HasValidKey || _session.ChatService.HasValidCustomEndpoint;
         bool hasFolder = _session.Workspace.IsExclusive || _session.Workspace.Roots.Count > 0;
         PushSystem($"{(hasKey ? "✓" : "1.")} API key  {(hasKey ? "(done)" : "— paste when prompted or /help")}");
         PushSystem($"{(hasFolder ? "✓" : "2.")} Lock a folder  — /browse or @ Browse…");

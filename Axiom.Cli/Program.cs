@@ -23,7 +23,8 @@ internal static class Program
     private static readonly (string Id, string Label, string Description)[] ModelCatalog =
     [
         (OpenRouterChatService.Eidos1ModelId, "Eidos 1", "General-purpose reasoning"),
-        (OpenRouterChatService.Hepha1ModelId, "Hepha 1", "Code-specialized")
+        (OpenRouterChatService.Hepha1ModelId, "Hepha 1", "Code-specialized"),
+        (OpenRouterChatService.CustomEndpointModelId, "Kestral 1", "Your self-hosted endpoint")
     ];
 
     private static readonly Regex PathInMessageRegex = new(
@@ -169,7 +170,7 @@ internal static class Program
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"  [{gold}]axiom[/] [[path]] [[--model <id>]] [[--profile <name>]]");
         AnsiConsole.MarkupLine($"                              Full-window TUI (default). path locks workspace.");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key and/or self-hosted endpoint");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--yes]] [[--json]] [[--model <id>]] <task>");
         AnsiConsole.MarkupLine($"                              Council on cwd; --yes auto-apply patch; --json machine output");
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
@@ -228,25 +229,76 @@ internal static class Program
             return Task.FromResult(1);
         }
 
-        string? existing = db.LoadOpenRouterApiKey();
-        if (!string.IsNullOrWhiteSpace(existing))
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]An API key is already configured (ending in ...{Last4(existing)}).[/]");
+        string? existingOpenRouterKey = db.LoadOpenRouterApiKey();
+        if (!string.IsNullOrWhiteSpace(existingOpenRouterKey))
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]An API key is already configured (ending in ...{Last4(existingOpenRouterKey)}).[/]");
 
-        AnsiConsole.Markup($"Enter your [{AxiomTheme.Hex(AxiomTheme.Gold)}]OpenRouter API key[/] (from openrouter.ai/keys): ");
+        AnsiConsole.Markup($"Enter your [{AxiomTheme.Hex(AxiomTheme.Gold)}]OpenRouter API key[/] (from openrouter.ai/keys), or leave blank to skip: ");
         string apiKey = ReadLineSecret() ?? string.Empty;
-
-        if (string.IsNullOrWhiteSpace(apiKey))
+        if (!string.IsNullOrWhiteSpace(apiKey))
         {
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]No key entered.[/]");
+            db.SaveOpenRouterApiKey(apiKey);
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]OpenRouter key saved.[/]");
+        }
+
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine($"[bold]Self-hosted endpoint[/] [{AxiomTheme.Hex(AxiomTheme.SystemMuted)}](optional — leave any field blank to skip)[/]");
+
+        string existingBaseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
+        string? existingCustomKey = db.LoadCustomEndpointApiKey();
+        if (!string.IsNullOrWhiteSpace(existingBaseUrl) || !string.IsNullOrWhiteSpace(existingCustomKey))
+        {
+            string keyHint = string.IsNullOrWhiteSpace(existingCustomKey) ? "" : $", key ending in ...{Last4(existingCustomKey)}";
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Currently configured: {(string.IsNullOrWhiteSpace(existingBaseUrl) ? "(no base URL)" : existingBaseUrl)}{keyHint}[/]");
+        }
+
+        AnsiConsole.Markup("Base URL (e.g. https://your-server.example.com/v1): ");
+        string baseUrlInput = (ReadLinePlain() ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(baseUrlInput))
+            db.SaveSetting(DatabaseService.CustomEndpointBaseUrlSettingKey, baseUrlInput);
+
+        AnsiConsole.Markup("Model id (e.g. llama3.1:8b): ");
+        string modelIdInput = (ReadLinePlain() ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(modelIdInput))
+            db.SaveSetting(DatabaseService.CustomEndpointModelIdSettingKey, modelIdInput);
+
+        AnsiConsole.Markup("API key: ");
+        string customKeyInput = ReadLineSecret() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(customKeyInput))
+            db.SaveCustomEndpointApiKey(customKeyInput);
+
+        bool configuredCustomEndpoint = !string.IsNullOrWhiteSpace(baseUrlInput)
+            || !string.IsNullOrWhiteSpace(modelIdInput)
+            || !string.IsNullOrWhiteSpace(customKeyInput);
+        if (configuredCustomEndpoint)
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Custom endpoint saved.[/]");
+
+        bool savedAnything = !string.IsNullOrWhiteSpace(apiKey)
+            || !string.IsNullOrWhiteSpace(existingOpenRouterKey)
+            || configuredCustomEndpoint
+            || !string.IsNullOrWhiteSpace(existingBaseUrl);
+        if (!savedAnything)
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Nothing entered.[/]");
             return Task.FromResult(1);
         }
 
-        db.SaveOpenRouterApiKey(apiKey);
-        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Saved.[/] Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom[/] to start chatting.");
+        AnsiConsole.MarkupLine($"Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom[/] to start chatting.");
         return Task.FromResult(0);
     }
 
     private static string Last4(string value) => value.Length <= 4 ? value : value[^4..];
+
+    // Both credentials can coexist on the one shared chatService instance -- which one is
+    // actually used per-request is decided by which model alias is selected, not by which
+    // credential was loaded. Blank values are harmless: HasValidCustomEndpoint just stays false.
+    private static void ApplyStoredCustomEndpoint(DatabaseService db, OpenRouterChatService chatService)
+    {
+        string baseUrl = db.IsReady ? db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey) : string.Empty;
+        string modelId = db.IsReady ? db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey) : string.Empty;
+        string apiKey = db.IsReady ? (db.LoadCustomEndpointApiKey() ?? string.Empty) : string.Empty;
+        chatService.SetCustomEndpoint(baseUrl, apiKey, modelId);
+    }
 
     private static string? ReadLineSecret()
     {
@@ -288,6 +340,7 @@ internal static class Program
         var chatService = new OpenRouterChatService();
         if (!string.IsNullOrWhiteSpace(apiKey))
             chatService.SetApiKey(apiKey);
+        ApplyStoredCustomEndpoint(db, chatService);
 
         var recent = new RecentFoldersStore();
         var workspace = new WorkspaceSession(recent);
@@ -387,14 +440,20 @@ internal static class Program
 
         using var db = new DatabaseService();
         string? apiKey = db.IsReady ? db.LoadOpenRouterApiKey() : null;
-        if (string.IsNullOrWhiteSpace(apiKey))
+
+        var chatService = new OpenRouterChatService();
+        if (!string.IsNullOrWhiteSpace(apiKey))
+            chatService.SetApiKey(apiKey);
+        ApplyStoredCustomEndpoint(db, chatService);
+
+        if (!chatService.HasAnyValidCloudCredential)
         {
             if (jsonFlag)
             {
-                Console.WriteLine(JsonSerializer.Serialize(new { ok = false, error = "No OpenRouter API key. Run axiom config." }));
+                Console.WriteLine(JsonSerializer.Serialize(new { ok = false, error = "No OpenRouter API key or custom endpoint configured. Run axiom config." }));
                 return 1;
             }
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Warning)}]No OpenRouter API key configured.[/] Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom config[/] first.");
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Warning)}]No OpenRouter API key or custom endpoint configured.[/] Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom config[/] first.");
             return 1;
         }
 
@@ -415,8 +474,6 @@ internal static class Program
             councilModelLabel = profile.DefaultModelLabel ?? councilModelId;
         }
 
-        var chatService = new OpenRouterChatService();
-        chatService.SetApiKey(apiKey);
         IChatPipeline pipeline = new CloudChatPipeline(chatService, councilModelId);
         var workspaceAccess = new WorkspaceAccessService();
 
@@ -849,7 +906,7 @@ internal static class Program
                 Say("  Ctrl+Shift+M          Cycle approval mode auto→ask→plan");
                 Say("  /tools [name on|off]  Toggle council / calculator / web-search / sandbox");
                 Say("  /mode [auto|ask|plan] Approval mode for writes/shell");
-                Say("  /model [eidos|hepha]  Switch cloud model");
+                Say("  /model [eidos|hepha|kestral]  Switch cloud model");
                 Say("  /browse               Open file explorer and pick a work folder");
                 Say("  /workspace [path]     Show or lock the agent work folder");
                 Say("  @                     Recent folders + Browse… (native picker)");

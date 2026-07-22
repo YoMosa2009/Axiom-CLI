@@ -11,6 +11,9 @@ namespace Axiom.Core.Persistence
     public class DatabaseService : IDisposable
     {
         private const string OpenRouterApiKeySettingKey = "openrouter_api_key";
+        private const string CustomEndpointApiKeySettingKey = "custom_endpoint_api_key";
+        public const string CustomEndpointBaseUrlSettingKey = "custom_endpoint_base_url";
+        public const string CustomEndpointModelIdSettingKey = "custom_endpoint_model_id";
         private readonly SqliteConnection _connection;
         private readonly ISecretStore _secretStore;
         private readonly object _gate = new();
@@ -309,6 +312,49 @@ namespace Axiom.Core.Persistence
             {
                 Debug.WriteLine($"LoadOpenRouterApiKey error: {ex.Message}");
                 _ = BackendLogService.LogErrorAsync("DatabaseService.LoadOpenRouterApiKey", ex);
+                return null;
+            }
+        }
+
+        public void SaveCustomEndpointApiKey(string apiKey)
+        {
+            if (!IsReady) return;
+
+            try
+            {
+                string normalized = (apiKey ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(normalized))
+                {
+                    SaveSetting(CustomEndpointApiKeySettingKey, string.Empty);
+                    return;
+                }
+
+                SaveSetting(CustomEndpointApiKeySettingKey, _secretStore.Protect(normalized));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"SaveCustomEndpointApiKey error: {ex.Message}");
+                _ = BackendLogService.LogErrorAsync("DatabaseService.SaveCustomEndpointApiKey", ex);
+            }
+        }
+
+        public string? LoadCustomEndpointApiKey()
+        {
+            if (!IsReady) return null;
+
+            try
+            {
+                string stored = GetSetting(CustomEndpointApiKeySettingKey);
+                if (string.IsNullOrWhiteSpace(stored))
+                    return null;
+
+                string decryptedKey = _secretStore.Unprotect(stored).Trim();
+                return string.IsNullOrWhiteSpace(decryptedKey) ? null : decryptedKey;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"LoadCustomEndpointApiKey error: {ex.Message}");
+                _ = BackendLogService.LogErrorAsync("DatabaseService.LoadCustomEndpointApiKey", ex);
                 return null;
             }
         }

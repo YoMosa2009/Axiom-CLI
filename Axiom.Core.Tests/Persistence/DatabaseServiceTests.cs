@@ -42,5 +42,27 @@ namespace Axiom.Core.Tests.Persistence
             db.SaveSetting("theme", "dark");
             Assert.Equal("dark", db.GetSetting("theme"));
         }
+
+        [Fact]
+        public void SaveAndLoadCustomEndpointApiKey_RoundTrips()
+        {
+            using var db = CreateIsolatedDatabase();
+
+            Assert.Null(db.LoadCustomEndpointApiKey());
+            db.SaveCustomEndpointApiKey("custom-secret-key");
+            Assert.Equal("custom-secret-key", db.LoadCustomEndpointApiKey());
+        }
+
+        [Fact]
+        public void SaveAndGetCustomEndpointBaseUrlAndModelId_RoundTrip()
+        {
+            using var db = CreateIsolatedDatabase();
+
+            db.SaveSetting(DatabaseService.CustomEndpointBaseUrlSettingKey, "https://ai.axiominference.work/v1");
+            db.SaveSetting(DatabaseService.CustomEndpointModelIdSettingKey, "llama3.1:8b");
+
+            Assert.Equal("https://ai.axiominference.work/v1", db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey));
+            Assert.Equal("llama3.1:8b", db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey));
+        }
     }
 }

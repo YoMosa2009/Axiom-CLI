@@ -68,6 +68,7 @@ internal static class CommandPalette
             new() { Id = "sandbox-off", Label = "Sandbox off", Description = "Disable Python sandbox", Action = "/tools sandbox off" },
             new() { Id = "model-eidos", Label = "Model: Eidos 1", Description = "General reasoning", Action = "/model eidos" },
             new() { Id = "model-hepha", Label = "Model: Hepha 1", Description = "Code-specialized", Action = "/model hepha" },
+            new() { Id = "model-kestral", Label = "Model: Kestral 1", Description = "Your self-hosted endpoint", Action = "/model kestral" },
             new() { Id = "resume", Label = "Resume last session", Description = "Load most recent save", Action = "/resume" },
             new() { Id = "exit", Label = "Exit", Description = "Leave Axiom", Action = "/exit" },
         ];
