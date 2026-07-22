@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using Spectre.Console;
@@ -37,7 +38,46 @@ internal static class ConsoleUi
         }
         catch { /* some hosts lock encoding */ }
 
+        EnableWindowsVirtualTerminalProcessing();
+
         try { Console.Out.Flush(); } catch { }
+    }
+
+    private const int StdOutputHandle = -11;
+    private const uint EnableVirtualTerminalProcessing = 0x0004;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    // Windows Terminal interprets ANSI/VT escape sequences (cursor moves, truecolor, alt-screen)
+    // regardless of console mode, but the legacy conhost.exe-hosted Command Prompt/PowerShell
+    // console -- still common on Windows 10 -- only does so once this flag is explicitly set on
+    // the output handle. Without it, every raw escape sequence this app writes (TerminalScreen's
+    // full-screen chat UI, the API key modal, etc.) prints as literal garbled text instead of
+    // being interpreted. No-op (and harmless) on macOS/Linux and on hosts that already have it on.
+    private static void EnableWindowsVirtualTerminalProcessing()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        try
+        {
+            IntPtr handle = GetStdHandle(StdOutputHandle);
+            if (handle == IntPtr.Zero || handle == new IntPtr(-1))
+                return;
+
+            if (!GetConsoleMode(handle, out uint mode))
+                return;
+
+            SetConsoleMode(handle, mode | EnableVirtualTerminalProcessing);
+        }
+        catch { /* best-effort -- if this fails, behavior falls back to whatever the host does */ }
     }
 
     public static void ShowWelcome(
