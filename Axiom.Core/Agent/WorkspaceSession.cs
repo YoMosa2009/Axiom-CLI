@@ -272,7 +272,7 @@ namespace Axiom.Core.Agent
             return true;
         }
 
-        public string BuildContextBlock()
+        public string BuildContextBlock(int maxSampleEntries = 120)
         {
             List<string> roots;
             bool exclusive;
@@ -301,7 +301,7 @@ namespace Axiom.Core.Agent
 
             // Snapshot of paths so the model sees the project without a tool round first.
             string primary = roots[0];
-            List<string> sample = SampleRelativePaths(primary, maxEntries: 120);
+            List<string> sample = SampleRelativePaths(primary, maxEntries: maxSampleEntries);
             if (sample.Count > 0)
             {
                 sb.AppendLine();

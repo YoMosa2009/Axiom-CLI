@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Axiom.Core.Chat;
@@ -51,10 +52,23 @@ namespace Axiom.Core.Agent
             bool failed = false;
             bool cancelled = false;
 
-            TaskSpecialty specialty = IntelligenceHelpers.DetectSpecialty(userMessage);
-            string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt(_tools.ApprovalMode, specialty));
+            // Kestral (the custom endpoint) has a real ~8k-token window vs. a 131k+ cloud window --
+            // repo map / retrieval / few-shot are the most expendable per-turn additions (highest
+            // token cost relative to value on a "hello"-shaped message), so skip them unless the
+            // message actually looks like it needs codebase context.
+            bool isCustomEndpoint = string.Equals(_modelId, OpenRouterChatService.CustomEndpointModelId, StringComparison.OrdinalIgnoreCase);
+            bool looksLikeEdit = CouncilOrchestrator.LooksLikeCodeEditRequest(userMessage);
+            bool includeExpensiveContext = !isCustomEndpoint || looksLikeEdit;
 
-            string workspaceBlock = _workspace.BuildContextBlock();
+            TaskSpecialty specialty = IntelligenceHelpers.DetectSpecialty(userMessage);
+            // Same tool list ToolCallingLoop.RunAsync will independently (but deterministically)
+            // resolve below -- computed here too so the system prompt's tool enumeration matches
+            // what's actually offered instead of a static ~19-tool catalog. A genuine simplification
+            // for every model: the filter is a no-op unless isCustomEndpoint is true.
+            var toolsForPrompt = _tools.GetToolDefinitions(AgentToolExecutor.ToolScope.Full, userMessage, isCustomEndpoint);
+            string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt(_tools.ApprovalMode, specialty, toolsForPrompt, isCustomEndpoint));
+
+            string workspaceBlock = _workspace.BuildContextBlock(isCustomEndpoint ? 40 : 120);
             string memory = ProjectMemory.BuildContextBlock(_workspace.PrimaryRoot);
             string sticky = _tools.Workflow.ConsumeStickyPrefix() ?? string.Empty;
             string planBlock = _tools.Workflow.Plan.ToPromptBlock();
@@ -72,7 +86,7 @@ namespace Axiom.Core.Agent
 
             try
             {
-                if (!string.IsNullOrWhiteSpace(root))
+                if (!string.IsNullOrWhiteSpace(root) && includeExpensiveContext)
                 {
                     onStatus?.Invoke("Mapping repo");
                     repoMap = RepoMapService.Build(root);
@@ -81,7 +95,7 @@ namespace Axiom.Core.Agent
             }
             catch { /* optional */ }
 
-            string fewShot = IntelligenceHelpers.FewShotFromHistory(history, userMessage);
+            string fewShot = includeExpensiveContext ? IntelligenceHelpers.FewShotFromHistory(history, userMessage) : string.Empty;
             string? regression = _tools.Workflow.RegressionGuardBlock();
             string specialtyBlock = IntelligenceHelpers.SpecialtyPromptBlock(specialty);
 
@@ -142,7 +156,9 @@ namespace Axiom.Core.Agent
                     cancellationToken,
                     AgentToolExecutor.ToolScope.Full,
                     onToolEvent: onToolEvent,
-                    onToken: onToken);
+                    onToken: onToken,
+                    gateForCustomEndpoint: isCustomEndpoint,
+                    gatingMessage: userMessage);
 
                 finalText = result.FinalText;
                 toolCalls = result.ToolCallCount;
@@ -177,6 +193,39 @@ namespace Axiom.Core.Agent
                     && !(finalText ?? "").Contains("REGRESSION", StringComparison.Ordinal))
                 {
                     // soft: already injected on next turn
+                }
+
+                // A small model can narrate "I've made the change" without ever emitting a real
+                // tool call (calls.Count stays 0, or it just echoes the last tool observation back)
+                // -- give it exactly one explicit nudge before accepting nothing happened as done.
+                if (isCustomEndpoint && looksLikeEdit && !cancelled
+                    && _tools.WrittenPaths.Count == 0
+                    && (toolCalls == 0 || result.LooksLikeObservationEcho))
+                {
+                    onStatus?.Invoke("No tool calls detected — retrying with explicit instruction");
+                    string nudgedInput = effectiveUser +
+                        "\n\n[NO TOOL CALLS DETECTED] You MUST call write_file or str_replace now to make " +
+                        "the requested change on disk — describing the change is not sufficient. Call a tool before responding.";
+                    ToolCallingResult retryResult = await loop.RunAsync(
+                        system,
+                        nudgedInput,
+                        onStatus,
+                        cancellationToken,
+                        AgentToolExecutor.ToolScope.Full,
+                        onToolEvent: onToolEvent,
+                        onToken: onToken,
+                        gateForCustomEndpoint: isCustomEndpoint,
+                        gatingMessage: userMessage);
+
+                    finalText = retryResult.FinalText;
+                    toolCalls += retryResult.ToolCallCount;
+                    cancelled = retryResult.Cancelled;
+
+                    if (!cancelled && _tools.WrittenPaths.Count == 0 && retryResult.ToolCallCount == 0)
+                    {
+                        finalText = (finalText ?? string.Empty).TrimEnd()
+                            + "\n\n⚠ No files were changed for this request — the model did not call any tools.";
+                    }
                 }
             }
             catch (OperationCanceledException)
@@ -239,7 +288,11 @@ namespace Axiom.Core.Agent
             }
         }
 
-        private static string BuildAgentSystemPrompt(ApprovalMode mode, TaskSpecialty specialty)
+        private static string BuildAgentSystemPrompt(
+            ApprovalMode mode,
+            TaskSpecialty specialty,
+            IReadOnlyList<OpenRouterToolDefinition>? availableTools = null,
+            bool isCustomEndpoint = false)
         {
             string approval = mode switch
             {
@@ -256,6 +309,16 @@ namespace Axiom.Core.Agent
                 ? IntelligenceHelpers.DualPassInstruction + "\n"
                 : "";
 
+            // Verified directly against the real endpoint: a small self-hosted model reliably uses
+            // its own native <tool_call>[...] format when told the EXACT syntax explicitly -- but
+            // improvises a different, unparseable pseudo-format (code-fenced pseudo function calls,
+            // prose descriptions, etc.) when only told "use your tools" without specifying how.
+            string toolCallFormatInstruction = isCustomEndpoint
+                ? "\nTo call a tool, respond with EXACTLY this format and nothing else: " +
+                  "<tool_call>[{\"name\": \"tool_name\", \"arguments\": {\"key\": \"value\"}}]. " +
+                  "Do not use code fences, Python syntax, or prose descriptions of the call — only that exact tag and JSON array."
+                : "";
+
             return
                 "You are Axiom, a terminal coding agent with tools for shell, files, git, search, diagnostics, and downloads.\n" +
                 approval +
@@ -265,10 +328,14 @@ namespace Axiom.Core.Agent
                 "the user's local project is connected — use tools; never claim you lack access.\n" +
                 "Use [[REPO MAP]] and [[REPO RETRIEVAL]] before blind searches when helpful.\n" +
                 "Follow [[PROJECT MEMORY]] conventions when present (AXIOM.md / AGENTS.md).\n" +
-                "Tools include: write_file, str_replace (preferred for small edits), apply_patch, write_files, " +
-                "read_file (offset/limit), list_dir, search_files, find_symbol, run_shell, " +
-                "git_*, diagnostics, run_tests, package_install, docker_run, fetch_url, read_csv, read_notebook, " +
-                "worktree_*, spawn_subagent, plan_board, run_background, open_pr, web_search.\n" +
+                "Tools available this turn: " +
+                (availableTools is { Count: > 0 }
+                    ? string.Join(", ", availableTools.Select(t => t.Name))
+                    : "write_file, str_replace (preferred for small edits), apply_patch, write_files, " +
+                      "read_file (offset/limit), list_dir, search_files, find_symbol, run_shell, " +
+                      "git_*, diagnostics, run_tests, package_install, docker_run, fetch_url, read_csv, read_notebook, " +
+                      "worktree_*, spawn_subagent, plan_board, run_background, open_pr, web_search") + "." +
+                toolCallFormatInstruction + "\n" +
                 "Prefer str_replace/apply_patch over full-file write_file when editing existing files.\n" +
                 "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n" +
                 "When [[REGRESSION GUARD]] lists failed tests, re-run them before claiming done.\n" +

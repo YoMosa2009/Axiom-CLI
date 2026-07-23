@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Axiom.Core.Chat;
 using Axiom.Core.Workspace;
 
 namespace Axiom.Core.Council
@@ -21,6 +22,25 @@ namespace Axiom.Core.Council
         bool PostMergeCritic = true)
     {
         public static CouncilToolOptions Default { get; } = new();
+
+        // A small self-hosted model doesn't need the full-weight council pipeline by default:
+        // ParallelExplore and PostMergeCritic each add a whole extra round-trip (and the Explore
+        // lane has been observed hallucinating "file already created" text that then poisons the
+        // Builder's own context), and Strict severity forces a revision pass over low-severity
+        // nitpicks that read as pointless looping on a small model. This must be called from every
+        // entry point that constructs CouncilToolOptions for a run -- eidos/hepha are unaffected.
+        public static CouncilToolOptions ForModel(CouncilToolOptions baseOptions, string modelId)
+        {
+            if (!string.Equals(modelId, OpenRouterChatService.CustomEndpointModelId, StringComparison.OrdinalIgnoreCase))
+                return baseOptions;
+
+            return baseOptions with
+            {
+                ParallelExplore = false,
+                PostMergeCritic = false,
+                SeverityPolicy = CriticSeverityPolicy.HighAndAbove
+            };
+        }
     }
 
     /// <summary>

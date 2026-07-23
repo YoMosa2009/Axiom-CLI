@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -48,7 +49,8 @@ internal sealed class ChatSession
             agentTools: ToolExecutor);
     }
 
-    public CouncilToolOptions CouncilTools() => Tools.ToCouncilTools();
+    public CouncilToolOptions CouncilTools()
+        => CouncilToolOptions.ForModel(Tools.ToCouncilTools(), ModelId);
 
     public (int Used, int Max) EstimateContext()
     {

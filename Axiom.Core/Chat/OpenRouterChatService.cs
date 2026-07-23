@@ -212,7 +212,7 @@ namespace Axiom.Core.Chat
         // The system prompt cap must comfortably exceed the normal-chat cloud document budget
         // (document context is appended at the *end* of the system prompt — a tail-truncating
         // cap below that budget silently severs attached documents from the model).
-        private const int SystemPromptCharacterLimit = 80000;
+        private const int SystemPromptCharacterLimitCloud = 80000;
         private const int PerHistoryMessageCharacterLimit = 8000;
         private const int ConversationHistoryCharacterBudget = 48000;
         private const int ConversationHistoryMessageLimit = 24;
@@ -327,6 +327,22 @@ namespace Axiom.Core.Chat
             return profile.IsCustomEndpoint
                 ? profile.ApproximateContextWindowTokens
                 : Math.Max(32768, profile.ApproximateContextWindowTokens);
+        }
+
+        // SystemPromptCharacterLimitCloud (80,000 chars) exists so a real 131k+-token cloud window
+        // never gets tail-truncated. A custom endpoint's real window can be a small fraction of
+        // that -- reserve roughly the same "leave most of the window for other prompt content"
+        // ratio Malx_AI's WorkplaceView.CloudIntelligence.cs already validated for its own Hybrid
+        // Local system-prompt budget (~35% of window at ~3.5 chars/token), scaled to the real
+        // window instead of hardcoding 80,000 chars for every model.
+        private int GetSystemPromptCharacterLimit(OpenRouterModelProfile profile)
+        {
+            if (!profile.IsCustomEndpoint)
+                return SystemPromptCharacterLimitCloud;
+
+            const double systemPromptShareOfWindow = 0.35;
+            const double approxCharsPerToken = 3.5;
+            return (int)(profile.ApproximateContextWindowTokens * systemPromptShareOfWindow * approxCharsPerToken);
         }
 
         public OpenRouterInferenceSettingsSnapshot GetInferenceSettingsSnapshot(string modelId, bool isCodingRequest = false, bool isPythonRequest = false)
@@ -760,8 +776,8 @@ namespace Axiom.Core.Chat
             // Non-negotiable behavioral foundation for every cloud model, applied at the request
             // choke point so no caller-supplied prompt can omit it.
             systemPrompt = FoundationSystemPrompt.Apply(systemPrompt);
-            const int maxCompletionTokens = 8192;
-            systemPrompt = Truncate(systemPrompt, SystemPromptCharacterLimit);
+            int maxCompletionTokens = ResolveDefaultMaxCompletionTokens(requestedModelProfile);
+            systemPrompt = Truncate(systemPrompt, GetSystemPromptCharacterLimit(requestedModelProfile));
             int promptTokenBudget = GetPromptTokenBudget(requestedModelProfile, maxCompletionTokens, tools);
             messages = TrimConversationHistory(
                 messages,
@@ -877,10 +893,12 @@ namespace Axiom.Core.Chat
                     if (firstChoice.TryGetProperty("message", out JsonElement message))
                     {
                         SetDetectedModel(requestedModelProfile.AliasId, requestedModelProfile.AliasLabel);
+                        (string finalContent, IReadOnlyList<OpenRouterToolCall> finalCalls) = ApplyFallbackTextToolCalls(
+                            ExtractMessageContent(message), ExtractToolCalls(message), tools);
                         return new OpenRouterChatResponse(
-                            ExtractMessageContent(message),
+                            finalContent,
                             ExtractReasoningContent(firstChoice, message),
-                            ExtractToolCalls(message),
+                            finalCalls,
                             usage);
                     }
                 }
@@ -924,8 +942,10 @@ namespace Axiom.Core.Chat
             // Non-negotiable behavioral foundation for every cloud model, applied at the request
             // choke point so no caller-supplied prompt can omit it.
             systemPrompt = FoundationSystemPrompt.Apply(systemPrompt);
-            int maxCompletionTokens = maxTokensOverride is int tokenLimit && tokenLimit > 0 ? tokenLimit : 8192;
-            systemPrompt = Truncate(systemPrompt, SystemPromptCharacterLimit);
+            int maxCompletionTokens = maxTokensOverride is int tokenLimit && tokenLimit > 0
+                ? tokenLimit
+                : ResolveDefaultMaxCompletionTokens(requestedModelProfile);
+            systemPrompt = Truncate(systemPrompt, GetSystemPromptCharacterLimit(requestedModelProfile));
             int promptTokenBudget = GetPromptTokenBudget(requestedModelProfile, maxCompletionTokens, tools);
             messages = TrimConversationHistory(
                 messages,
@@ -1235,10 +1255,12 @@ namespace Axiom.Core.Chat
 
                 RecordTokenUsage(usage, estimatedPromptTokens);
                 SetDetectedModel(requestedModelProfile.AliasId, requestedModelProfile.AliasLabel);
+                (string finalStreamContent, IReadOnlyList<OpenRouterToolCall> finalStreamCalls) = ApplyFallbackTextToolCalls(
+                    textBuilder.ToString(), BuildStreamingToolCalls(toolCallAccumulators), tools);
                 return new OpenRouterChatResponse(
-                    textBuilder.ToString(),
+                    finalStreamContent,
                     reasoningBuilder.ToString(),
-                    BuildStreamingToolCalls(toolCallAccumulators),
+                    finalStreamCalls,
                     usage);
             }
             catch (Exception ex)
@@ -1538,6 +1560,17 @@ namespace Axiom.Core.Chat
             return payload;
         }
 
+        // A real OpenRouter window is 131k+ tokens, so requesting an 8192-token completion still
+        // leaves comfortable room for input. Kestral's real window (CustomEndpointContextWindowTokens)
+        // is only 8192 total -- requesting the same 8192-token completion would leave nothing for
+        // input at all. Keep the reserved output small so most of the window stays available for
+        // the actual prompt.
+        private static int ResolveDefaultMaxCompletionTokens(OpenRouterModelProfile profile)
+            => profile.IsCustomEndpoint ? 1536 : 8192;
+
+        // Kept in sync with GetSystemPromptCharacterLimit / ResolveDefaultMaxCompletionTokens above --
+        // both exist because a small custom-endpoint window can't absorb budgets sized for a 131k+
+        // cloud window.
         private int GetPromptTokenBudget(
             OpenRouterModelProfile modelProfile,
             int maxCompletionTokens,
@@ -1546,7 +1579,26 @@ namespace Axiom.Core.Chat
             int contextWindow = Math.Max(4096, modelProfile.ApproximateContextWindowTokens);
             int safetyMargin = Math.Max(1024, contextWindow / 100);
             int toolTokens = EstimateToolDefinitionTokens(tools);
-            return Math.Max(2048, contextWindow - Math.Max(1, maxCompletionTokens) - safetyMargin - toolTokens);
+            // Self-corrects even if a caller passes an oversized maxCompletionTokens for a small
+            // window: never let the reserved completion alone claim more than a quarter of the
+            // real context. For a 131k+ window this clamps to 32768+, far above the 8192 request
+            // cap already in use elsewhere, so it's a no-op for every real OpenRouter profile.
+            int effectiveCompletionTokens = Math.Min(Math.Max(1, maxCompletionTokens), Math.Max(1, contextWindow / 4));
+            // The universal 2048 floor below is sized for 131k+ cloud windows, where reserving
+            // 2048 tokens still leaves the vast majority of the window for input. An 8192-token
+            // custom endpoint has no such slack -- flooring at 2048 there would still crowd out
+            // input once completion + margin + tools are subtracted. Use a smaller, window-relative
+            // floor for custom endpoints instead.
+            int floor = modelProfile.IsCustomEndpoint ? Math.Max(512, Math.Min(1024, contextWindow / 4)) : 2048;
+            return Math.Max(floor, contextWindow - effectiveCompletionTokens - safetyMargin - toolTokens);
+        }
+
+        // Public wrapper so the budget math above is directly unit-testable without needing a
+        // live request in flight.
+        public int GetPromptTokenBudgetForModel(string modelId, int maxCompletionTokens, IReadOnlyList<OpenRouterToolDefinition>? tools = null)
+        {
+            OpenRouterModelProfile profile = ResolveRequestedModelProfile(modelId);
+            return GetPromptTokenBudget(profile, maxCompletionTokens, tools);
         }
 
         private int EstimateRequestPromptTokens(
@@ -1773,6 +1825,69 @@ namespace Axiom.Core.Chat
                 parts.Add(ExtractReasoningPartsFromContent(content));
 
             return string.Join("\n\n", parts.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.Ordinal));
+        }
+
+        // Confirmed directly against the real self-hosted endpoint: granite3.2:8b (and potentially
+        // other small local instruct models reached via a custom endpoint) sometimes narrates a
+        // tool call as literal text instead of populating the API's structured tool_calls field --
+        // e.g. content = "<tool_call>[{\"name\":\"write_file\",\"arguments\":{...}}]". Left alone,
+        // this tool call is permanently inert: ToolCallingLoop only ever executes structured
+        // tool_calls, so the model's narrated intent to write a file silently never happens, no
+        // matter how explicitly it was asked to use the tool. Parsing this fallback shape out here
+        // means the rest of the pipeline sees a normal tool call and actually executes it.
+        // Granite's own chat template documents the pipe-wrapped <|tool_call|> tag, but empirically
+        // (confirmed directly against the real endpoint) the model actually emits the non-piped
+        // <tool_call> form -- accept both so this survives either.
+        private static readonly Regex FallbackTextToolCallRegex = new(
+            @"<\|?tool_call\|?>\s*(\[.*?\])\s*(?:<\|?/tool_call\|?>)?",
+            RegexOptions.Compiled | RegexOptions.Singleline);
+
+        private static (string Content, IReadOnlyList<OpenRouterToolCall> ToolCalls) ApplyFallbackTextToolCalls(
+            string content,
+            IReadOnlyList<OpenRouterToolCall> structuredCalls,
+            IReadOnlyList<OpenRouterToolDefinition>? tools)
+        {
+            // Only ever attempted when tools were actually offered this request and the API
+            // returned none -- never touches a plain-chat response with no tools in play.
+            if (structuredCalls.Count > 0 || tools is not { Count: > 0 } || string.IsNullOrWhiteSpace(content))
+                return (content, structuredCalls);
+
+            Match match = FallbackTextToolCallRegex.Match(content);
+            if (!match.Success)
+                return (content, structuredCalls);
+
+            var parsed = new List<OpenRouterToolCall>();
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(match.Groups[1].Value);
+                if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement item in doc.RootElement.EnumerateArray())
+                    {
+                        if (!item.TryGetProperty("name", out JsonElement nameEl))
+                            continue;
+                        string name = nameEl.GetString() ?? string.Empty;
+                        if (string.IsNullOrWhiteSpace(name))
+                            continue;
+
+                        string argsJson = item.TryGetProperty("arguments", out JsonElement argsEl)
+                            ? argsEl.GetRawText()
+                            : "{}";
+
+                        parsed.Add(new OpenRouterToolCall(Guid.NewGuid().ToString("N"), name, argsJson));
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                return (content, structuredCalls);
+            }
+
+            if (parsed.Count == 0)
+                return (content, structuredCalls);
+
+            string cleanedContent = FallbackTextToolCallRegex.Replace(content, string.Empty).Trim();
+            return (cleanedContent, parsed);
         }
 
         private static IReadOnlyList<OpenRouterToolCall> ExtractToolCalls(JsonElement message)

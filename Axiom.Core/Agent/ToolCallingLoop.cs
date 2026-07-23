@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Axiom.Core.Chat;
+using Axiom.Core.Tools;
 
 namespace Axiom.Core.Agent
 {
@@ -13,7 +14,8 @@ namespace Axiom.Core.Agent
         string FinalText,
         int ToolCallCount,
         IReadOnlyList<string> ToolLog,
-        bool Cancelled = false);
+        bool Cancelled = false,
+        bool LooksLikeObservationEcho = false);
 
     // Bounded multi-round tool loop shared by AgentLoop, council Builder/Critic, and subagents.
     public sealed class ToolCallingLoop
@@ -44,14 +46,20 @@ namespace Axiom.Core.Agent
             CancellationToken cancellationToken,
             AgentToolExecutor.ToolScope scope = AgentToolExecutor.ToolScope.Full,
             Action<ToolEvent>? onToolEvent = null,
-            Action<string>? onToken = null)
+            Action<string>? onToken = null,
+            bool gateForCustomEndpoint = false,
+            string? gatingMessage = null)
         {
             var turnMessages = new List<OpenRouterMessage>
             {
                 new("user", userMessage, PreserveFullText: true)
             };
 
-            IReadOnlyList<OpenRouterToolDefinition> toolDefs = _tools.GetToolDefinitions(scope);
+            // Gate against the raw user request, not `userMessage` -- callers (AgentLoop, Council's
+            // Builder) often pass a much larger assembled blob here (workspace context, repo map,
+            // few-shot, etc.) whose incidental keywords would defeat the gating heuristics. Falls
+            // back to `userMessage` for callers that don't have a separate raw message handy.
+            IReadOnlyList<OpenRouterToolDefinition> toolDefs = _tools.GetToolDefinitions(scope, gatingMessage ?? userMessage, gateForCustomEndpoint);
             var toolLog = new List<string>();
             int toolCalls = 0;
             string finalText = string.Empty;
@@ -163,7 +171,14 @@ namespace Axiom.Core.Agent
                 }
             }
 
-            return new ToolCallingResult(finalText, toolCalls, toolLog, cancelled);
+            // Known small-model failure mode: instead of answering from a tool result, the model
+            // just echoes the observation text back. Cheap, reusable check (also used by the
+            // sub-1B intent router) so callers can fold it into their own "did this turn actually
+            // produce something" verification (see Phase 4 write-verification retries).
+            string toolContext = string.Join("\n", turnMessages.Where(m => m.Role == "tool").Select(m => m.Text));
+            bool looksLikeEcho = LocalToolIntentRouter.IsToolObservationEcho(finalText, toolContext);
+
+            return new ToolCallingResult(finalText, toolCalls, toolLog, cancelled, looksLikeEcho);
         }
 
         private static void EmitToolFinished(

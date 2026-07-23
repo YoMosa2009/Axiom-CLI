@@ -348,8 +348,12 @@ internal sealed class ChatTui : IDisposable
         TryAutoResumeLastSession();
 
         string mode = session.Tools.ApprovalLabel;
+        bool isCustomEndpointModel = string.Equals(session.ModelId, OpenRouterChatService.CustomEndpointModelId, StringComparison.OrdinalIgnoreCase);
+        string councilLabel = session.Tools.CouncilEnabled
+            ? (isCustomEndpointModel ? "on (lite)" : "on")
+            : "off";
         PushSystem(
-            $"Axiom ready · {session.ModelLabel} · council {(session.Tools.CouncilEnabled ? "on" : "off")} · mode {mode} · profile @{_profileName}");
+            $"Axiom ready · {session.ModelLabel} · council {councilLabel} · mode {mode} · profile @{_profileName}");
         PushSystem("Ctrl+K palette · Ctrl+Shift+M mode · Esc stop · /continue · /export · /sessions");
 
         var memFiles = ProjectMemory.ListLoadedFiles(session.Workspace.PrimaryRoot);
@@ -2289,7 +2293,19 @@ internal sealed class ChatTui : IDisposable
         _screen.ShowCursorAt(boxTop + 2 + row, Math.Min(w, 3 + col));
     }
 
-    private int inputContentRows(int w) => 2;
+    private int inputContentRows(int w)
+    {
+        // Must actually measure the wrapped input, not return a fixed constant -- otherwise
+        // PaintInputBox's content.Take(contentRows) silently drops every wrapped line past the
+        // 2nd, and the cursor gets clamped to row 0-1 forever once typing goes past it.
+        int inner = Math.Max(10, w - 4);
+        string display = string.IsNullOrEmpty(_input)
+            ? "Message Axiom…  (/ tools · @ folders · Enter send)"
+            : _input;
+        int wrapped = Wrap(display, inner).Count;
+        int maxRows = Math.Max(2, _screen.Height / 2); // leave room for header/transcript/menu
+        return Math.Clamp(wrapped, 2, maxRows);
+    }
 
     private int ComputeInputHeight(int w) => 1 + inputContentRows(w) + 1 + 1; // top + content + bottom + model
 

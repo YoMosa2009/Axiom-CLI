@@ -89,7 +89,19 @@ namespace Axiom.Core.Agent
             Inspect
         }
 
-        public IReadOnlyList<OpenRouterToolDefinition> GetToolDefinitions(ToolScope scope = ToolScope.Full)
+        public IReadOnlyList<OpenRouterToolDefinition> GetToolDefinitions(
+            ToolScope scope = ToolScope.Full,
+            string? userMessage = null,
+            bool gateForCustomEndpoint = false)
+        {
+            IReadOnlyList<OpenRouterToolDefinition> fullList = BuildToolDefinitions(scope);
+            if (!gateForCustomEndpoint)
+                return fullList;
+
+            return ToolGatingHeuristics.Filter(fullList, userMessage, _workspace.Roots.Count > 0);
+        }
+
+        private List<OpenRouterToolDefinition> BuildToolDefinitions(ToolScope scope)
         {
             var tools = new List<OpenRouterToolDefinition>
             {

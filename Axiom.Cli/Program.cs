@@ -254,6 +254,12 @@ internal static class Program
 
         AnsiConsole.Markup("Base URL (e.g. https://your-server.example.com/v1): ");
         string baseUrlInput = (ReadLinePlain() ?? string.Empty).Trim();
+        bool baseUrlLooksValid = string.IsNullOrWhiteSpace(baseUrlInput)
+            || (Uri.TryCreate(baseUrlInput, UriKind.Absolute, out Uri? parsedBaseUrl) && parsedBaseUrl.Scheme == Uri.UriSchemeHttps);
+        if (!baseUrlLooksValid)
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]That doesn't look like a valid https:// URL — it won't work for the self-hosted endpoint. Saving it anyway, but you'll need to fix it (re-run 'axiom config') before Kestral 1 will work.[/]");
+        }
         if (!string.IsNullOrWhiteSpace(baseUrlInput))
             db.SaveSetting(DatabaseService.CustomEndpointBaseUrlSettingKey, baseUrlInput);
 
@@ -271,7 +277,34 @@ internal static class Program
             || !string.IsNullOrWhiteSpace(modelIdInput)
             || !string.IsNullOrWhiteSpace(customKeyInput);
         if (configuredCustomEndpoint)
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Custom endpoint saved.[/]");
+        {
+            // "Saved" only ever meant "at least one field was written" -- which silently misled
+            // anyone who filled in 1-2 of the 3 required fields (each independently optional to
+            // *skip*, but all three are required together for HasValidCustomEndpoint to pass).
+            // Report the real, final state instead of a blanket success message.
+            string finalBaseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
+            string finalModelId = db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey);
+            string? finalApiKey = db.LoadCustomEndpointApiKey();
+            var missing = new List<string>();
+            if (string.IsNullOrWhiteSpace(finalBaseUrl)) missing.Add("base URL");
+            if (string.IsNullOrWhiteSpace(finalModelId)) missing.Add("model id");
+            if (string.IsNullOrWhiteSpace(finalApiKey)) missing.Add("API key");
+            bool finalUrlValid = string.IsNullOrWhiteSpace(finalBaseUrl)
+                || (Uri.TryCreate(finalBaseUrl, UriKind.Absolute, out Uri? finalParsed) && finalParsed.Scheme == Uri.UriSchemeHttps);
+
+            if (missing.Count == 0 && finalUrlValid)
+            {
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Custom endpoint saved and ready — 'kestral' is usable now.[/]");
+            }
+            else if (missing.Count == 0)
+            {
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Saved, but the base URL isn't a valid https:// address, so 'kestral' will still report \"not configured\" until it's fixed.[/]");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Saved, but {string.Join(" and ", missing)} still missing — 'kestral' will report \"not configured\" until all three (base URL, model id, API key) are set.[/]");
+            }
+        }
 
         bool savedAnything = !string.IsNullOrWhiteSpace(apiKey)
             || !string.IsNullOrWhiteSpace(existingOpenRouterKey)
@@ -304,7 +337,10 @@ internal static class Program
     {
         if (Console.IsInputRedirected)
             return Console.ReadLine();
-        return AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).Secret());
+        // Every caller prompts with "...or leave blank to skip" -- without AllowEmpty(),
+        // Spectre's TextPrompt silently rejects a bare Enter and re-prompts forever, forcing
+        // the user to type *something* just to move past an optional field.
+        return AnsiConsole.Prompt(new TextPrompt<string>(string.Empty).Secret().AllowEmpty());
     }
 
     private static string? ReadLinePlain()
@@ -505,10 +541,12 @@ internal static class Program
         }
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var codeTools = new CouncilToolOptions(
-            SandboxEnabled: profile.SandboxEnabled || true,
-            WebSearchEnabled: profile.WebSearchEnabled,
-            AgenticBuilderEnabled: true);
+        var codeTools = CouncilToolOptions.ForModel(
+            new CouncilToolOptions(
+                SandboxEnabled: profile.SandboxEnabled || true,
+                WebSearchEnabled: profile.WebSearchEnabled,
+                AgenticBuilderEnabled: true),
+            councilModelId);
         CouncilResult result = await orchestrator.RunAsync(
             new CouncilRequest(task, workspaceState, codeTools),
             jsonFlag ? null : CouncilConsoleRenderer.Create(),

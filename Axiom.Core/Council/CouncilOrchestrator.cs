@@ -56,6 +56,28 @@ namespace Axiom.Core.Council
                && _chat != null
                && _agentTools != null;
 
+        // Used throughout this class to scale round budgets, tool exposure, prompt size, and
+        // context budgets down for a small self-hosted model instead of assuming a large cloud
+        // window everywhere (see Axiom-CLI plan "Fix Axiom-CLI's agent/council behavior on small
+        // local models (kestral)").
+        private bool IsCustomEndpointModel =>
+            string.Equals(_modelId, OpenRouterChatService.CustomEndpointModelId, StringComparison.OrdinalIgnoreCase);
+
+        // WorkspaceContextBudgetChars (60,000) assumes a 131k+-token cloud window. Kestral's real
+        // window can be a small fraction of that -- scale the budget to the real window instead,
+        // using the same ~35%-of-window-at-3.5-chars/token ratio already validated for the
+        // sibling desktop app's Hybrid Local document budget.
+        private int ResolveWorkspaceContextBudgetChars()
+        {
+            if (!IsCustomEndpointModel)
+                return WorkspaceContextBudgetChars;
+
+            int contextWindow = _chat?.GetApproximateContextWindowTokens(_modelId) ?? OpenRouterChatService.CustomEndpointContextWindowTokens;
+            const double workspaceShareOfWindow = 0.35;
+            const double approxCharsPerToken = 3.5;
+            return (int)(contextWindow * workspaceShareOfWindow * approxCharsPerToken);
+        }
+
         public async Task<CouncilResult> RunAsync(
             CouncilRequest request,
             IProgress<CouncilEvent>? progress,
@@ -79,7 +101,7 @@ namespace Axiom.Core.Council
             if (workspaceConnected)
             {
                 WorkspaceContextResult context = _workspace.BuildContextPacket(
-                    request.Workspace!, request.UserPrompt, WorkspaceContextBudgetChars);
+                    request.Workspace!, request.UserPrompt, ResolveWorkspaceContextBudgetChars());
                 workspaceContext = context.Packet;
                 workspaceFilesRead = context.FilesRead;
                 bool hasAccessNotice = workspaceContext.Contains("YOU HAVE ACCESS", StringComparison.Ordinal);
@@ -183,7 +205,7 @@ namespace Axiom.Core.Council
             // ── Architect: plan (desktop Workplace role contract) ─────────────
             Report(progress, CouncilEventKind.Status, "Architect is planning...");
             string architectSystem = FoundationSystemPrompt.Apply(
-                CouncilRolePrompts.Architect(taskKind, workspaceConnected, agentic));
+                CouncilRolePrompts.Architect(taskKind, workspaceConnected, agentic, IsCustomEndpointModel));
             string architectInput = BuildContextualInput(request.UserPrompt, workspaceContext);
             architectPlan = CouncilRolePrompts.StripRoleMarkers(
                 await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken, streamTokens: true));
@@ -243,18 +265,45 @@ namespace Axiom.Core.Council
             }
 
             // ── Builder: implement (agentic tool loop when available) ──────────
+            // Computed once here so the system prompt's tool-name prose matches exactly what
+            // ToolCallingLoop.RunAsync will independently (but deterministically) resolve for the
+            // same inputs -- avoids telling the model about tools it can't actually call this turn.
+            var builderToolsForPrompt = agentic
+                ? _agentTools?.GetToolDefinitions(AgentToolExecutor.ToolScope.Full, request.UserPrompt, IsCustomEndpointModel)
+                : null;
             string builderSystem = FoundationSystemPrompt.Apply(
-                CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, looksLikeEdit));
+                CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, looksLikeEdit, builderToolsForPrompt, IsCustomEndpointModel));
             string builderInput = BuildBuilderInput(request.UserPrompt, architectPlan, workspaceContext);
 
             Report(progress, CouncilEventKind.Status,
                 agentic ? "Builder is implementing with tools..." : "Builder is implementing...");
             _agentTools?.ClearWrittenPaths();
             (builderOutput, int builderTools) = await CallBuilderAsync(
-                builderSystem, builderInput, agentic, progress, cancellationToken);
+                builderSystem, builderInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
             builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
             totalToolCalls += builderTools;
             CollectWrittenFiles(changedFiles);
+
+            // A small model can narrate "I've made the change" without ever emitting a real tool
+            // call or a patch envelope -- give it exactly one explicit nudge before accepting
+            // nothing happened as success (expectPatch is bypassed entirely for agentic Builders,
+            // so without this nothing else would catch this).
+            bool builderWroteNothingForEdit = agentic && IsCustomEndpointModel && looksLikeEdit
+                && _agentTools != null && _agentTools.WrittenPaths.Count == 0
+                && !ContainsPatchEnvelope(builderOutput);
+            if (builderWroteNothingForEdit)
+            {
+                Report(progress, CouncilEventKind.Warning,
+                    "Builder produced no tool calls or patch for an edit request — retrying with an explicit tool-use instruction.");
+                string nudgedInput = builderInput +
+                    "\n\n[NO TOOL CALLS DETECTED] You MUST call write_file or str_replace now to make the " +
+                    "requested change on disk — describing the change is not sufficient. Call a tool before responding.";
+                (builderOutput, int retryTools) = await CallBuilderAsync(
+                    builderSystem, nudgedInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
+                builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
+                totalToolCalls += retryTools;
+                CollectWrittenFiles(changedFiles);
+            }
 
             // Builder self-check: auto diagnostics after writes before Critic
             if (agentic && _agentTools != null && _agentTools.Workflow.AutoDiagnosticsAfterWrite
@@ -306,6 +355,10 @@ namespace Axiom.Core.Council
 
             // ── Critic: static validation + optional sandbox + review/revision ─
             int retries = 0;
+            // Dozens of round-trips (Builder retries x ToolCallingLoop rounds each) reads as
+            // "endless looping" on a small local model even though it's bounded -- cap the retry
+            // budget tighter for the custom endpoint. eidos/hepha keep the original budget.
+            int maxBuilderRetryAttempts = IsCustomEndpointModel ? 1 : MaxBuilderRetryAttempts;
             CriticReport report;
             while (true)
             {
@@ -319,7 +372,7 @@ namespace Axiom.Core.Council
                     criticInput = acceptance + "\n\n" + criticInput;
                 bool criticInspect = agentic && workspaceConnected;
                 string criticSystem = FoundationSystemPrompt.Apply(
-                    CouncilRolePrompts.Critic(taskKind, workspaceConnected, criticInspect));
+                    CouncilRolePrompts.Critic(taskKind, workspaceConnected, criticInspect, IsCustomEndpointModel));
                 (string criticOutput, int criticTools) = await CallCriticAsync(
                     criticSystem, criticInput, criticInspect, progress, cancellationToken);
                 criticOutput = CouncilRolePrompts.StripRoleMarkers(criticOutput);
@@ -353,6 +406,24 @@ namespace Axiom.Core.Council
                     report.HasIssues = true;
                     report.FindingsCount = report.Issues.Count;
                     Report(progress, CouncilEventKind.Warning, "Critic evidence rule: vague clean-pass rejected.");
+                }
+
+                // Still nothing on disk after the Phase-4 nudge above -- do not let this pass as a
+                // clean review just because the Critic (also on a small model) didn't catch it.
+                if (builderWroteNothingForEdit && !builderChangedDisk && retries == 0)
+                {
+                    report.Issues ??= new List<CriticIssue>();
+                    report.Issues.Add(new CriticIssue
+                    {
+                        Severity = "high",
+                        Summary = "Builder did not write any files or produce a patch for an edit request",
+                        Evidence = "No tool calls or [[AXIOM_CODEBASE_PATCH]] envelope were produced, even after an explicit retry",
+                        SuggestedFix = "Re-run with a more explicit instruction to call write_file/str_replace, or break the task into a smaller step."
+                    });
+                    report.Status = "issues";
+                    report.HasIssues = true;
+                    report.FindingsCount = report.Issues.Count;
+                    Report(progress, CouncilEventKind.Warning, "Builder wrote nothing for an edit request — flagging instead of accepting as done.");
                 }
 
                 // Severity policy: only blocking issues force revision
@@ -398,10 +469,10 @@ namespace Axiom.Core.Council
                     }
                 }
 
-                if (retries >= MaxBuilderRetryAttempts)
+                if (retries >= maxBuilderRetryAttempts)
                 {
                     Report(progress, CouncilEventKind.Warning,
-                        $"Builder retry limit reached ({MaxBuilderRetryAttempts}); keeping current output. " +
+                        $"Builder retry limit reached ({maxBuilderRetryAttempts}); keeping current output. " +
                         $"{issueCount} blocking Critic finding(s) remain.");
                     break;
                 }
@@ -411,8 +482,8 @@ namespace Axiom.Core.Council
                     || evidence.SandboxFailed;
                 Report(progress, CouncilEventKind.Status,
                     fullRevision
-                        ? $"Critic found {issueCount} blocking issues — running full revision ({retries}/{MaxBuilderRetryAttempts})..."
-                        : $"Critic found {issueCount} blocking issue(s) — running targeted patch ({retries}/{MaxBuilderRetryAttempts})...");
+                        ? $"Critic found {issueCount} blocking issues — running full revision ({retries}/{maxBuilderRetryAttempts})..."
+                        : $"Critic found {issueCount} blocking issue(s) — running targeted patch ({retries}/{maxBuilderRetryAttempts})...");
 
                 // Revision prompt focuses on blocking (and user-selected) issues
                 string focusedCritic = FormatIssuesForRevision(blocking, criticOutput);
@@ -423,7 +494,7 @@ namespace Axiom.Core.Council
                     request.UserPrompt, architectPlan, workspaceContext, builderOutput, focusedCritic, fullRevision, evidence);
 
                 (builderOutput, int revisionTools) = await CallBuilderAsync(
-                    revisionSystem, revisionInput, agentic, progress, cancellationToken);
+                    revisionSystem, revisionInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
                 builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
                 totalToolCalls += revisionTools;
                 CollectWrittenFiles(changedFiles);
@@ -500,7 +571,7 @@ namespace Axiom.Core.Council
                     postInput += "\n\n[POST-MERGE] Review the applied changes and diagnostics. " +
                                  "Flag regressions only.";
                     string postSystem = FoundationSystemPrompt.Apply(
-                        CouncilRolePrompts.Critic(taskKind, true, agentic));
+                        CouncilRolePrompts.Critic(taskKind, true, agentic, IsCustomEndpointModel));
                     (string postCritic, int postTools) = await CallCriticAsync(
                         postSystem, postInput, agentic, progress, cancellationToken);
                     totalToolCalls += postTools;
@@ -762,7 +833,7 @@ namespace Axiom.Core.Council
                     (agentic
                         ? "\nEither emit a corrected patch envelope OR use write_file tools to apply the edits on disk, then summarize."
                         : "\nOutput ONLY a corrected, valid patch envelope now.");
-                (builderOutput, _) = await CallBuilderAsync(builderSystem, retryInput, agentic, progress, cancellationToken);
+                (builderOutput, _) = await CallBuilderAsync(builderSystem, retryInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
                 Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
             }
 
@@ -774,7 +845,8 @@ namespace Axiom.Core.Council
             string userInput,
             bool agentic,
             IProgress<CouncilEvent>? progress,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? gatingMessage = null)
         {
             if (!agentic || _chat == null || _agentTools == null)
             {
@@ -782,7 +854,9 @@ namespace Axiom.Core.Council
                 return (text, 0);
             }
 
-            var loop = new ToolCallingLoop(_chat, _agentTools, _modelId);
+            // Dozens of rounds on a small local model reads as "endless looping" -- cap tighter
+            // for the custom endpoint. eidos/hepha keep the original 12-round budget.
+            var loop = new ToolCallingLoop(_chat, _agentTools, _modelId, maxRounds: IsCustomEndpointModel ? 6 : ToolCallingLoop.DefaultMaxRounds);
             ToolCallingResult result = await loop.RunAsync(
                 systemPrompt,
                 userInput,
@@ -790,7 +864,9 @@ namespace Axiom.Core.Council
                 cancellationToken,
                 AgentToolExecutor.ToolScope.Full,
                 onToolEvent: ev => ReportToolEvent(progress, "Builder", ev),
-                onToken: tok => progress?.Report(new CouncilEvent(CouncilEventKind.Token, tok)));
+                onToken: tok => progress?.Report(new CouncilEvent(CouncilEventKind.Token, tok)),
+                gateForCustomEndpoint: IsCustomEndpointModel,
+                gatingMessage: gatingMessage);
 
             if (result.ToolCallCount > 0)
             {
