@@ -269,7 +269,11 @@ internal static class Program
             db.SaveSetting(DatabaseService.CustomEndpointModelIdSettingKey, modelIdInput);
 
         int displayedContextWindow = ParseCustomEndpointContextWindow(existingContextWindow);
-        AnsiConsole.Markup($"Context window tokens [{displayedContextWindow}]: ");
+        // Markup() parses [...] as a style tag -- a literal bracket around a number (e.g. the
+        // "[8192]" default hint) must be escaped as [[ ]] or Spectre throws trying to parse
+        // "8192" as a color code. This crashed every single "axiom config" run that reached the
+        // self-hosted endpoint's context-window prompt, always -- there is no unbroken value here.
+        AnsiConsole.Markup($"Context window tokens [[{displayedContextWindow}]]: ");
         string contextWindowInput = (ReadLinePlain() ?? string.Empty).Trim();
         if (!string.IsNullOrWhiteSpace(contextWindowInput))
         {

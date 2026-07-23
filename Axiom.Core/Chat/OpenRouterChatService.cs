@@ -278,7 +278,7 @@ namespace Axiom.Core.Chat
         public const string CustomEndpointModelId = "custom-endpoint";
         public const string CustomEndpointModelLabel = "Kestral 1";
         // Keep in sync with the OLLAMA_CONTEXT_LENGTH the target server actually runs with.
-        public const int CustomEndpointContextWindowTokens = 8192;
+        public const int CustomEndpointContextWindowTokens = 9216;
         public const string DefaultModelId = Eidos1ModelId;
         public const string DefaultModelLabel = Eidos1ModelLabel;
         public static string WorkplaceCouncilDisplayLabel => SupportedModelProfiles

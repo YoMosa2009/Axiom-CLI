@@ -223,14 +223,28 @@ namespace Axiom.Core.Agent
                 // A small model can narrate "I've made the change" without ever emitting a real
                 // tool call (calls.Count stays 0, or it just echoes the last tool observation back)
                 // -- give it exactly one explicit nudge before accepting nothing happened as done.
+                // Distinctly, it can also do REAL work for the first step or two of a multi-step
+                // plan and then narrate a false "done" claim for the rest instead of continuing to
+                // call tools (observed directly: asked to create two files, it wrote the first for
+                // real, then claimed the second was done without ever calling write_file again) --
+                // WrittenPaths.Count==0 alone only catches the first failure mode; the plan board
+                // (steps still Pending/Doing) catches the second.
+                var unfinishedSteps = _tools.Workflow.Plan.Steps
+                    .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
+                    .ToList();
                 if (isCustomEndpoint && looksLikeEdit && !cancelled
-                    && _tools.WrittenPaths.Count == 0
-                    && (toolCalls == 0 || result.LooksLikeObservationEcho))
+                    && ((_tools.WrittenPaths.Count == 0 && (toolCalls == 0 || result.LooksLikeObservationEcho))
+                        || unfinishedSteps.Count > 0))
                 {
-                    onStatus?.Invoke("No tool calls detected — retrying with explicit instruction");
-                    string nudgedInput = effectiveUser +
-                        "\n\n[NO TOOL CALLS DETECTED] You MUST call write_file or str_replace now to make " +
-                        "the requested change on disk — describing the change is not sufficient. Call a tool before responding.";
+                    string nudgeDetail = unfinishedSteps.Count > 0
+                        ? "You have NOT finished: " + string.Join("; ", unfinishedSteps.Select(s => $"{s.Index}. {s.Text}")) +
+                          ". Call the required tool(s) for each of these now -- do not just describe them as done."
+                        : "You MUST call write_file or str_replace now to make the requested change on disk — " +
+                          "describing the change is not sufficient. Call a tool before responding.";
+                    onStatus?.Invoke(unfinishedSteps.Count > 0
+                        ? $"{unfinishedSteps.Count} plan step(s) unfinished — retrying with explicit instruction"
+                        : "No tool calls detected — retrying with explicit instruction");
+                    string nudgedInput = effectiveUser + "\n\n[INCOMPLETE] " + nudgeDetail;
                     ToolCallingResult retryResult = await loop.RunAsync(
                         system,
                         nudgedInput,
@@ -246,10 +260,17 @@ namespace Axiom.Core.Agent
                     toolCalls += retryResult.ToolCallCount;
                     cancelled = retryResult.Cancelled;
 
+                    bool stillUnfinished = _tools.Workflow.Plan.Steps
+                        .Any(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing);
                     if (!cancelled && _tools.WrittenPaths.Count == 0 && retryResult.ToolCallCount == 0)
                     {
                         finalText = (finalText ?? string.Empty).TrimEnd()
                             + "\n\n⚠ No files were changed for this request — the model did not call any tools.";
+                    }
+                    else if (!cancelled && stillUnfinished)
+                    {
+                        finalText = (finalText ?? string.Empty).TrimEnd()
+                            + "\n\n⚠ Some plan steps were still not completed after a retry — check the plan board.";
                     }
                 }
 

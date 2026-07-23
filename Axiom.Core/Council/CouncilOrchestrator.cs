@@ -331,19 +331,31 @@ namespace Axiom.Core.Council
             CollectWrittenFiles(changedFiles);
 
             // A small model can narrate "I've made the change" without ever emitting a real tool
-            // call or a patch envelope -- give it exactly one explicit nudge before accepting
-            // nothing happened as success (expectPatch is bypassed entirely for agentic Builders,
-            // so without this nothing else would catch this).
-            bool builderWroteNothingForEdit = agentic && IsCustomEndpointModel && looksLikeEdit
-                && _agentTools != null && _agentTools.WrittenPaths.Count == 0
+            // call, and -- distinctly -- can also do REAL work for the first step or two of a
+            // multi-step plan and then narrate a false "done" claim for the remaining steps instead
+            // of continuing to call tools (observed directly: asked to create two files, it wrote
+            // the first for real, then claimed the second was "created and verified" without ever
+            // calling write_file again). WrittenPaths.Count==0 alone only catches the first failure
+            // mode; checking the plan board for steps still Pending/Doing catches the second.
+            IReadOnlyList<PlanStep> unfinishedSteps = _agentTools?.Workflow.Plan.Steps
+                .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
+                .ToList() ?? new List<PlanStep>();
+            bool builderIncompleteForEdit = agentic && IsCustomEndpointModel && looksLikeEdit
+                && _agentTools != null
+                && (_agentTools.WrittenPaths.Count == 0 || unfinishedSteps.Count > 0)
                 && !ContainsPatchEnvelope(builderOutput);
-            if (builderWroteNothingForEdit)
+            if (builderIncompleteForEdit)
             {
+                string nudgeDetail = unfinishedSteps.Count > 0
+                    ? "You have NOT finished: " + string.Join("; ", unfinishedSteps.Select(s => $"{s.Index}. {s.Text}")) +
+                      ". Call the required tool(s) for each of these now -- do not just describe them as done."
+                    : "You MUST call write_file or str_replace now to make the requested change on disk — " +
+                      "describing the change is not sufficient. Call a tool before responding.";
                 Report(progress, CouncilEventKind.Warning,
-                    "Builder produced no tool calls or patch for an edit request — retrying with an explicit tool-use instruction.");
-                string nudgedInput = builderInput +
-                    "\n\n[NO TOOL CALLS DETECTED] You MUST call write_file or str_replace now to make the " +
-                    "requested change on disk — describing the change is not sufficient. Call a tool before responding.";
+                    unfinishedSteps.Count > 0
+                        ? $"Builder left {unfinishedSteps.Count} plan step(s) unfinished — retrying with an explicit instruction."
+                        : "Builder produced no tool calls or patch for an edit request — retrying with an explicit tool-use instruction.");
+                string nudgedInput = builderInput + "\n\n[INCOMPLETE] " + nudgeDetail;
                 (builderOutput, int retryTools) = await CallBuilderAsync(
                     builderSystem, nudgedInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
                 builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
@@ -455,22 +467,30 @@ namespace Axiom.Core.Council
                     Report(progress, CouncilEventKind.Warning, "Critic evidence rule: vague clean-pass rejected.");
                 }
 
-                // Still nothing on disk after the Phase-4 nudge above -- do not let this pass as a
-                // clean review just because the Critic (also on a small model) didn't catch it.
-                if (builderWroteNothingForEdit && !builderChangedDisk && retries == 0)
+                // Still incomplete after the Phase-4 nudge above (either nothing on disk, or plan
+                // steps still Pending/Doing) -- do not let this pass as a clean review just because
+                // the Critic (also on a small model) didn't catch the false "done" claim either.
+                IReadOnlyList<PlanStep> stillUnfinishedSteps = _agentTools?.Workflow.Plan.Steps
+                    .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
+                    .ToList() ?? new List<PlanStep>();
+                if (builderIncompleteForEdit && (!builderChangedDisk || stillUnfinishedSteps.Count > 0) && retries == 0)
                 {
                     report.Issues ??= new List<CriticIssue>();
                     report.Issues.Add(new CriticIssue
                     {
                         Severity = "high",
-                        Summary = "Builder did not write any files or produce a patch for an edit request",
-                        Evidence = "No tool calls or [[AXIOM_CODEBASE_PATCH]] envelope were produced, even after an explicit retry",
+                        Summary = stillUnfinishedSteps.Count > 0
+                            ? $"Builder left {stillUnfinishedSteps.Count} plan step(s) unfinished for an edit request"
+                            : "Builder did not write any files or produce a patch for an edit request",
+                        Evidence = stillUnfinishedSteps.Count > 0
+                            ? "Unfinished: " + string.Join("; ", stillUnfinishedSteps.Select(s => $"{s.Index}. {s.Text}"))
+                            : "No tool calls or [[AXIOM_CODEBASE_PATCH]] envelope were produced, even after an explicit retry",
                         SuggestedFix = "Re-run with a more explicit instruction to call write_file/str_replace, or break the task into a smaller step."
                     });
                     report.Status = "issues";
                     report.HasIssues = true;
                     report.FindingsCount = report.Issues.Count;
-                    Report(progress, CouncilEventKind.Warning, "Builder wrote nothing for an edit request — flagging instead of accepting as done.");
+                    Report(progress, CouncilEventKind.Warning, "Builder left the edit incomplete — flagging instead of accepting as done.");
                 }
 
                 // Severity policy: only blocking issues force revision
