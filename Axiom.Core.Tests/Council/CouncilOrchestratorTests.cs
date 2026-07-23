@@ -221,16 +221,18 @@ namespace Axiom.Core.Tests.Council
         [Fact]
         public async Task WorkspaceTask_CustomEndpoint_RecallsPriorTurnFromKestralMemory()
         {
-            string dataDir = Path.Combine(Path.GetTempPath(), "axiom-cli-kmem-recall-" + Guid.NewGuid());
-            Directory.CreateDirectory(dataDir);
-            string dbPath = Path.Combine(dataDir, "kestral_memory.db");
+            string rootDir = Path.Combine(Path.GetTempPath(), "axiom-cli-kmem-recall-workspace-" + Guid.NewGuid());
+            string memDir = Path.Combine(Path.GetTempPath(), "axiom-cli-kmem-recall-store-" + Guid.NewGuid());
+            Directory.CreateDirectory(rootDir);
+            Directory.CreateDirectory(memDir);
+            string dbPath = Path.Combine(memDir, "kestral_memory.db");
             try
             {
                 using var kestralMemory = new KestralMemoryStore(dbPath, byteBudget: 10_000_000);
                 var workspace = new ConnectedWorkspaceState
                 {
                     CodebaseEditAccessEnabled = true,
-                    RootPath = dataDir
+                    RootPath = rootDir
                 };
 
                 // Non-edit-shaped prompts (no "rename"/"fix"/"add"/etc.) so expectPatch stays false
@@ -254,7 +256,8 @@ namespace Axiom.Core.Tests.Council
             }
             finally
             {
-                try { Directory.Delete(dataDir, recursive: true); } catch { /* best effort */ }
+                try { Directory.Delete(rootDir, recursive: true); } catch { /* best effort */ }
+                try { Directory.Delete(memDir, recursive: true); } catch { /* best effort */ }
             }
         }
     }
