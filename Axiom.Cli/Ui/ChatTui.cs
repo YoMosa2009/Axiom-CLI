@@ -99,6 +99,7 @@ internal sealed class ChatTui : IDisposable
         _sessionCreated = DateTime.UtcNow;
         _sessionTitle = null;
         _lastUserTask = null;
+        _session?.ResetContextUsage();
     }
 
     public void SetProfile(string name, Axiom.Core.Persistence.UserProfileStore store, Axiom.Core.Persistence.UserProfile profile)
@@ -266,9 +267,8 @@ internal sealed class ChatTui : IDisposable
         if (!string.IsNullOrWhiteSpace(stored.ModelLabel))
             _session.ModelLabel = stored.ModelLabel;
 
-        _session.History.Clear();
-        foreach (OpenRouterMessageDto h in stored.History ?? [])
-            _session.History.Add(new OpenRouterMessage(h.Role ?? "user", h.Text ?? string.Empty));
+        _session.ReplaceConversationHistory((stored.History ?? [])
+            .Select(h => new OpenRouterMessage(h.Role ?? "user", h.Text ?? string.Empty)));
 
         if (stored.WorkspaceRoots is { Count: > 0 })
             _session.Workspace.SetRoots(stored.WorkspaceRoots, stored.WorkspaceExclusive);
@@ -287,8 +287,7 @@ internal sealed class ChatTui : IDisposable
     {
         bool deleted = _sessionStore.Delete(_sessionId);
         ClearTranscript();
-        if (_session != null)
-            _session.History.Clear();
+        _session?.ResetConversation();
         PushSystem(deleted
             ? "Session deleted. Fresh chat started."
             : "No saved file for this chat (or already gone). Fresh chat started.");
@@ -299,8 +298,7 @@ internal sealed class ChatTui : IDisposable
     {
         int n = _sessionStore.DeleteAll();
         ClearTranscript();
-        if (_session != null)
-            _session.History.Clear();
+        _session?.ResetConversation();
         PushSystem(n == 0
             ? "No saved sessions to delete. Fresh chat started."
             : $"Deleted {n} saved session(s). Fresh chat started.");
@@ -1613,7 +1611,12 @@ internal sealed class ChatTui : IDisposable
             ? PickCriticIssuesInteractiveAsync
             : null;
         Task<CouncilResult> task = council.RunAsync(
-            new CouncilRequest(grounded, wsState, _session.CouncilTools(), picker),
+            new CouncilRequest(
+                grounded,
+                wsState,
+                _session.CouncilTools(),
+                picker,
+                _session.History.ToList()),
             progress,
             token);
 

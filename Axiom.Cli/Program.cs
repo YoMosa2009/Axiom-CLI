@@ -713,6 +713,7 @@ internal static class Program
                     if (TryResolveModel(parts[1], out var match))
                     {
                         session.ModelId = match.Id;
+                        session.ResetContextUsage();
                         session.ModelLabel = match.Label;
                         Say($"Switched to {match.Label}.");
                     }
@@ -834,7 +835,7 @@ internal static class Program
             }
 
             case "/clear":
-                session.History.Clear();
+                session.ResetConversation();
                 tui.ClearTranscript();
                 Say("Conversation cleared. (Saved file kept — use /del to remove it and start fresh.)");
                 return true;

@@ -55,7 +55,8 @@ namespace Axiom.Core.Council
         string UserPrompt,
         ConnectedWorkspaceState? Workspace,
         CouncilToolOptions? Tools = null,
-        CriticIssuePicker? OnPickCriticIssues = null);
+        CriticIssuePicker? OnPickCriticIssues = null,
+        IReadOnlyList<OpenRouterMessage>? ConversationHistory = null);
 
     public enum CouncilEventKind
     {

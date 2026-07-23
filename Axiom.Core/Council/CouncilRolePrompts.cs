@@ -202,16 +202,23 @@ namespace Axiom.Core.Council
                 bool hasWriteTools = availableTools is not { Count: > 0 }
                     || availableTools.Any(t => t.Name is "write_file" or "str_replace" or "apply_patch" or "write_files");
                 bool hasPlanBoard = availableTools is not { Count: > 0 } || availableTools.Any(t => t.Name == "plan_board");
+                bool hasPatchTool = availableTools is not { Count: > 0 } || availableTools.Any(t => t.Name == "apply_patch");
+                bool hasBatchWriteTool = availableTools is not { Count: > 0 } || availableTools.Any(t => t.Name == "write_files");
 
                 core += "\n\n[AGENTIC TOOLS] You have real tools this turn: " + toolNames + ".\n";
                 core += hasWriteTools
                     ? "You MUST use these tools to create and edit files on disk when the plan requires " +
-                      "implementation. Prefer str_replace/apply_patch for edits; write_file for new files.\n"
+                      "implementation. Prefer str_replace for a small existing-file edit; use write_file for a new file."
+                      + (hasPatchTool ? " Use apply_patch when one coherent patch is clearer." : string.Empty)
+                      + (hasBatchWriteTool ? " Use write_files when several new files must land together." : string.Empty)
+                      + "\n"
                     : "No file-write tools are offered this turn — answer directly; do not claim you edited or created anything.\n";
                 if (hasPlanBoard)
                     core += "When a [[PLAN BOARD]] is present, mark steps done/doing with plan_board as you complete them.\n";
                 core += hasWriteTools
-                    ? "Workflow: list_dir/read_file → str_replace/write_file → plan_board done → run_tests → summarize."
+                    ? "Workflow: inspect the relevant files → make the required edits → "
+                      + (hasPlanBoard ? "mark the completed plan step → " : string.Empty)
+                      + "run the available verification tool when appropriate → summarize only what is actually complete."
                     : "Workflow: list_dir/read_file/search_files → summarize your findings.";
 
                 if (isCustomEndpoint)

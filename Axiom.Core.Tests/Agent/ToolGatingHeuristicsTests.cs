@@ -79,11 +79,26 @@ namespace Axiom.Core.Tests.Agent
             Assert.Contains("read_file", names);
             Assert.Contains("write_file", names);
             Assert.Contains("str_replace", names);
+            Assert.Contains("apply_patch", names);
+            Assert.Contains("write_files", names);
             Assert.Contains("run_tests", names);
-            Assert.DoesNotContain("apply_patch", names);
-            Assert.DoesNotContain("write_files", names);
             Assert.DoesNotContain("git_commit", names);
             Assert.DoesNotContain("spawn_subagent", names);
+        }
+
+        [Fact]
+        public void Filter_KeepsExplicitBuildToolsForAnEditTask()
+        {
+            var result = ToolGatingHeuristics.Filter(
+                FullCatalog,
+                "build the app, update the code, and run the tests",
+                workspaceAttached: true);
+            var names = result.Select(t => t.Name).ToHashSet();
+
+            Assert.Contains("write_file", names);
+            Assert.Contains("run_shell", names);
+            Assert.Contains("diagnostics", names);
+            Assert.Contains("run_tests", names);
         }
 
         [Fact]

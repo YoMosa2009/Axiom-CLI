@@ -1914,23 +1914,43 @@ namespace Axiom.Core.Chat
                         continue;
 
                     JsonElement function = item;
+                    bool functionIsItem = true;
                     if (item.TryGetProperty("function", out JsonElement nested)
                         && nested.ValueKind == JsonValueKind.Object)
+                    {
                         function = nested;
+                        functionIsItem = false;
+                    }
+                    else if (item.TryGetProperty("function_call", out JsonElement functionCall)
+                        && functionCall.ValueKind == JsonValueKind.Object)
+                    {
+                        function = functionCall;
+                        functionIsItem = false;
+                    }
 
                     string name = function.TryGetProperty("name", out JsonElement nameEl)
                         ? nameEl.GetString() ?? string.Empty
-                        : string.Empty;
+                        : function.TryGetProperty("tool_name", out JsonElement toolNameEl)
+                            ? toolNameEl.GetString() ?? string.Empty
+                            : string.Empty;
                     if (string.IsNullOrWhiteSpace(name) || !allowedNames.Contains(name))
                         continue;
 
                     JsonElement args = default;
                     bool hasArgs = function.TryGetProperty("arguments", out args)
                         || function.TryGetProperty("parameters", out args)
-                        || function.TryGetProperty("args", out args);
+                        || function.TryGetProperty("args", out args)
+                        || function.TryGetProperty("input", out args);
                     string argsJson = !hasArgs ? "{}"
                         : args.ValueKind == JsonValueKind.String ? args.GetString() ?? "{}"
                         : args.GetRawText();
+
+                    // Some OpenAI-compatible local templates emit {"name":"read_file",
+                    // "path":"..."} instead of nesting values under arguments. The executor
+                    // reads only the named fields it needs, so preserving that object is a valid
+                    // and safe normalization rather than throwing the call away as malformed.
+                    if (!hasArgs && functionIsItem)
+                        argsJson = item.GetRawText();
 
                     try
                     {

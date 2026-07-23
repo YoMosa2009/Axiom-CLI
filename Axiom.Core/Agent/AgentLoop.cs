@@ -208,7 +208,8 @@ namespace Axiom.Core.Agent
                     onToolEvent: onToolEvent,
                     onToken: onToken,
                     gateForCustomEndpoint: isCustomEndpoint,
-                    gatingMessage: userMessage);
+                    gatingMessage: userMessage,
+                    conversationHistory: history);
 
                 finalText = result.FinalText;
                 toolCalls = result.ToolCallCount;
@@ -279,7 +280,8 @@ namespace Axiom.Core.Agent
                         onToolEvent: onToolEvent,
                         onToken: onToken,
                         gateForCustomEndpoint: isCustomEndpoint,
-                        gatingMessage: userMessage);
+                        gatingMessage: userMessage,
+                        conversationHistory: history);
 
                     finalText = retryResult.FinalText;
                     toolCalls += retryResult.ToolCallCount;
@@ -571,6 +573,17 @@ namespace Axiom.Core.Agent
             string dual = specialty is TaskSpecialty.Review or TaskSpecialty.Docs or TaskSpecialty.General
                 ? IntelligenceHelpers.DualPassInstruction + "\n"
                 : "";
+            var toolNames = availableTools is { Count: > 0 }
+                ? availableTools.Select(tool => tool.Name).ToHashSet(StringComparer.OrdinalIgnoreCase)
+                : null;
+            bool hasPatchTool = toolNames == null || toolNames.Contains("apply_patch");
+            bool hasPlanBoard = toolNames == null || toolNames.Contains("plan_board");
+            string editGuidance = hasPatchTool
+                ? "Prefer str_replace/apply_patch over full-file write_file when editing existing files.\n"
+                : "Prefer str_replace over full-file write_file when editing existing files.\n";
+            string planGuidance = hasPlanBoard
+                ? "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n"
+                : "";
 
             // Verified directly against the real endpoint: a small self-hosted model reliably uses
             // its own native <tool_call>[...] format when told the EXACT syntax explicitly -- but
@@ -600,10 +613,10 @@ namespace Axiom.Core.Agent
                       "git_*, diagnostics, run_tests, package_install, docker_run, fetch_url, read_csv, read_notebook, " +
                       "worktree_*, spawn_subagent, plan_board, run_background, open_pr, web_search") + "." +
                 toolCallFormatInstruction + "\n" +
-                "Prefer str_replace/apply_patch over full-file write_file when editing existing files.\n" +
+                editGuidance +
                 "For implementation tasks: inspect relevant files, implement the complete deliverable, reread every changed file, and run type-appropriate verification before claiming done. A scaffold is never a final result.\n" +
                 "For human-facing interfaces, verify requested content, visual hierarchy, typography, spacing, alignment, asset integrity, responsive behavior, and interactions against the actual files.\n" +
-                "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n" +
+                planGuidance +
                 "When [[REGRESSION GUARD]] lists failed tests, re-run them before claiming done.\n" +
                 "Prefer tools over guessing. Be concise in final answers.\n" +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +

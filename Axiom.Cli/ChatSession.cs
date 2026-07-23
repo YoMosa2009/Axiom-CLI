@@ -89,6 +89,35 @@ internal sealed class ChatSession
     public CouncilToolOptions CouncilTools()
         => CouncilToolOptions.ForModel(Tools.ToCouncilTools(), ModelId);
 
+    /// <summary>
+    /// Starts a genuinely fresh conversation. History and request-usage observation must reset
+    /// together; otherwise the context chrome can keep displaying the prior chat's largest tool
+    /// prompt even after the transcript is empty.
+    /// </summary>
+    public void ResetConversation()
+    {
+        History.Clear();
+        ResetContextUsage();
+    }
+
+    public void ReplaceConversationHistory(IEnumerable<OpenRouterMessage> messages)
+    {
+        History.Clear();
+        if (messages != null)
+        {
+            foreach (OpenRouterMessage message in messages)
+                History.Add(message);
+        }
+
+        ResetContextUsage();
+    }
+
+    public void ResetContextUsage()
+    {
+        lock (_contextGate)
+            _peakPromptTokensThisTurn = 0;
+    }
+
     public void BeginContextTurn()
     {
         EnsureUsageTracking();
@@ -106,14 +135,11 @@ internal sealed class ChatSession
         int historyTokens = ChatService.EstimateConversationTokensForBudget(History, system);
         int observedPromptTokens;
         lock (_contextGate)
-        {
-            _peakPromptTokensThisTurn = Math.Max(_peakPromptTokensThisTurn, historyTokens);
             observedPromptTokens = _peakPromptTokensThisTurn;
-        }
 
         // Council calls carry plans, workspace retrieval, tool schemas, and Critic evidence that
-        // do not live in chat history. Show the largest real (or service-estimated) prompt used
-        // during this turn rather than pretending the header is only the short chat transcript.
+        // do not live in chat history. During a turn, show the largest real (or service-estimated)
+        // prompt for that turn; between turns, history is the source of truth.
         int used = Math.Max(historyTokens, observedPromptTokens);
         return (used, max);
     }
@@ -130,14 +156,15 @@ internal sealed class ChatSession
 
             if (_trackedUsageService != null)
                 _trackedUsageService.TokenUsageRecorded -= OnTokenUsageRecorded;
-            _trackedUsageService = ChatService;
-            _trackedUsageService.TokenUsageRecorded += OnTokenUsageRecorded;
+            OpenRouterChatService service = ChatService;
+            _trackedUsageService = service;
+            service.TokenUsageRecorded += OnTokenUsageRecorded;
         }
     }
 
     private void OnTokenUsageRecorded(OpenRouterTokenUsage usage)
     {
-        if (usage?.PromptTokens <= 0)
+        if (usage.PromptTokens <= 0)
             return;
 
         lock (_contextGate)

@@ -68,12 +68,14 @@ namespace Axiom.Core.Agent
         };
 
         // Granite 3.2 8B has substantially better call accuracy when it sees a focused coding
-        // surface instead of every possible Git/network/worktree/package operation. Keep the
-        // read tools available, then expose only the two direct edit primitives plus verification.
+        // surface instead of every possible Git/network/worktree/package operation. Keep core
+        // inspection, every normal file-edit primitive, and verification together: hiding batch
+        // writes or patches made multi-file tasks needlessly turn into fragile repeated calls.
         private static readonly HashSet<string> CompactEditTools = new(StringComparer.OrdinalIgnoreCase)
         {
             "read_file", "list_dir", "search_files", "find_symbol",
-            "write_file", "str_replace", "diagnostics", "run_tests"
+            "write_file", "str_replace", "apply_patch", "write_files",
+            "diagnostics", "run_tests"
         };
 
         public static bool LooksLikeBuildOrRunTask(string message) => ContainsAny(message, BuildRunSignalWords);
@@ -109,7 +111,18 @@ namespace Axiom.Core.Agent
             bool looksLikeSubagent = LooksLikeSubagentTask(message);
 
             if (looksLikeEdit)
-                return tools.Where(t => CompactEditTools.Contains(t.Name)).ToList();
+            {
+                // Start small for call accuracy, but do not let an edit-shaped message suppress
+                // capabilities explicitly requested by the user (for example, build/test/shell).
+                // The old early return made "build this app and run the tests" lose run_shell
+                // merely because it was also an edit request.
+                var allowed = new HashSet<string>(CompactEditTools, StringComparer.OrdinalIgnoreCase);
+                AddIf(allowed, BuildRunGatedTools, looksLikeBuildOrRun);
+                AddIf(allowed, GitGatedTools, looksLikeGit);
+                AddIf(allowed, NetworkGatedTools, looksLikeNetwork);
+                AddIf(allowed, SubagentGatedTools, looksLikeSubagent);
+                return tools.Where(t => allowed.Contains(t.Name)).ToList();
+            }
 
             return tools.Where(t => ShouldKeep(t.Name, looksLikeEdit, looksLikeBuildOrRun, looksLikeGit, looksLikeNetwork, looksLikeSubagent)).ToList();
         }
@@ -131,6 +144,14 @@ namespace Axiom.Core.Agent
             // Unknown/future tool: default to keeping it rather than silently hiding new tools
             // from this gate whenever the tool catalog grows.
             return true;
+        }
+
+        private static void AddIf(HashSet<string> target, IEnumerable<string> source, bool condition)
+        {
+            if (!condition)
+                return;
+
+            target.UnionWith(source);
         }
     }
 }

@@ -250,7 +250,13 @@ namespace Axiom.Core.Council
                 : workspaceContext;
             string architectInput = BuildContextualInput(request.UserPrompt, architectContext);
             architectPlan = CouncilRolePrompts.StripRoleMarkers(
-                await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken, streamTokens: true));
+                await CallRoleAsync(
+                    architectSystem,
+                    architectInput,
+                    progress,
+                    cancellationToken,
+                    streamTokens: true,
+                    conversationHistory: request.ConversationHistory));
 
             // Architect plan validation — one repair pass if empty/unusable (coding/edit only)
             string planErr = IntelligenceHelpers.ArchitectValidationError(
@@ -263,7 +269,13 @@ namespace Axiom.Core.Council
                     + "\n\n[PLAN VALIDATION FAILED]\n" + planErr
                     + "\nRewrite a numbered plan only. For coding tasks name concrete file paths. No vague verbs.";
                 architectPlan = CouncilRolePrompts.StripRoleMarkers(
-                    await CallRoleAsync(architectSystem, repairInput, progress, cancellationToken, streamTokens: true));
+                    await CallRoleAsync(
+                        architectSystem,
+                        repairInput,
+                        progress,
+                        cancellationToken,
+                        streamTokens: true,
+                        conversationHistory: request.ConversationHistory));
             }
 
             Report(progress, CouncilEventKind.ArchitectOutput, architectPlan);
@@ -328,7 +340,13 @@ namespace Axiom.Core.Council
                 agentic ? "Builder is implementing with tools..." : "Builder is implementing...");
             _agentTools?.ClearWrittenPaths();
             (builderOutput, int builderTools) = await CallBuilderAsync(
-                builderSystem, builderInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
+                builderSystem,
+                builderInput,
+                agentic,
+                progress,
+                cancellationToken,
+                gatingMessage: request.UserPrompt,
+                conversationHistory: request.ConversationHistory);
             builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
             totalToolCalls += builderTools;
             CollectWrittenFiles(changedFiles);
@@ -379,7 +397,13 @@ namespace Axiom.Core.Council
                         : "Builder produced no tool calls or patch for an edit request — retrying with an explicit tool-use instruction.");
                 string nudgedInput = builderInput + "\n\n[INCOMPLETE] " + nudgeDetail;
                 (builderOutput, int retryTools) = await CallBuilderAsync(
-                    builderSystem, nudgedInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
+                    builderSystem,
+                    nudgedInput,
+                    agentic,
+                    progress,
+                    cancellationToken,
+                    gatingMessage: request.UserPrompt,
+                    conversationHistory: request.ConversationHistory);
                 builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
                 totalToolCalls += retryTools;
                 CollectWrittenFiles(changedFiles);
@@ -609,7 +633,13 @@ namespace Axiom.Core.Council
                     request.UserPrompt, architectPlan, workspaceContext, builderOutput, focusedCritic, fullRevision, evidence);
 
                 (builderOutput, int revisionTools) = await CallBuilderAsync(
-                    revisionSystem, revisionInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
+                    revisionSystem,
+                    revisionInput,
+                    agentic,
+                    progress,
+                    cancellationToken,
+                    gatingMessage: request.UserPrompt,
+                    conversationHistory: request.ConversationHistory);
                 builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
                 totalToolCalls += revisionTools;
                 CollectWrittenFiles(changedFiles);
@@ -988,11 +1018,18 @@ namespace Axiom.Core.Council
             bool agentic,
             IProgress<CouncilEvent>? progress,
             CancellationToken cancellationToken,
-            string? gatingMessage = null)
+            string? gatingMessage = null,
+            IReadOnlyList<OpenRouterMessage>? conversationHistory = null)
         {
             if (!agentic || _chat == null || _agentTools == null)
             {
-                string text = await CallRoleAsync(systemPrompt, userInput, progress, cancellationToken, streamTokens: true);
+                string text = await CallRoleAsync(
+                    systemPrompt,
+                    userInput,
+                    progress,
+                    cancellationToken,
+                    streamTokens: true,
+                    conversationHistory: conversationHistory);
                 return (text, 0);
             }
 
@@ -1008,7 +1045,8 @@ namespace Axiom.Core.Council
                 onToolEvent: ev => ReportToolEvent(progress, "Builder", ev),
                 onToken: tok => progress?.Report(new CouncilEvent(CouncilEventKind.Token, tok)),
                 gateForCustomEndpoint: IsCustomEndpointModel,
-                gatingMessage: gatingMessage);
+                gatingMessage: gatingMessage,
+                conversationHistory: conversationHistory);
 
             if (result.ToolCallCount > 0)
             {
@@ -1100,12 +1138,17 @@ namespace Axiom.Core.Council
             string userInput,
             IProgress<CouncilEvent>? progress,
             CancellationToken cancellationToken,
-            bool streamTokens = false)
+            bool streamTokens = false,
+            IReadOnlyList<OpenRouterMessage>? conversationHistory = null)
         {
             // Prefer direct OpenRouter streaming when available so Architect/Critic tokens appear live.
             if (streamTokens && _chat != null)
             {
-                var messages = new List<OpenRouterMessage> { new("user", userInput, PreserveFullText: true) };
+                var messages = conversationHistory?
+                    .Where(message => message != null)
+                    .ToList()
+                    ?? new List<OpenRouterMessage>();
+                messages.Add(new OpenRouterMessage("user", userInput, PreserveFullText: true));
                 var collected = new StringBuilder();
                 OpenRouterChatResponse response = await _chat.SendConversationStreamAsync(
                     messages,
@@ -1122,7 +1165,7 @@ namespace Axiom.Core.Council
                 return !string.IsNullOrEmpty(response.Text) ? response.Text : collected.ToString();
             }
 
-            var request = new ChatPipelineRequest(systemPrompt, userInput);
+            var request = new ChatPipelineRequest(systemPrompt, userInput, conversationHistory);
             ChatPipelineResult result = await _pipeline.ExecuteAsync(
                 request,
                 onToken: streamTokens

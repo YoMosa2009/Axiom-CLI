@@ -12,6 +12,7 @@ namespace Axiom.Core.Tests.Council
     {
         private readonly Queue<string> _responses;
         public List<(string SystemPrompt, string UserInput)> Calls { get; } = new();
+        public List<ChatPipelineRequest> Requests { get; } = new();
 
         public FakeChatPipeline(params string[] responses)
         {
@@ -24,6 +25,7 @@ namespace Axiom.Core.Tests.Council
             CancellationToken cancellationToken)
         {
             Calls.Add((request.SystemPrompt, request.UserMessage));
+            Requests.Add(request);
             string response = _responses.Count > 0 ? _responses.Dequeue() : "{\"status\":\"ok\",\"issues\":[]}";
             return Task.FromResult(new ChatPipelineResult(response, string.Empty));
         }

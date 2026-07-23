@@ -56,6 +56,27 @@ namespace Axiom.Core.Tests.Council
         }
 
         [Fact]
+        public async Task CouncilRoles_ReceivePriorConversationAsModelHistory()
+        {
+            var pipeline = new FakeChatPipeline("1. Apply the earlier constraints", "Done", CriticOk);
+            var orchestrator = new CouncilOrchestrator(pipeline, "test-model");
+            var history = new[]
+            {
+                new OpenRouterMessage("user", "Use the name Atlas and keep the existing API."),
+                new OpenRouterMessage("assistant", "Understood. I will preserve the API and use Atlas.")
+            };
+
+            CouncilResult result = await orchestrator.RunAsync(
+                new CouncilRequest("Now implement the next step", Workspace: null, ConversationHistory: history),
+                progress: null,
+                CancellationToken.None);
+
+            Assert.True(result.Success);
+            Assert.Same(history, pipeline.Requests[0].ConversationHistory);
+            Assert.Same(history, pipeline.Requests[1].ConversationHistory);
+        }
+
+        [Fact]
         public async Task WorkspaceTask_NoIssues_ReturnsParsedPatch()
         {
             var pipeline = new FakeChatPipeline("1. Edit Program.cs", ValidPatch, CriticOk);
