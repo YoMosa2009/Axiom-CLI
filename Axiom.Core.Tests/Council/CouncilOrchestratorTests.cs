@@ -46,6 +46,9 @@ namespace Axiom.Core.Tests.Council
             Assert.Null(result.Patch);
             Assert.Equal("Here is the answer.", result.FinalText);
             Assert.Equal(3, pipeline.Calls.Count);
+            Assert.Contains("[ARCHITECT PLAN]", pipeline.Calls[2].UserInput);
+            Assert.Contains("1. Do the thing", pipeline.Calls[2].UserInput);
+            Assert.Contains("TASK CONTRACT", pipeline.Calls[2].UserInput);
         }
 
         [Fact]

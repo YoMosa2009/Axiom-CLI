@@ -61,6 +61,8 @@ namespace Axiom.Core.Agent
             bool includeExpensiveContext = !isCustomEndpoint || looksLikeEdit;
 
             TaskSpecialty specialty = IntelligenceHelpers.DetectSpecialty(userMessage);
+            GoalContract goal = GoalContract.FromPrompt(userMessage);
+            string goalBlock = goal.ToPromptBlock();
             // Same tool list ToolCallingLoop.RunAsync will independently (but deterministically)
             // resolve below -- computed here too so the system prompt's tool enumeration matches
             // what's actually offered instead of a static ~19-tool catalog. A genuine simplification
@@ -119,6 +121,8 @@ namespace Axiom.Core.Agent
             }
 
             string effectiveUser = sticky + userMessage;
+            if (!string.IsNullOrWhiteSpace(goalBlock))
+                effectiveUser += "\n\n" + goalBlock;
             if (!string.IsNullOrWhiteSpace(specialtyBlock))
                 effectiveUser += "\n\n" + specialtyBlock;
             if (!string.IsNullOrWhiteSpace(planBlock))
@@ -164,29 +168,6 @@ namespace Axiom.Core.Agent
                 toolCalls = result.ToolCallCount;
                 cancelled = result.Cancelled;
 
-                // Builder-style self-check: diagnostics after writes (agent mode)
-                if (!cancelled && _tools.Workflow.AutoDiagnosticsAfterWrite
-                    && _tools.WrittenPaths.Count > 0
-                    && _tools.ApprovalMode != ApprovalMode.Plan)
-                {
-                    try
-                    {
-                        onStatus?.Invoke("Self-check · diagnostics");
-                        string diag = await DiagnosticsService.RunAsync(root, cancellationToken);
-                        NoteTestOutcomes(diag, null);
-                        if (!string.IsNullOrWhiteSpace(diag)
-                            && (diag.Contains("error", StringComparison.OrdinalIgnoreCase)
-                                || diag.Contains("FAILED", StringComparison.OrdinalIgnoreCase)
-                                || diag.Contains("exit_code: 1", StringComparison.Ordinal)))
-                        {
-                            finalText = (finalText ?? "").TrimEnd()
-                                + "\n\n--- auto diagnostics ---\n"
-                                + (diag.Length > 2500 ? diag[..2500] + "\n..." : diag);
-                        }
-                    }
-                    catch { /* optional */ }
-                }
-
                 // Regression guard reminder in final answer if failures remain
                 string? regAfter = _tools.Workflow.RegressionGuardBlock();
                 if (!string.IsNullOrWhiteSpace(regAfter) && toolCalls > 0
@@ -227,6 +208,75 @@ namespace Axiom.Core.Agent
                             + "\n\n⚠ No files were changed for this request — the model did not call any tools.";
                     }
                 }
+
+                string diagnostics = string.Empty;
+                if (!cancelled
+                    && _tools.Workflow.AutoDiagnosticsAfterWrite
+                    && _tools.WrittenPaths.Count > 0
+                    && _tools.ApprovalMode != ApprovalMode.Plan)
+                {
+                    diagnostics = await RunAutomaticDiagnosticsAsync(root, onStatus, cancellationToken);
+                }
+
+                // A compact model benefits from a separate evidence-backed verification pass.
+                // This is shared across every implementation type: exact literals, structural
+                // validation, file-type checks, diagnostics, and the full task contract.
+                if (isCustomEndpoint && looksLikeEdit && !cancelled
+                    && _tools.WrittenPaths.Count > 0
+                    && _tools.ApprovalMode != ApprovalMode.Plan)
+                {
+                    ArtifactQualitySnapshot quality = ArtifactQualityInspector.Inspect(
+                        _tools.WrittenPaths,
+                        goal,
+                        evidenceCharacterBudget: 8_000);
+                    onStatus?.Invoke("Quality review · checking written artifacts");
+
+                    string reviewInput = BuildQualityReviewInput(
+                        userMessage,
+                        goalBlock,
+                        quality,
+                        diagnostics);
+                    var reviewLoop = new ToolCallingLoop(_chat, _tools, _modelId, maxRounds: 8);
+                    ToolCallingResult reviewResult = await reviewLoop.RunAsync(
+                        system,
+                        reviewInput,
+                        onStatus,
+                        cancellationToken,
+                        AgentToolExecutor.ToolScope.Full,
+                        onToolEvent: onToolEvent,
+                        onToken: null,
+                        gateForCustomEndpoint: true,
+                        gatingMessage: userMessage);
+
+                    if (!string.IsNullOrWhiteSpace(reviewResult.FinalText))
+                        finalText = reviewResult.FinalText;
+                    toolCalls += reviewResult.ToolCallCount;
+                    cancelled = reviewResult.Cancelled;
+
+                    if (!cancelled)
+                    {
+                        ArtifactQualitySnapshot postQuality = ArtifactQualityInspector.Inspect(
+                            _tools.WrittenPaths,
+                            goal,
+                            evidenceCharacterBudget: 2_000);
+                        string postDiagnostics = diagnostics;
+                        if (_tools.Workflow.AutoDiagnosticsAfterWrite && reviewResult.ToolCallCount > 0)
+                        {
+                            postDiagnostics = await RunAutomaticDiagnosticsAsync(root, onStatus, cancellationToken);
+                        }
+
+                        finalText = AppendUnresolvedQualityWarnings(
+                            finalText,
+                            postQuality.Findings,
+                            postDiagnostics);
+                    }
+                }
+                else if (DiagnosticsFailed(diagnostics))
+                {
+                    finalText = (finalText ?? string.Empty).TrimEnd()
+                        + "\n\n--- auto diagnostics ---\n"
+                        + (diagnostics.Length > 2500 ? diagnostics[..2500] + "\n..." : diagnostics);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -263,6 +313,108 @@ namespace Axiom.Core.Agent
                 compact.BudgetWarning);
         }
 
+        private async Task<string> RunAutomaticDiagnosticsAsync(
+            string root,
+            Action<string>? onStatus,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                onStatus?.Invoke("Self-check · diagnostics");
+                string diagnostics = await DiagnosticsService.RunAsync(root, cancellationToken);
+                NoteTestOutcomes(diagnostics, null);
+                return diagnostics;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static string BuildQualityReviewInput(
+            string userMessage,
+            string goalBlock,
+            ArtifactQualitySnapshot quality,
+            string diagnostics)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("[QUALITY VERIFICATION PASS]");
+            sb.AppendLine("The first implementation pass is not automatically complete. Review the actual written artifacts against the source-of-truth contract.");
+            sb.AppendLine("[ORIGINAL REQUEST]").AppendLine(userMessage).AppendLine();
+            if (!string.IsNullOrWhiteSpace(goalBlock))
+                sb.AppendLine(goalBlock).AppendLine();
+            if (!string.IsNullOrWhiteSpace(quality.EvidenceBlock))
+                sb.AppendLine(quality.EvidenceBlock).AppendLine();
+
+            sb.AppendLine("[AUTOMATIC FINDINGS]");
+            if (quality.Findings.Count == 0)
+                sb.AppendLine("No deterministic structural issue was found. You must still check semantic fidelity and completeness.");
+            else
+                foreach (string finding in quality.Findings)
+                    sb.AppendLine("- " + finding);
+
+            if (!string.IsNullOrWhiteSpace(diagnostics))
+                sb.AppendLine().AppendLine("[DIAGNOSTICS]").AppendLine(
+                    diagnostics.Length > 3_000 ? diagnostics[..3_000] + "\n[...truncated]" : diagnostics);
+
+            sb.AppendLine();
+            sb.AppendLine("[REQUIRED ACTION]");
+            sb.AppendLine("1. Check every R/C/L/A item against the actual files, preserving exact requested literals.");
+            sb.AppendLine("2. Check completeness and type-appropriate quality. For human-facing interfaces check content fidelity, hierarchy, typography, spacing, alignment, asset integrity, responsive behavior, and interactions.");
+            sb.AppendLine("3. Use tools now to fix every mismatch, broken reference, placeholder, invalid structure, or failed check. Do not rewrite unrelated work.");
+            sb.AppendLine("4. If the files already pass, do not make cosmetic churn. Summarize the evidence you checked.");
+            return sb.ToString();
+        }
+
+        private static bool DiagnosticsFailed(string diagnostics)
+        {
+            if (string.IsNullOrWhiteSpace(diagnostics))
+                return false;
+            if (diagnostics.Contains("FAILED", StringComparison.OrdinalIgnoreCase)
+                || diagnostics.Contains("Fail:", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var exitCode = System.Text.RegularExpressions.Regex.Match(
+                diagnostics,
+                @"(?im)\bexit_code:\s*(?<code>-?\d+)");
+            if (exitCode.Success
+                && int.TryParse(exitCode.Groups["code"].Value, out int code)
+                && code != 0)
+            {
+                return true;
+            }
+
+            return System.Text.RegularExpressions.Regex.IsMatch(
+                    diagnostics,
+                    @"(?im)\berror\s+(?:[A-Z]{1,5}\d{2,6}|:)")
+                || System.Text.RegularExpressions.Regex.IsMatch(
+                    diagnostics,
+                    @"(?im)\b[1-9]\d*\s+error(?:\(s\)|s)?\b");
+        }
+
+        private static string AppendUnresolvedQualityWarnings(
+            string? finalText,
+            IReadOnlyList<string> findings,
+            string diagnostics)
+        {
+            var sb = new System.Text.StringBuilder((finalText ?? string.Empty).TrimEnd());
+            if (findings.Count > 0)
+            {
+                sb.AppendLine().AppendLine()
+                    .AppendLine("⚠ Automatic verification still found unresolved issues:");
+                foreach (string finding in findings.Take(8))
+                    sb.AppendLine("- " + finding);
+            }
+
+            if (DiagnosticsFailed(diagnostics))
+            {
+                sb.AppendLine().AppendLine("--- auto diagnostics ---")
+                    .Append(diagnostics.Length > 2500 ? diagnostics[..2500] + "\n..." : diagnostics);
+            }
+
+            return sb.ToString();
+        }
+
         private void NoteTestOutcomes(string output, string? filter)
         {
             if (string.IsNullOrWhiteSpace(output))
@@ -273,7 +425,7 @@ namespace Axiom.Core.Agent
                     && !output.Contains("exit_code: 0", StringComparison.Ordinal));
             if (failed)
             {
-                string name = filter;
+                string name = filter ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(name))
                 {
                     // pull a short fingerprint
@@ -328,6 +480,7 @@ namespace Axiom.Core.Agent
                 "the user's local project is connected — use tools; never claim you lack access.\n" +
                 "Use [[REPO MAP]] and [[REPO RETRIEVAL]] before blind searches when helpful.\n" +
                 "Follow [[PROJECT MEMORY]] conventions when present (AXIOM.md / AGENTS.md).\n" +
+                "Treat [[TASK CONTRACT]] R/C/L/A items as pass/fail requirements; preserve L literals verbatim.\n" +
                 "Tools available this turn: " +
                 (availableTools is { Count: > 0 }
                     ? string.Join(", ", availableTools.Select(t => t.Name))
@@ -337,6 +490,8 @@ namespace Axiom.Core.Agent
                       "worktree_*, spawn_subagent, plan_board, run_background, open_pr, web_search") + "." +
                 toolCallFormatInstruction + "\n" +
                 "Prefer str_replace/apply_patch over full-file write_file when editing existing files.\n" +
+                "For implementation tasks: inspect relevant files, implement the complete deliverable, reread every changed file, and run type-appropriate verification before claiming done. A scaffold is never a final result.\n" +
+                "For human-facing interfaces, verify requested content, visual hierarchy, typography, spacing, alignment, asset integrity, responsive behavior, and interactions against the actual files.\n" +
                 "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n" +
                 "When [[REGRESSION GUARD]] lists failed tests, re-run them before claiming done.\n" +
                 "Prefer tools over guessing. Be concise in final answers.\n" +

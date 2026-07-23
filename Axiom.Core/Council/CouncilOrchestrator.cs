@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -366,10 +365,11 @@ namespace Axiom.Core.Council
             {
                 // Deterministic rails before every Critic call (desktop Stage 2.5 / sandbox).
                 CriticEvidence evidence = await GatherCriticEvidenceAsync(
-                    builderOutput, expectPatch || patch != null, tools, progress, cancellationToken);
+                    builderOutput, expectPatch || patch != null, goal, tools, progress, cancellationToken);
 
                 Report(progress, CouncilEventKind.Status, "Critic is reviewing...");
-                string criticInput = BuildCriticInput(request.UserPrompt, patch != null, builderOutput, evidence);
+                string criticInput = BuildCriticInput(
+                    request.UserPrompt, architectPlan, goalBlock, patch != null, builderOutput, evidence);
                 if (!string.IsNullOrWhiteSpace(acceptance))
                     criticInput = acceptance + "\n\n" + criticInput;
                 bool criticInspect = agentic && workspaceConnected;
@@ -566,8 +566,9 @@ namespace Axiom.Core.Council
                     }
 
                     CriticEvidence postEv = await GatherCriticEvidenceAsync(
-                        postBody, true, tools, progress, cancellationToken);
-                    string postInput = BuildCriticInput(request.UserPrompt, true, postBody, postEv);
+                        postBody, true, goal, tools, progress, cancellationToken);
+                    string postInput = BuildCriticInput(
+                        request.UserPrompt, architectPlan, goalBlock, true, postBody, postEv);
                     if (!string.IsNullOrWhiteSpace(acceptance))
                         postInput = acceptance + "\n\n" + postInput;
                     postInput += "\n\n[POST-MERGE] Review the applied changes and diagnostics. " +
@@ -697,6 +698,7 @@ namespace Axiom.Core.Council
         private async Task<CriticEvidence> GatherCriticEvidenceAsync(
             string builderOutput,
             bool isWorkspaceTask,
+            GoalContract goal,
             CouncilToolOptions tools,
             IProgress<CouncilEvent>? progress,
             CancellationToken cancellationToken)
@@ -720,11 +722,11 @@ namespace Axiom.Core.Council
                 }
             }
 
-            foreach ((string source, string content) in GetWrittenArtifacts())
-            {
-                foreach (string finding in StaticValidation.RunArtifactChecks(content, source))
-                    findings.Add($"{source}: {finding}");
-            }
+            ArtifactQualitySnapshot artifactQuality = ArtifactQualityInspector.Inspect(
+                _agentTools?.WrittenPaths,
+                goal,
+                IsCustomEndpointModel ? 8_000 : 24_000);
+            findings.AddRange(artifactQuality.Findings);
 
             bool runSandbox = tools.SandboxEnabled
                 && !isWorkspaceTask
@@ -756,42 +758,13 @@ namespace Axiom.Core.Council
             }
 
             findings = findings.Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToList();
-            return new CriticEvidence(findings, sandboxLogs, sandboxFailed, language);
+            return new CriticEvidence(
+                findings,
+                sandboxLogs,
+                sandboxFailed,
+                language,
+                artifactQuality.EvidenceBlock);
         }
-
-        private IReadOnlyList<(string Source, string Content)> GetWrittenArtifacts()
-        {
-            var documents = new List<(string Source, string Content)>();
-            foreach (string path in _agentTools?.WrittenPaths ?? Array.Empty<string>())
-            {
-                string extension = Path.GetExtension(path);
-                if (!IsTextArtifactExtension(extension))
-                    continue;
-
-                try
-                {
-                    var info = new FileInfo(path);
-                    if (!info.Exists || info.Length > 512_000)
-                        continue;
-
-                    string content = File.ReadAllText(path);
-                    if (!content.Contains('\0'))
-                        documents.Add((Path.GetFileName(path), content));
-                }
-                catch
-                {
-                    // The Critic still has inspect tools; a transient file read must not fail a turn.
-                }
-            }
-
-            return documents;
-        }
-
-        private static bool IsTextArtifactExtension(string extension)
-            => extension.ToLowerInvariant() is ".cs" or ".csx" or ".js" or ".jsx" or ".ts" or ".tsx"
-                or ".py" or ".java" or ".go" or ".rs" or ".cpp" or ".c" or ".h" or ".hpp"
-                or ".html" or ".htm" or ".css" or ".json" or ".xml" or ".yml" or ".yaml"
-                or ".md" or ".txt" or ".sql" or ".sh" or ".ps1";
 
         private static CriticReport MergeDeterministicFindings(CriticReport report, CriticEvidence evidence)
         {
@@ -802,6 +775,8 @@ namespace Axiom.Core.Council
                 .Where(f => f.Contains("CRITICAL", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("RUNTIME", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("RENDER QUALITY", StringComparison.OrdinalIgnoreCase)
+                    || f.Contains("REQUIREMENT COVERAGE", StringComparison.OrdinalIgnoreCase)
+                    || f.Contains("ARTIFACT VALIDATION", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("Mismatched", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("truncated", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("not defined", StringComparison.OrdinalIgnoreCase))
@@ -1136,11 +1111,18 @@ namespace Axiom.Core.Council
 
         private static string BuildCriticInput(
             string userPrompt,
+            string architectPlan,
+            string goalBlock,
             bool isWorkspaceTask,
             string builderOutput,
             CriticEvidence evidence)
         {
             var sb = new StringBuilder();
+            sb.AppendLine("[ORIGINAL REQUEST]").AppendLine(userPrompt).AppendLine();
+            if (!string.IsNullOrWhiteSpace(goalBlock))
+                sb.AppendLine(goalBlock).AppendLine();
+            if (!string.IsNullOrWhiteSpace(architectPlan))
+                sb.AppendLine("[ARCHITECT PLAN]").AppendLine(architectPlan).AppendLine();
 
             if (evidence.Findings.Count > 0)
             {
@@ -1159,7 +1141,9 @@ namespace Axiom.Core.Council
                 sb.AppendLine("[SANDBOX OUTPUT]").AppendLine(sandbox).AppendLine();
             }
 
-            sb.AppendLine("[ORIGINAL REQUEST]").AppendLine(userPrompt).AppendLine();
+            if (!string.IsNullOrWhiteSpace(evidence.ArtifactEvidence))
+                sb.AppendLine(evidence.ArtifactEvidence).AppendLine();
+
             sb.AppendLine(isWorkspaceTask ? "[BUILDER PATCH PROPOSAL]" : "[BUILDER OUTPUT]");
             string builderText = builderOutput;
             if (builderText.Length > BuilderForCriticCapChars)
@@ -1196,6 +1180,9 @@ namespace Axiom.Core.Council
                     sb.AppendLine("- " + f);
             }
 
+            if (!string.IsNullOrWhiteSpace(evidence.ArtifactEvidence))
+                sb.AppendLine().AppendLine(evidence.ArtifactEvidence);
+
             if (!string.IsNullOrWhiteSpace(evidence.SandboxLogs))
             {
                 string sandbox = evidence.SandboxLogs.Length > 4000
@@ -1216,6 +1203,7 @@ namespace Axiom.Core.Council
             IReadOnlyList<string> Findings,
             string SandboxLogs,
             bool SandboxFailed,
-            string Language);
+            string Language,
+            string ArtifactEvidence);
     }
 }

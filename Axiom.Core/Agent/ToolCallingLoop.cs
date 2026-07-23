@@ -67,6 +67,11 @@ namespace Axiom.Core.Agent
             int maxRounds = scope == AgentToolExecutor.ToolScope.Inspect
                 ? Math.Min(_maxRounds, 6)
                 : _maxRounds;
+            int? maxTokensOverride = gateForCustomEndpoint
+                ? scope == AgentToolExecutor.ToolScope.Full
+                    ? Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 4, 1_024, 3_072)
+                    : Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 6, 768, 1_536)
+                : null;
 
             for (int round = 0; round <= maxRounds; round++)
             {
@@ -90,7 +95,8 @@ namespace Axiom.Core.Agent
                         collected.Append(token);
                         onToken?.Invoke(token);
                     },
-                    cancellationToken);
+                    cancellationToken,
+                    maxTokensOverride: maxTokensOverride);
 
                 IReadOnlyList<OpenRouterToolCall> calls = response.ToolCalls ?? Array.Empty<OpenRouterToolCall>();
                 finalText = !string.IsNullOrEmpty(response.Text) ? response.Text : collected.ToString();

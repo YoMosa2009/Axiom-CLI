@@ -8,6 +8,7 @@ namespace Axiom.Core.Tests.Council
         [Theory]
         [InlineData("fix the null reference in Program.cs", CouncilTaskKind.Coding)]
         [InlineData("implement a login form", CouncilTaskKind.Coding)]
+        [InlineData("create a responsive landing page", CouncilTaskKind.Coding)]
         [InlineData("calculate the volume of a cylinder radius 5 height 10", CouncilTaskKind.Calculation)]
         [InlineData("explain how TCP handshakes work", CouncilTaskKind.Research)]
         [InlineData("hello there", CouncilTaskKind.General)]

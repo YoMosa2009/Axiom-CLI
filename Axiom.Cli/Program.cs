@@ -493,7 +493,7 @@ internal static class Program
 
         if (string.IsNullOrWhiteSpace(task))
         {
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Usage:[/] axiom code [--yes] [--json] \"<task>\"");
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Usage:[/] axiom code [[--yes]] [[--json]] \"<task>\"");
             return 1;
         }
 

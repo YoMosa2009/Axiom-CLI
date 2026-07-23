@@ -73,6 +73,7 @@ namespace Axiom.Core.Council
                 return CouncilTaskKind.Calculation;
 
             if (Regex.IsMatch(p, @"\b(fix|implement|refactor|code|function|class|module|api|bug|compile|test|patch|file|script|program|html|css|javascript|python|c#|java)\b")
+                || Regex.IsMatch(p, @"\b(website|webpage|landing\s+page|web\s+app|user\s+interface|ui\s+component)\b")
                 || Regex.IsMatch(p, @"\b[\w./\\-]+\.(cs|ts|tsx|js|jsx|py|java|go|rs|cpp|h|html|css|json)\b"))
                 return CouncilTaskKind.Coding;
 
@@ -97,7 +98,8 @@ namespace Axiom.Core.Council
                 "3. For code tasks, each step must state: the function/component/file name, inputs, outputs, and exact operation. " +
                 "4. Never use vague words like handle, manage, process, or deal with — describe the exact operation. " +
                 "5. Keep the plan short — no more than 8 steps. " +
-                "6. ALWAYS plan for the LATEST user message. Prior context is background only." +
+                "6. ALWAYS plan for the LATEST user message. Prior context is background only. " +
+                "7. When a TASK CONTRACT is present, map every R/C/L/A item to an implementation or verification step." +
                 RoleFraming(isCustomEndpoint);
 
             if (workspaceConnected)
@@ -119,7 +121,8 @@ namespace Axiom.Core.Council
                 core +=
                     "\n[DELIVERABLE QUALITY] Plan a concrete verification step against the files that will be " +
                     "written. Match verification to the artifact: compile/test executable code, validate data/config, " +
-                    "and inspect rendering/usability for human-facing interfaces.";
+                    "and inspect content fidelity, asset integrity, rendering, usability, and responsive behavior for " +
+                    "human-facing interfaces. A scaffold is an intermediate state, never the final deliverable.";
             }
 
             core += kind switch
@@ -173,9 +176,11 @@ namespace Axiom.Core.Council
             {
                 core +=
                     "\n[DELIVERABLE QUALITY BAR] Produce a complete usable artifact, not a sketch, placeholder, " +
-                    "or summary. Write the real files, then inspect them before finishing. Verify behavior appropriate " +
+                    "or summary. Treat every TASK CONTRACT R/C/L/A item as a pass/fail checklist, including exact " +
+                    "literal copy. Write the real files, then reread them before finishing. Verify behavior appropriate " +
                     "to the artifact: code must be structurally valid and tested when possible; configuration/data must be " +
-                    "parseable; human-facing interfaces must have intentional layout, styling, responsive behavior, and working requested interactions.";
+                    "parseable; human-facing interfaces must preserve requested content and have intentional visual " +
+                    "hierarchy, typography, spacing, alignment, asset integrity, responsive behavior, and working requested interactions.";
             }
 
             if (agentic)
@@ -312,8 +317,10 @@ namespace Axiom.Core.Council
             {
                 core +=
                     "\n[DELIVERABLE REVIEW] Inspect the actual written artifacts, not just the Builder summary. " +
-                    "Reject incomplete, placeholder, invalid, or unverified output. Apply the standards appropriate to " +
-                    "the artifact type, including rendering/usability for user-facing interfaces.";
+                    "Verify every TASK CONTRACT R/C/L/A item and identify the exact unmet item in each finding. Reject " +
+                    "incomplete, placeholder, invalid, broken-reference, or unverified output. Apply the standards appropriate " +
+                    "to the artifact type, including content fidelity, visual hierarchy, spacing, alignment, rendering, " +
+                    "responsive behavior, and usability for user-facing interfaces.";
             }
 
             core += kind switch

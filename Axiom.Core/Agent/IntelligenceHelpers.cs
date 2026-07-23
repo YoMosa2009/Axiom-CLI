@@ -31,7 +31,8 @@ namespace Axiom.Core.Agent
                 return TaskSpecialty.Review;
             if (Regex.IsMatch(p, @"\b(refactor|clean up|restructure|rename|extract)\b"))
                 return TaskSpecialty.Refactor;
-            if (Regex.IsMatch(p, @"\b(scaffold|from scratch|new project|greenfield|create app|bootstrap)\b"))
+            if (Regex.IsMatch(p, @"\b(scaffold|from scratch|new project|greenfield|create app|bootstrap)\b")
+                || Regex.IsMatch(p, @"\b(create|build|make|design|develop)\b.{0,40}\b(website|webpage|landing\s+page|web\s+app|user\s+interface|ui\s+component)\b"))
                 return TaskSpecialty.Greenfield;
             if (Regex.IsMatch(p, @"\b(document|docs|readme|comment|explain only)\b"))
                 return TaskSpecialty.Docs;
@@ -47,7 +48,8 @@ namespace Axiom.Core.Agent
                 "[[END TASK SPECIALTY]]",
             TaskSpecialty.Greenfield =>
                 "[[TASK SPECIALTY: GREENFIELD]]\n" +
-                "Create a minimal working skeleton first, then flesh out. Prefer clear file layout.\n" +
+                "Create a runnable vertical slice, then fully implement every task-contract item. " +
+                "A skeleton or scaffold is an intermediate state, never the final deliverable. Prefer clear file layout.\n" +
                 "[[END TASK SPECIALTY]]",
             TaskSpecialty.Review =>
                 "[[TASK SPECIALTY: REVIEW]]\n" +

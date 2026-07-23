@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text.Json;
 using System.Xml.Linq;
 using System.Text.RegularExpressions;
@@ -206,7 +207,10 @@ namespace Axiom.Core.Council
 
             bool fullHtmlDocument = lower.Contains("<!doctype html") || lower.Contains("<html");
             if (!fullHtmlDocument)
+            {
+                AddMissingLocalAssetChecks(content, path, findings, extension);
                 return findings.Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToList();
+            }
 
             bool hasEmbeddedCss = Regex.IsMatch(lower, @"<style\b[^>]*>\s*[^<]+", RegexOptions.IgnoreCase);
             bool hasStylesheet = Regex.IsMatch(lower, "<link\\b[^>]*rel\\s*=\\s*['\\\"]?stylesheet", RegexOptions.IgnoreCase);
@@ -220,7 +224,101 @@ namespace Axiom.Core.Council
                 findings.Add("[MEDIUM — RENDER QUALITY] The full HTML document is missing a viewport meta tag, so mobile rendering is not configured.");
             }
 
+            AddMissingLocalAssetChecks(content, path, findings, extension);
             return findings.Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToList();
+        }
+
+        private static void AddMissingLocalAssetChecks(
+            string content,
+            string? path,
+            List<string> findings,
+            string extension)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+                return;
+
+            string? directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrWhiteSpace(directory))
+                return;
+
+            var references = new List<string>();
+            if (extension is ".html" or ".htm")
+            {
+                foreach (Match match in Regex.Matches(
+                    content,
+                    @"<(?:img|script|source|video)\b[^>]*\bsrc\s*=\s*[""'](?<ref>[^""']+)[""']",
+                    RegexOptions.IgnoreCase))
+                {
+                    references.Add(match.Groups["ref"].Value);
+                }
+                foreach (Match match in Regex.Matches(
+                    content,
+                    @"<link\b[^>]*\bhref\s*=\s*[""'](?<ref>[^""']+)[""']",
+                    RegexOptions.IgnoreCase))
+                {
+                    references.Add(match.Groups["ref"].Value);
+                }
+            }
+
+            if (extension is ".css" or ".html" or ".htm")
+            {
+                foreach (Match match in Regex.Matches(
+                    content,
+                    @"url\(\s*[""']?(?<ref>[^)""']+)[""']?\s*\)",
+                    RegexOptions.IgnoreCase))
+                {
+                    references.Add(match.Groups["ref"].Value);
+                }
+            }
+
+            foreach (string rawReference in references.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                string reference = WebUtility.HtmlDecode(rawReference).Trim();
+                if (ShouldSkipLocalAssetCheck(reference))
+                    continue;
+
+                int suffix = reference.IndexOfAny(['?', '#']);
+                if (suffix >= 0)
+                    reference = reference[..suffix];
+                if (string.IsNullOrWhiteSpace(reference))
+                    continue;
+
+                try
+                {
+                    string localPath = Path.GetFullPath(Path.Combine(
+                        directory,
+                        reference.Replace('/', Path.DirectorySeparatorChar)));
+                    if (!File.Exists(localPath))
+                    {
+                        findings.Add(
+                            $"[HIGH — ARTIFACT VALIDATION] Referenced local asset does not exist: {rawReference}");
+                    }
+                }
+                catch
+                {
+                    findings.Add(
+                        $"[HIGH — ARTIFACT VALIDATION] Referenced local asset path is invalid: {rawReference}");
+                }
+            }
+        }
+
+        private static bool ShouldSkipLocalAssetCheck(string reference)
+        {
+            if (string.IsNullOrWhiteSpace(reference)
+                || reference.StartsWith('#')
+                || reference.StartsWith('/')
+                || reference.StartsWith("//", StringComparison.Ordinal)
+                || reference.Contains("://", StringComparison.Ordinal)
+                || reference.Contains('{')
+                || reference.Contains('}'))
+            {
+                return true;
+            }
+
+            return reference.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+                || reference.StartsWith("blob:", StringComparison.OrdinalIgnoreCase)
+                || reference.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase)
+                || reference.StartsWith("javascript:", StringComparison.OrdinalIgnoreCase);
         }
 
         public static List<string> DetectSandboxErrors(string sandboxOutput)

@@ -64,6 +64,7 @@ namespace Axiom.Core.Tests.Agent
             Assert.Equal(TaskSpecialty.Debug, IntelligenceHelpers.DetectSpecialty("fix the crash in login"));
             Assert.Equal(TaskSpecialty.Review, IntelligenceHelpers.DetectSpecialty("please code review this PR"));
             Assert.Equal(TaskSpecialty.Greenfield, IntelligenceHelpers.DetectSpecialty("scaffold a new project from scratch"));
+            Assert.Equal(TaskSpecialty.Greenfield, IntelligenceHelpers.DetectSpecialty("create a responsive landing page"));
         }
 
         [Fact]

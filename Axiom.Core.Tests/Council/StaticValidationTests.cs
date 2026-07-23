@@ -99,5 +99,27 @@ namespace Axiom.Core.Tests.Council
 
             Assert.Contains(findings, f => f.Contains("Invalid JSON", StringComparison.OrdinalIgnoreCase));
         }
+
+        [Fact]
+        public void RunArtifactChecks_MissingLocalAsset_FlagsBrokenReference()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "axiom-artifact-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "index.html");
+            string html =
+                "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\">" +
+                "<style>body { display: grid; }</style></head><body><img src=\"images/missing-logo.svg\"></body></html>";
+            File.WriteAllText(path, html);
+            try
+            {
+                var findings = StaticValidation.RunArtifactChecks(html, path);
+
+                Assert.Contains(findings, f => f.Contains("does not exist", StringComparison.OrdinalIgnoreCase));
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); } catch { /* ignore */ }
+            }
+        }
     }
 }
