@@ -763,8 +763,9 @@ namespace Axiom.Core.Council
             return new CriticEvidence(findings, sandboxLogs, sandboxFailed, language);
         }
 
-        private IEnumerable<(string Source, string Html)> GetWrittenWebsiteDocuments(string builderOutput)
+        private IReadOnlyList<(string Source, string Html)> GetWrittenWebsiteDocuments(string builderOutput)
         {
+            var documents = new List<(string Source, string Html)>();
             bool foundWrittenDocument = false;
             foreach (string path in _agentTools?.WrittenPaths ?? Array.Empty<string>())
             {
@@ -780,8 +781,9 @@ namespace Axiom.Core.Council
                     if (!info.Exists || info.Length > 512_000)
                         continue;
 
+                    string html = File.ReadAllText(path);
                     foundWrittenDocument = true;
-                    yield return (Path.GetFileName(path), File.ReadAllText(path));
+                    documents.Add((Path.GetFileName(path), html));
                 }
                 catch
                 {
@@ -790,7 +792,9 @@ namespace Axiom.Core.Council
             }
 
             if (!foundWrittenDocument && StaticValidation.DetectLanguage(builderOutput) == "html")
-                yield return ("Builder output", StaticValidation.ExtractCodeBlock(builderOutput, "html"));
+                documents.Add(("Builder output", StaticValidation.ExtractCodeBlock(builderOutput, "html")));
+
+            return documents;
         }
 
         private static CriticReport MergeDeterministicFindings(CriticReport report, CriticEvidence evidence)
