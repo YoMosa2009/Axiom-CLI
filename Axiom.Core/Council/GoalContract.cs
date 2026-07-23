@@ -12,8 +12,11 @@ namespace Axiom.Core.Council
         public List<string> Requirements { get; } = new();
         public List<string> Constraints { get; } = new();
         public List<string> ExactLiterals { get; } = new();
+        public List<string> RequiredArtifactExtensions { get; } = new();
         public List<string> Acceptance { get; } = new();
         public bool RequiresLiteralPresenceInWrittenArtifacts { get; private set; }
+        public bool RequiresWrittenArtifacts { get; private set; }
+        public bool RequiresInteractiveBehavior { get; private set; }
 
         public bool HasItems => Requirements.Count + Constraints.Count + ExactLiterals.Count + Acceptance.Count > 0;
 
@@ -63,9 +66,31 @@ namespace Axiom.Core.Council
             c.RequiresLiteralPresenceInWrittenArtifacts = Regex.IsMatch(
                 p,
                 @"\b(create|build|make|generate|scaffold|add|insert|write|design|develop|produce)\b");
+            c.RequiresWrittenArtifacts = CouncilOrchestrator.LooksLikeCodeEditRequest(sourcePrompt);
+
+            // When the user names a file type, do not accept a directory, a note, or a different
+            // file type as a completed deliverable. Ignore explicitly rejected types, such as
+            // "do not make an .exe; make an .html".
+            foreach (Match match in Regex.Matches(
+                sourcePrompt,
+                @"(?<![\w.])\.(?<extension>html?|css|js|jsx|ts|tsx|cs|py|java|go|rs|cpp|c|h|json|xml|ya?ml|md|txt|sql|sh|ps1|bat|exe)\b",
+                RegexOptions.IgnoreCase))
+            {
+                int prefixStart = Math.Max(0, match.Index - 56);
+                string prefix = sourcePrompt[prefixStart..match.Index];
+                if (Regex.IsMatch(prefix, @"(?i)\b(?:don't|do not|must not|without|avoid|never|instead of|not)\b[^\r\n.;:]{0,40}$"))
+                    continue;
+
+                AddUnique(c.RequiredArtifactExtensions, "." + match.Groups["extension"].Value.ToLowerInvariant(), 8);
+            }
+
+            c.RequiresInteractiveBehavior = c.RequiresWrittenArtifacts
+                && Regex.IsMatch(
+                    p,
+                    @"\b(playable|interactive|interact|clickable|click|drag(?:gable)?|keyboard|game|animation|animated|form\s+(?:submit|validation)|user\s+input)\b");
             bool implementationTask =
                 CouncilRolePrompts.DetectTaskKind(sourcePrompt) == CouncilTaskKind.Coding
-                || CouncilOrchestrator.LooksLikeCodeEditRequest(sourcePrompt);
+                || c.RequiresWrittenArtifacts;
             if (implementationTask)
             {
                 c.Acceptance.Add("The requested artifact or behavior is implemented in the connected workspace files.");
@@ -75,6 +100,10 @@ namespace Axiom.Core.Council
                 if (p.Contains("test"))
                     c.Acceptance.Add("Tests pass or new tests cover the change.");
             }
+            if (c.RequiresWrittenArtifacts && c.RequiredArtifactExtensions.Count > 0)
+                c.Acceptance.Add("At least one written artifact has each explicitly requested file type.");
+            if (c.RequiresInteractiveBehavior)
+                c.Acceptance.Add("Requested interactive behavior is implemented by executable artifact code, not described as future work.");
 
             if (c.Requirements.Count == 0 && !string.IsNullOrWhiteSpace(prompt))
             {
@@ -132,6 +161,8 @@ namespace Axiom.Core.Council
                 for (int i = 0; i < ExactLiterals.Count; i++)
                     sb.AppendLine($"  L{i + 1}. {ExactLiterals[i]}");
             }
+            if (RequiredArtifactExtensions.Count > 0)
+                sb.AppendLine("Required artifact types: " + string.Join(", ", RequiredArtifactExtensions));
             if (Acceptance.Count > 0)
             {
                 sb.AppendLine("Acceptance (A):");

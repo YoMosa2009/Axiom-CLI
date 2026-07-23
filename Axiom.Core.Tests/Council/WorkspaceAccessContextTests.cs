@@ -82,6 +82,11 @@ namespace Axiom.Core.Tests.Council
         [InlineData("fix the null reference in Main.cs", true)]
         [InlineData("add a README and implement login", true)]
         [InlineData("refactor the builder module", true)]
+        [InlineData("build a playable browser game", true)]
+        [InlineData("make a .html artifact instead of an .exe", true)]
+        [InlineData("generate a starter project with an API", true)]
+        [InlineData("design a responsive landing page", true)]
+        [InlineData("make sure the explanation is concise", false)]
         public void LooksLikeCodeEditRequest_ClassifiesIntents(string prompt, bool expectEdit)
         {
             Assert.Equal(expectEdit, CouncilOrchestrator.LooksLikeCodeEditRequest(prompt));

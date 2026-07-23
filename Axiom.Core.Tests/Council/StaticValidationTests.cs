@@ -77,9 +77,19 @@ namespace Axiom.Core.Tests.Council
         [Fact]
         public void RunArtifactChecks_StyledResponsiveHtml_Passes()
         {
-            string html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><style>body { color: #eee; }</style></head><body></body></html>";
+            string html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><style>body { color: #eee; }</style></head><body><main>Ready</main></body></html>";
 
             Assert.Empty(StaticValidation.RunArtifactChecks(html));
+        }
+
+        [Fact]
+        public void RunArtifactChecks_EmptyHtmlBody_FlagsNonDeliverable()
+        {
+            string html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><style>body { color: #eee; }</style></head><body></body></html>";
+
+            var findings = StaticValidation.RunArtifactChecks(html, "index.html");
+
+            Assert.Contains(findings, finding => finding.Contains("empty body", StringComparison.OrdinalIgnoreCase));
         }
 
         [Fact]

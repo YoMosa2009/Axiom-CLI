@@ -123,6 +123,8 @@ namespace Axiom.Core.Council
 
             TaskSpecialty specialty = IntelligenceHelpers.DetectSpecialty(request.UserPrompt);
             GoalContract goal = GoalContract.FromPrompt(request.UserPrompt);
+            bool requiresWrittenArtifacts = goal.RequiresWrittenArtifacts;
+            isArtifactTask |= requiresWrittenArtifacts;
             string memoryBlock = string.Empty;
             string rootPath = request.Workspace?.RootPath ?? "";
             if (workspaceConnected && !string.IsNullOrWhiteSpace(rootPath))
@@ -314,8 +316,9 @@ namespace Axiom.Core.Council
             var builderToolsForPrompt = agentic
                 ? _agentTools?.GetToolDefinitions(AgentToolExecutor.ToolScope.Full, request.UserPrompt, IsCustomEndpointModel)
                 : null;
+            bool planBoardAvailable = builderToolsForPrompt?.Any(tool => tool.Name == "plan_board") == true;
             string builderSystem = FoundationSystemPrompt.Apply(
-                CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, looksLikeEdit, builderToolsForPrompt, IsCustomEndpointModel, isArtifactTask));
+                CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, requiresWrittenArtifacts, builderToolsForPrompt, IsCustomEndpointModel, isArtifactTask));
             string builderContext = IsCustomEndpointModel
                 ? ContextBudget.EnforceBudget(budgetBlocks, ResolveWorkspaceContextBudgetChars())
                 : workspaceContext;
@@ -337,22 +340,41 @@ namespace Axiom.Core.Council
             // the first for real, then claimed the second was "created and verified" without ever
             // calling write_file again). WrittenPaths.Count==0 alone only catches the first failure
             // mode; checking the plan board for steps still Pending/Doing catches the second.
-            IReadOnlyList<PlanStep> unfinishedSteps = _agentTools?.Workflow.Plan.Steps
-                .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
-                .ToList() ?? new List<PlanStep>();
-            bool builderIncompleteForEdit = agentic && IsCustomEndpointModel && looksLikeEdit
-                && _agentTools != null
-                && (_agentTools.WrittenPaths.Count == 0 || unfinishedSteps.Count > 0)
-                && !ContainsPatchEnvelope(builderOutput);
-            if (builderIncompleteForEdit)
+            IReadOnlyList<PlanStep> unfinishedSteps = planBoardAvailable
+                ? _agentTools?.Workflow.Plan.Steps
+                    .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
+                    .ToList() ?? new List<PlanStep>()
+                : new List<PlanStep>();
+            ArtifactQualitySnapshot? completionQuality = null;
+            if (requiresWrittenArtifacts && _agentTools?.WrittenPaths.Count > 0)
             {
-                string nudgeDetail = unfinishedSteps.Count > 0
+                completionQuality = ArtifactQualityInspector.Inspect(
+                    _agentTools.WrittenPaths,
+                    goal,
+                    IsCustomEndpointModel ? 4_000 : 12_000);
+            }
+            bool hasBlockingArtifactFailure = completionQuality != null
+                && ArtifactQualityInspector.HasBlockingFindings(completionQuality.Findings);
+            bool builderIncompleteForArtifact = agentic && IsCustomEndpointModel && requiresWrittenArtifacts
+                && _agentTools != null
+                && (_agentTools.WrittenPaths.Count == 0 || hasBlockingArtifactFailure || unfinishedSteps.Count > 0)
+                && !ContainsPatchEnvelope(builderOutput);
+            if (builderIncompleteForArtifact)
+            {
+                AgentToolExecutor activeTools = _agentTools!;
+                string nudgeDetail = hasBlockingArtifactFailure
+                    ? "The written artifacts are not a complete usable deliverable: "
+                      + string.Join("; ", completionQuality!.Findings.Take(6))
+                      + ". Read the affected files and use the required write tools to fix every listed issue now."
+                    : unfinishedSteps.Count > 0
                     ? "You have NOT finished: " + string.Join("; ", unfinishedSteps.Select(s => $"{s.Index}. {s.Text}")) +
                       ". Call the required tool(s) for each of these now -- do not just describe them as done."
                     : "You MUST call write_file or str_replace now to make the requested change on disk — " +
                       "describing the change is not sufficient. Call a tool before responding.";
                 Report(progress, CouncilEventKind.Warning,
-                    unfinishedSteps.Count > 0
+                    hasBlockingArtifactFailure
+                        ? "Builder wrote incomplete artifacts; retrying with concrete validation findings."
+                        : unfinishedSteps.Count > 0
                         ? $"Builder left {unfinishedSteps.Count} plan step(s) unfinished — retrying with an explicit instruction."
                         : "Builder produced no tool calls or patch for an edit request — retrying with an explicit tool-use instruction.");
                 string nudgedInput = builderInput + "\n\n[INCOMPLETE] " + nudgeDetail;
@@ -361,6 +383,24 @@ namespace Axiom.Core.Council
                 builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
                 totalToolCalls += retryTools;
                 CollectWrittenFiles(changedFiles);
+
+                unfinishedSteps = planBoardAvailable
+                    ? activeTools.Workflow.Plan.Steps
+                        .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
+                        .ToList()
+                    : new List<PlanStep>();
+                completionQuality = null;
+                if (activeTools.WrittenPaths.Count > 0)
+                {
+                    completionQuality = ArtifactQualityInspector.Inspect(
+                        activeTools.WrittenPaths,
+                        goal,
+                        IsCustomEndpointModel ? 4_000 : 12_000);
+                }
+                hasBlockingArtifactFailure = completionQuality != null
+                    && ArtifactQualityInspector.HasBlockingFindings(completionQuality.Findings);
+                builderIncompleteForArtifact = !ContainsPatchEnvelope(builderOutput)
+                    && (activeTools.WrittenPaths.Count == 0 || hasBlockingArtifactFailure || unfinishedSteps.Count > 0);
             }
 
             // Builder self-check: auto diagnostics after writes before Critic
@@ -470,19 +510,27 @@ namespace Axiom.Core.Council
                 // Still incomplete after the Phase-4 nudge above (either nothing on disk, or plan
                 // steps still Pending/Doing) -- do not let this pass as a clean review just because
                 // the Critic (also on a small model) didn't catch the false "done" claim either.
-                IReadOnlyList<PlanStep> stillUnfinishedSteps = _agentTools?.Workflow.Plan.Steps
-                    .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
-                    .ToList() ?? new List<PlanStep>();
-                if (builderIncompleteForEdit && (!builderChangedDisk || stillUnfinishedSteps.Count > 0) && retries == 0)
+                IReadOnlyList<PlanStep> stillUnfinishedSteps = planBoardAvailable
+                    ? _agentTools?.Workflow.Plan.Steps
+                        .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
+                        .ToList() ?? new List<PlanStep>()
+                    : new List<PlanStep>();
+                if (builderIncompleteForArtifact
+                    && (!builderChangedDisk || hasBlockingArtifactFailure || stillUnfinishedSteps.Count > 0)
+                    && retries == 0)
                 {
                     report.Issues ??= new List<CriticIssue>();
                     report.Issues.Add(new CriticIssue
                     {
                         Severity = "high",
-                        Summary = stillUnfinishedSteps.Count > 0
+                        Summary = hasBlockingArtifactFailure
+                            ? "Builder wrote artifacts that still fail deterministic completion checks"
+                            : stillUnfinishedSteps.Count > 0
                             ? $"Builder left {stillUnfinishedSteps.Count} plan step(s) unfinished for an edit request"
                             : "Builder did not write any files or produce a patch for an edit request",
-                        Evidence = stillUnfinishedSteps.Count > 0
+                        Evidence = hasBlockingArtifactFailure
+                            ? string.Join("; ", completionQuality?.Findings.Take(6) ?? Array.Empty<string>())
+                            : stillUnfinishedSteps.Count > 0
                             ? "Unfinished: " + string.Join("; ", stillUnfinishedSteps.Select(s => $"{s.Index}. {s.Text}"))
                             : "No tool calls or [[AXIOM_CODEBASE_PATCH]] envelope were produced, even after an explicit retry",
                         SuggestedFix = "Re-run with a more explicit instruction to call write_file/str_replace, or break the task into a smaller step."
@@ -1114,10 +1162,20 @@ namespace Axiom.Core.Council
             [
                 "fix", "implement", "refactor", "rename", "migrate", "upgrade",
                 "patch", "wire up", "integrate", "scaffold", "boilerplate",
-                "add ", "create ", "change ", "update ", "edit ", "write ", "modify ",
+                "add ", "create ", "build ", "generate ", "develop ", "design ", "produce ",
+                "convert ", "code ", "change ", "update ", "edit ", "write ", "modify ",
                 "delete ", "remove ", "replace ", "insert ", "apply "
             ];
             if (editHints.Any(h => p.Contains(h, StringComparison.Ordinal)))
+                return true;
+
+            // "make" is common in creation requests but too broad on its own (for example,
+            // "make sure the tests pass" can be an instruction about an explanation). Require a
+            // concrete target so build requests are treated as workspace work without converting
+            // ordinary conversation into an edit turn.
+            if (System.Text.RegularExpressions.Regex.IsMatch(
+                p,
+                @"\bmake\s+(?:me\s+)?(?:a|an|the|this|that|it|my|our|new|something)\b"))
                 return true;
 
             // Explicit file targets often imply edits.

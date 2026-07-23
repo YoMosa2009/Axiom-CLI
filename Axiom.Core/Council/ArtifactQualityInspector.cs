@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Axiom.Core.Council
 {
@@ -33,6 +34,39 @@ namespace Axiom.Core.Council
             {
                 foreach (string finding in StaticValidation.RunArtifactChecks(document.Content, document.Path))
                     findings.Add($"{document.Path}: {finding}");
+            }
+
+            if (goal?.RequiresWrittenArtifacts == true)
+            {
+                if (documents.Count == 0)
+                {
+                    findings.Add("[HIGH - COMPLETION EVIDENCE] The task requires a written deliverable, but no readable text artifact was produced.");
+                }
+                else
+                {
+                    if (goal.RequiredArtifactExtensions.Count > 0)
+                    {
+                        foreach (string extension in goal.RequiredArtifactExtensions)
+                        {
+                            if (!documents.Any(document => string.Equals(
+                                    Path.GetExtension(document.Path), extension, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                findings.Add($"[HIGH - COMPLETION EVIDENCE] The requested {extension} artifact was not written.");
+                            }
+                        }
+                    }
+
+                    if (documents.All(document => !HasSubstantiveContent(document)))
+                    {
+                        findings.Add("[HIGH - COMPLETION EVIDENCE] Written files contain no substantive implementation; a scaffold, empty file, or metadata-only output is not a completed deliverable.");
+                    }
+
+                    if (goal.RequiresInteractiveBehavior && HasHtmlArtifact(documents)
+                        && !HasExecutableClientBehavior(documents))
+                    {
+                        findings.Add("[HIGH - COMPLETION EVIDENCE] The request requires interactive behavior, but the written browser artifact contains no executable client behavior.");
+                    }
+                }
             }
 
             if (goal is { RequiresLiteralPresenceInWrittenArtifacts: true, ExactLiterals.Count: > 0 }
@@ -95,6 +129,85 @@ namespace Axiom.Core.Council
                 or ".py" or ".java" or ".go" or ".rs" or ".cpp" or ".c" or ".h" or ".hpp"
                 or ".html" or ".htm" or ".css" or ".json" or ".xml" or ".yml" or ".yaml"
                 or ".md" or ".txt" or ".sql" or ".sh" or ".ps1";
+
+        public static bool HasBlockingFindings(IEnumerable<string>? findings)
+            => (findings ?? Array.Empty<string>()).Any(f =>
+                f.Contains("[HIGH", StringComparison.OrdinalIgnoreCase)
+                || f.Contains("[CRITICAL", StringComparison.OrdinalIgnoreCase));
+
+        private static bool HasSubstantiveContent(ArtifactDocument document)
+        {
+            string content = document.Content;
+            if (string.IsNullOrWhiteSpace(content))
+                return false;
+
+            string withoutComments = Regex.Replace(
+                content,
+                @"<!--.*?-->|/\*.*?\*/",
+                string.Empty,
+                RegexOptions.Singleline);
+            withoutComments = Regex.Replace(
+                withoutComments,
+                @"^\s*(?://|#).*$",
+                string.Empty,
+                RegexOptions.Multiline).Trim();
+            if (withoutComments.Length < 16)
+                return false;
+
+            string extension = Path.GetExtension(document.Path).ToLowerInvariant();
+            if (extension is not ".html" and not ".htm")
+                return true;
+
+            Match body = Regex.Match(withoutComments, @"<body\b[^>]*>(?<content>.*?)</body\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            if (!body.Success)
+                return true;
+
+            string bodyContent = body.Groups["content"].Value.Trim();
+            return bodyContent.Length >= 16
+                && (Regex.IsMatch(bodyContent, @"<(?:canvas|svg|main|section|article|div|button|input|form|script)\b", RegexOptions.IgnoreCase)
+                    || Regex.Replace(bodyContent, @"<[^>]+>", string.Empty).Trim().Length > 0);
+        }
+
+        private static bool HasHtmlArtifact(IEnumerable<ArtifactDocument> documents)
+            => documents.Any(document => Path.GetExtension(document.Path).Equals(".html", StringComparison.OrdinalIgnoreCase)
+                || Path.GetExtension(document.Path).Equals(".htm", StringComparison.OrdinalIgnoreCase));
+
+        private static bool HasExecutableClientBehavior(IEnumerable<ArtifactDocument> documents)
+        {
+            foreach (ArtifactDocument document in documents)
+            {
+                string extension = Path.GetExtension(document.Path).ToLowerInvariant();
+                if (extension is ".js" or ".jsx" or ".ts" or ".tsx")
+                {
+                    if (HasSubstantiveContent(document))
+                        return true;
+                    continue;
+                }
+
+                if (extension is not ".html" and not ".htm")
+                    continue;
+
+                if (Regex.IsMatch(document.Content, @"\bon[a-z]+\s*=\s*['""][^'""]+", RegexOptions.IgnoreCase))
+                    return true;
+
+                foreach (Match script in Regex.Matches(
+                    document.Content,
+                    @"<script\b(?<attributes>[^>]*)>(?<code>.*?)</script\s*>",
+                    RegexOptions.IgnoreCase | RegexOptions.Singleline))
+                {
+                    string attributes = script.Groups["attributes"].Value;
+                    if (Regex.IsMatch(attributes, @"\bsrc\s*=\s*['""][^'""]+", RegexOptions.IgnoreCase))
+                        return true;
+
+                    string code = Regex.Replace(script.Groups["code"].Value, @"/\*.*?\*/|//.*$", string.Empty,
+                        RegexOptions.Singleline | RegexOptions.Multiline).Trim();
+                    if (code.Length >= 12)
+                        return true;
+                }
+            }
+
+            return false;
+        }
 
         private static string BuildEvidenceBlock(
             IReadOnlyList<ArtifactDocument> documents,

@@ -38,6 +38,19 @@ namespace Axiom.Core.Tests.Council
         }
 
         [Fact]
+        public void FromPrompt_CapturesRequestedArtifactTypeAndInteractiveRequirement()
+        {
+            GoalContract contract = GoalContract.FromPrompt(
+                "Do not make an .exe. Build a playable browser game as an .html file.");
+
+            Assert.True(contract.RequiresWrittenArtifacts);
+            Assert.True(contract.RequiresInteractiveBehavior);
+            Assert.Contains(".html", contract.RequiredArtifactExtensions);
+            Assert.DoesNotContain(".exe", contract.RequiredArtifactExtensions);
+            Assert.Contains("Required artifact types", contract.ToPromptBlock());
+        }
+
+        [Fact]
         public void FromPrompt_DoesNotTurnInjectedToolEvidenceIntoRequirements()
         {
             GoalContract contract = GoalContract.FromPrompt(

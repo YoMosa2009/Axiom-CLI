@@ -212,6 +212,16 @@ namespace Axiom.Core.Council
                 return findings.Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToList();
             }
 
+            Match bodyMatch = Regex.Match(content, @"<body\b[^>]*>(?<content>.*?)</body\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            if (bodyMatch.Success)
+            {
+                string bodyWithoutComments = Regex.Replace(bodyMatch.Groups["content"].Value, @"<!--.*?-->", string.Empty, RegexOptions.Singleline).Trim();
+                if (string.IsNullOrWhiteSpace(bodyWithoutComments))
+                {
+                    findings.Add("[HIGH - ARTIFACT VALIDATION] The HTML document has an empty body, so it cannot render a usable deliverable.");
+                }
+            }
+
             bool hasEmbeddedCss = Regex.IsMatch(lower, @"<style\b[^>]*>\s*[^<]+", RegexOptions.IgnoreCase);
             bool hasStylesheet = Regex.IsMatch(lower, "<link\\b[^>]*rel\\s*=\\s*['\\\"]?stylesheet", RegexOptions.IgnoreCase);
             if (!hasEmbeddedCss && !hasStylesheet)

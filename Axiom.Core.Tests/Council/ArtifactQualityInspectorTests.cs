@@ -34,5 +34,30 @@ namespace Axiom.Core.Tests.Council
                 try { Directory.Delete(dir, true); } catch { /* ignore */ }
             }
         }
+
+        [Fact]
+        public void Inspect_FlagsMissingRequestedArtifactAndNonInteractiveBrowserOutput()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "axiom-quality-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "index.html");
+            File.WriteAllText(path,
+                "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><style>body { color: #eee; }</style></head><body><main>Static</main></body></html>");
+            try
+            {
+                GoalContract goal = GoalContract.FromPrompt(
+                    "Do not make an .exe. Build a playable browser game as an .html file.");
+
+                ArtifactQualitySnapshot snapshot = ArtifactQualityInspector.Inspect([path], goal);
+
+                Assert.DoesNotContain(snapshot.Findings, finding => finding.Contains("requested .html artifact", StringComparison.OrdinalIgnoreCase));
+                Assert.Contains(snapshot.Findings, finding => finding.Contains("interactive behavior", StringComparison.OrdinalIgnoreCase));
+                Assert.True(ArtifactQualityInspector.HasBlockingFindings(snapshot.Findings));
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); } catch { /* ignore */ }
+            }
+        }
     }
 }

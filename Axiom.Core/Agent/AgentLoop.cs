@@ -65,12 +65,14 @@ namespace Axiom.Core.Agent
 
             TaskSpecialty specialty = IntelligenceHelpers.DetectSpecialty(userMessage);
             GoalContract goal = GoalContract.FromPrompt(userMessage);
+            bool requiresWrittenArtifacts = goal.RequiresWrittenArtifacts;
             string goalBlock = goal.ToPromptBlock();
             // Same tool list ToolCallingLoop.RunAsync will independently (but deterministically)
             // resolve below -- computed here too so the system prompt's tool enumeration matches
             // what's actually offered instead of a static ~19-tool catalog. A genuine simplification
             // for every model: the filter is a no-op unless isCustomEndpoint is true.
             var toolsForPrompt = _tools.GetToolDefinitions(AgentToolExecutor.ToolScope.Full, userMessage, isCustomEndpoint);
+            bool planBoardAvailable = toolsForPrompt.Any(tool => tool.Name == "plan_board");
             string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt(_tools.ApprovalMode, specialty, toolsForPrompt, isCustomEndpoint));
 
             string workspaceBlock = _workspace.BuildContextBlock(isCustomEndpoint ? 40 : 120);
@@ -229,19 +231,42 @@ namespace Axiom.Core.Agent
                 // real, then claimed the second was done without ever calling write_file again) --
                 // WrittenPaths.Count==0 alone only catches the first failure mode; the plan board
                 // (steps still Pending/Doing) catches the second.
-                var unfinishedSteps = _tools.Workflow.Plan.Steps
-                    .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
-                    .ToList();
-                if (isCustomEndpoint && looksLikeEdit && !cancelled
+                // The compact Kestrel tool menu intentionally omits plan_board. In that mode the
+                // Builder cannot update plan state, so pending plan items are advisory rather than
+                // proof of incomplete work. Disk artifacts and their validation remain the source
+                // of truth for completion in every mode.
+                var unfinishedSteps = planBoardAvailable
+                    ? _tools.Workflow.Plan.Steps
+                        .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
+                        .ToList()
+                    : new List<PlanStep>();
+                ArtifactQualitySnapshot? completionQuality = null;
+                if (isCustomEndpoint && requiresWrittenArtifacts && _tools.WrittenPaths.Count > 0)
+                {
+                    completionQuality = ArtifactQualityInspector.Inspect(
+                        _tools.WrittenPaths,
+                        goal,
+                        evidenceCharacterBudget: 2_000);
+                }
+                bool hasBlockingArtifactFailure = completionQuality != null
+                    && ArtifactQualityInspector.HasBlockingFindings(completionQuality.Findings);
+                if (isCustomEndpoint && requiresWrittenArtifacts && !cancelled
                     && ((_tools.WrittenPaths.Count == 0 && (toolCalls == 0 || result.LooksLikeObservationEcho))
+                        || hasBlockingArtifactFailure
                         || unfinishedSteps.Count > 0))
                 {
-                    string nudgeDetail = unfinishedSteps.Count > 0
+                    string nudgeDetail = hasBlockingArtifactFailure
+                        ? "The written artifacts are not a complete usable deliverable yet: "
+                          + string.Join("; ", completionQuality!.Findings.Take(6))
+                          + ". Read the affected files and use the required write tools to fix every listed issue now."
+                        : unfinishedSteps.Count > 0
                         ? "You have NOT finished: " + string.Join("; ", unfinishedSteps.Select(s => $"{s.Index}. {s.Text}")) +
                           ". Call the required tool(s) for each of these now -- do not just describe them as done."
                         : "You MUST call write_file or str_replace now to make the requested change on disk — " +
                           "describing the change is not sufficient. Call a tool before responding.";
-                    onStatus?.Invoke(unfinishedSteps.Count > 0
+                    onStatus?.Invoke(hasBlockingArtifactFailure
+                        ? "Written artifacts are incomplete — retrying with concrete validation findings"
+                        : unfinishedSteps.Count > 0
                         ? $"{unfinishedSteps.Count} plan step(s) unfinished — retrying with explicit instruction"
                         : "No tool calls detected — retrying with explicit instruction");
                     string nudgedInput = effectiveUser + "\n\n[INCOMPLETE] " + nudgeDetail;
@@ -260,12 +285,27 @@ namespace Axiom.Core.Agent
                     toolCalls += retryResult.ToolCallCount;
                     cancelled = retryResult.Cancelled;
 
-                    bool stillUnfinished = _tools.Workflow.Plan.Steps
+                    bool stillUnfinished = planBoardAvailable && _tools.Workflow.Plan.Steps
                         .Any(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing);
+                    ArtifactQualitySnapshot? postCompletionQuality = null;
+                    if (requiresWrittenArtifacts && _tools.WrittenPaths.Count > 0)
+                    {
+                        postCompletionQuality = ArtifactQualityInspector.Inspect(
+                            _tools.WrittenPaths,
+                            goal,
+                            evidenceCharacterBudget: 2_000);
+                    }
+                    bool stillHasBlockingArtifactFailure = postCompletionQuality != null
+                        && ArtifactQualityInspector.HasBlockingFindings(postCompletionQuality.Findings);
                     if (!cancelled && _tools.WrittenPaths.Count == 0 && retryResult.ToolCallCount == 0)
                     {
                         finalText = (finalText ?? string.Empty).TrimEnd()
                             + "\n\n⚠ No files were changed for this request — the model did not call any tools.";
+                    }
+                    else if (!cancelled && stillHasBlockingArtifactFailure)
+                    {
+                        finalText = (finalText ?? string.Empty).TrimEnd()
+                            + "\n\n⚠ The written artifacts still fail completion checks — review the reported validation findings.";
                     }
                     else if (!cancelled && stillUnfinished)
                     {
@@ -286,7 +326,7 @@ namespace Axiom.Core.Agent
                 // A compact model benefits from a separate evidence-backed verification pass.
                 // This is shared across every implementation type: exact literals, structural
                 // validation, file-type checks, diagnostics, and the full task contract.
-                if (isCustomEndpoint && looksLikeEdit && !cancelled
+                if (isCustomEndpoint && requiresWrittenArtifacts && !cancelled
                     && _tools.WrittenPaths.Count > 0
                     && _tools.ApprovalMode != ApprovalMode.Plan)
                 {
