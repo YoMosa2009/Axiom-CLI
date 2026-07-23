@@ -225,8 +225,7 @@ internal static class Program
         using var db = new DatabaseService();
         if (!db.IsReady)
         {
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Local database is unavailable — cannot store settings.[/]");
-            return Task.FromResult(1);
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Warning)}]Local database is unavailable — using the durable settings backup.[/]");
         }
 
         string? existingOpenRouterKey = db.LoadOpenRouterApiKey();
@@ -245,6 +244,7 @@ internal static class Program
         AnsiConsole.MarkupLine($"[bold]Self-hosted endpoint[/] [{AxiomTheme.Hex(AxiomTheme.SystemMuted)}](optional — leave any field blank to skip)[/]");
 
         string existingBaseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
+        string existingContextWindow = db.GetSetting(DatabaseService.CustomEndpointContextWindowSettingKey);
         string? existingCustomKey = db.LoadCustomEndpointApiKey();
         if (!string.IsNullOrWhiteSpace(existingBaseUrl) || !string.IsNullOrWhiteSpace(existingCustomKey))
         {
@@ -268,6 +268,22 @@ internal static class Program
         if (!string.IsNullOrWhiteSpace(modelIdInput))
             db.SaveSetting(DatabaseService.CustomEndpointModelIdSettingKey, modelIdInput);
 
+        int displayedContextWindow = ParseCustomEndpointContextWindow(existingContextWindow);
+        AnsiConsole.Markup($"Context window tokens [{displayedContextWindow}]: ");
+        string contextWindowInput = (ReadLinePlain() ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(contextWindowInput))
+        {
+            if (int.TryParse(contextWindowInput, out int contextWindow)
+                && contextWindow is >= 1024 and <= 1_000_000)
+            {
+                db.SaveSetting(DatabaseService.CustomEndpointContextWindowSettingKey, contextWindow.ToString());
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Context window must be a number from 1,024 to 1,000,000. Keeping {displayedContextWindow}.[/]");
+            }
+        }
+
         AnsiConsole.Markup("API key: ");
         string customKeyInput = ReadLineSecret() ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(customKeyInput))
@@ -275,7 +291,8 @@ internal static class Program
 
         bool configuredCustomEndpoint = !string.IsNullOrWhiteSpace(baseUrlInput)
             || !string.IsNullOrWhiteSpace(modelIdInput)
-            || !string.IsNullOrWhiteSpace(customKeyInput);
+            || !string.IsNullOrWhiteSpace(customKeyInput)
+            || !string.IsNullOrWhiteSpace(contextWindowInput);
         if (configuredCustomEndpoint)
         {
             // "Saved" only ever meant "at least one field was written" -- which silently misled
@@ -284,6 +301,7 @@ internal static class Program
             // Report the real, final state instead of a blanket success message.
             string finalBaseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
             string finalModelId = db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey);
+            int finalContextWindow = ParseCustomEndpointContextWindow(db.GetSetting(DatabaseService.CustomEndpointContextWindowSettingKey));
             string? finalApiKey = db.LoadCustomEndpointApiKey();
             var missing = new List<string>();
             if (string.IsNullOrWhiteSpace(finalBaseUrl)) missing.Add("base URL");
@@ -294,6 +312,7 @@ internal static class Program
 
             if (missing.Count == 0 && finalUrlValid)
             {
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Configured context window: {finalContextWindow:n0} tokens.[/]");
                 AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Custom endpoint saved and ready — 'kestral' is usable now.[/]");
             }
             else if (missing.Count == 0)
@@ -327,11 +346,17 @@ internal static class Program
     // credential was loaded. Blank values are harmless: HasValidCustomEndpoint just stays false.
     private static void ApplyStoredCustomEndpoint(DatabaseService db, OpenRouterChatService chatService)
     {
-        string baseUrl = db.IsReady ? db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey) : string.Empty;
-        string modelId = db.IsReady ? db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey) : string.Empty;
-        string apiKey = db.IsReady ? (db.LoadCustomEndpointApiKey() ?? string.Empty) : string.Empty;
-        chatService.SetCustomEndpoint(baseUrl, apiKey, modelId);
+        string baseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
+        string modelId = db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey);
+        string apiKey = db.LoadCustomEndpointApiKey() ?? string.Empty;
+        int contextWindow = ParseCustomEndpointContextWindow(db.GetSetting(DatabaseService.CustomEndpointContextWindowSettingKey));
+        chatService.SetCustomEndpoint(baseUrl, apiKey, modelId, contextWindow);
     }
+
+    private static int ParseCustomEndpointContextWindow(string? raw)
+        => int.TryParse(raw, out int value) && value is >= 1024 and <= 1_000_000
+            ? value
+            : OpenRouterChatService.CustomEndpointContextWindowTokens;
 
     private static string? ReadLineSecret()
     {
@@ -356,7 +381,7 @@ internal static class Program
         await ShowUpdateNoticeIfAvailableAsync();
 
         using var db = new DatabaseService();
-        string? apiKey = db.IsReady ? db.LoadOpenRouterApiKey() : null;
+        string? apiKey = db.LoadOpenRouterApiKey();
 
         var profiles = new UserProfileStore();
         string profileName = profiles.ResolveActiveName(profileOverride);
@@ -427,8 +452,6 @@ internal static class Program
             attachPaths: AttachPathsMentionedInMessage,
             saveApiKey: key =>
             {
-                if (!db.IsReady)
-                    return false;
                 db.SaveOpenRouterApiKey(key);
                 return true;
             });
@@ -475,7 +498,7 @@ internal static class Program
         }
 
         using var db = new DatabaseService();
-        string? apiKey = db.IsReady ? db.LoadOpenRouterApiKey() : null;
+        string? apiKey = db.LoadOpenRouterApiKey();
 
         var chatService = new OpenRouterChatService();
         if (!string.IsNullOrWhiteSpace(apiKey))

@@ -220,6 +220,7 @@ namespace Axiom.Core.Chat
         private string _customEndpointBaseUrl = string.Empty;
         private string _customEndpointApiKey = string.Empty;
         private string _customEndpointModelId = string.Empty;
+        private int _customEndpointContextWindowTokens = CustomEndpointContextWindowTokens;
         private List<(string Id, string Label, bool IsFree)> _availableModels = new();
         private readonly Dictionary<string, HashSet<string>> _modelSupportedParameters = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _imageInputModelIds = new(StringComparer.OrdinalIgnoreCase);
@@ -472,12 +473,15 @@ namespace Axiom.Core.Chat
 
         public bool HasValidKey => !string.IsNullOrWhiteSpace(_apiKey) && _apiKey.Length > 10;
 
-        public void SetCustomEndpoint(string baseUrl, string apiKey, string modelId)
+        public void SetCustomEndpoint(string baseUrl, string apiKey, string modelId, int contextWindowTokens = CustomEndpointContextWindowTokens)
         {
             _customEndpointBaseUrl = (baseUrl ?? string.Empty).Trim();
             _customEndpointApiKey = (apiKey ?? string.Empty).Trim();
             _customEndpointModelId = (modelId ?? string.Empty).Trim();
+            _customEndpointContextWindowTokens = Math.Clamp(contextWindowTokens, 1024, 1_000_000);
         }
+
+        public int ConfiguredCustomEndpointContextWindowTokens => _customEndpointContextWindowTokens;
 
         public bool HasValidCustomEndpoint =>
             !string.IsNullOrWhiteSpace(_customEndpointBaseUrl)
@@ -1561,12 +1565,14 @@ namespace Axiom.Core.Chat
         }
 
         // A real OpenRouter window is 131k+ tokens, so requesting an 8192-token completion still
-        // leaves comfortable room for input. Kestral's real window (CustomEndpointContextWindowTokens)
-        // is only 8192 total -- requesting the same 8192-token completion would leave nothing for
+        // leaves comfortable room for input. Kestral's configured window may be much smaller --
+        // requesting the same 8192-token completion would leave nothing for
         // input at all. Keep the reserved output small so most of the window stays available for
         // the actual prompt.
         private static int ResolveDefaultMaxCompletionTokens(OpenRouterModelProfile profile)
-            => profile.IsCustomEndpoint ? 1536 : 8192;
+            => profile.IsCustomEndpoint
+                ? Math.Clamp(profile.ApproximateContextWindowTokens / 5, 768, 2048)
+                : 8192;
 
         // Kept in sync with GetSystemPromptCharacterLimit / ResolveDefaultMaxCompletionTokens above --
         // both exist because a small custom-endpoint window can't absorb budgets sized for a 131k+
@@ -1838,9 +1844,12 @@ namespace Axiom.Core.Chat
         // Granite's own chat template documents the pipe-wrapped <|tool_call|> tag, but empirically
         // (confirmed directly against the real endpoint) the model actually emits the non-piped
         // <tool_call> form -- accept both so this survives either.
-        private static readonly Regex FallbackTextToolCallRegex = new(
-            @"<\|?tool_call\|?>\s*(\[.*?\])\s*(?:<\|?/tool_call\|?>)?",
-            RegexOptions.Compiled | RegexOptions.Singleline);
+        private static readonly Regex FallbackTextToolCallStartRegex = new(
+            @"<\|?tool_call\|?>",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex FallbackTextToolCallEndRegex = new(
+            @"\s*<\|?/tool_call\|?>",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static (string Content, IReadOnlyList<OpenRouterToolCall> ToolCalls) ApplyFallbackTextToolCalls(
             string content,
@@ -1852,42 +1861,122 @@ namespace Axiom.Core.Chat
             if (structuredCalls.Count > 0 || tools is not { Count: > 0 } || string.IsNullOrWhiteSpace(content))
                 return (content, structuredCalls);
 
-            Match match = FallbackTextToolCallRegex.Match(content);
+            Match match = FallbackTextToolCallStartRegex.Match(content);
             if (!match.Success)
                 return (content, structuredCalls);
 
-            var parsed = new List<OpenRouterToolCall>();
-            try
-            {
-                using JsonDocument doc = JsonDocument.Parse(match.Groups[1].Value);
-                if (doc.RootElement.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (JsonElement item in doc.RootElement.EnumerateArray())
-                    {
-                        if (!item.TryGetProperty("name", out JsonElement nameEl))
-                            continue;
-                        string name = nameEl.GetString() ?? string.Empty;
-                        if (string.IsNullOrWhiteSpace(name))
-                            continue;
-
-                        string argsJson = item.TryGetProperty("arguments", out JsonElement argsEl)
-                            ? argsEl.GetRawText()
-                            : "{}";
-
-                        parsed.Add(new OpenRouterToolCall(Guid.NewGuid().ToString("N"), name, argsJson));
-                    }
-                }
-            }
-            catch (JsonException)
-            {
+            int payloadOffset = match.Index + match.Length;
+            while (payloadOffset < content.Length && char.IsWhiteSpace(content[payloadOffset]))
+                payloadOffset++;
+            string afterTag = content[payloadOffset..];
+            if (!TryExtractJsonValue(afterTag, out string payload, out int payloadLength))
                 return (content, structuredCalls);
-            }
+
+            IReadOnlyList<OpenRouterToolCall> parsed = ParseFallbackToolCallPayload(payload, tools);
 
             if (parsed.Count == 0)
                 return (content, structuredCalls);
 
-            string cleanedContent = FallbackTextToolCallRegex.Replace(content, string.Empty).Trim();
+            int removalLength = (payloadOffset - match.Index) + payloadLength;
+            string remainder = content[(match.Index + removalLength)..];
+            Match end = FallbackTextToolCallEndRegex.Match(remainder);
+            if (end.Success && end.Index == 0)
+                removalLength += end.Length;
+
+            string cleanedContent = (content[..match.Index] + content[(match.Index + removalLength)..]).Trim();
             return (cleanedContent, parsed);
+        }
+
+        private static IReadOnlyList<OpenRouterToolCall> ParseFallbackToolCallPayload(
+            string payload,
+            IReadOnlyList<OpenRouterToolDefinition> tools)
+        {
+            var parsed = new List<OpenRouterToolCall>();
+            var allowedNames = new HashSet<string>(tools.Select(t => t.Name), StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(payload);
+                IEnumerable<JsonElement> items = doc.RootElement.ValueKind switch
+                {
+                    JsonValueKind.Array => doc.RootElement.EnumerateArray(),
+                    JsonValueKind.Object when doc.RootElement.TryGetProperty("tool_calls", out JsonElement calls)
+                        && calls.ValueKind == JsonValueKind.Array => calls.EnumerateArray(),
+                    JsonValueKind.Object => new[] { doc.RootElement },
+                    _ => Array.Empty<JsonElement>()
+                };
+
+                foreach (JsonElement item in items)
+                {
+                    if (item.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    JsonElement function = item;
+                    if (item.TryGetProperty("function", out JsonElement nested)
+                        && nested.ValueKind == JsonValueKind.Object)
+                        function = nested;
+
+                    string name = function.TryGetProperty("name", out JsonElement nameEl)
+                        ? nameEl.GetString() ?? string.Empty
+                        : string.Empty;
+                    if (string.IsNullOrWhiteSpace(name) || !allowedNames.Contains(name))
+                        continue;
+
+                    JsonElement args = default;
+                    bool hasArgs = function.TryGetProperty("arguments", out args)
+                        || function.TryGetProperty("parameters", out args)
+                        || function.TryGetProperty("args", out args);
+                    string argsJson = !hasArgs ? "{}"
+                        : args.ValueKind == JsonValueKind.String ? args.GetString() ?? "{}"
+                        : args.GetRawText();
+
+                    try
+                    {
+                        using JsonDocument ignored = JsonDocument.Parse(argsJson);
+                        parsed.Add(new OpenRouterToolCall(Guid.NewGuid().ToString("N"), name, argsJson));
+                    }
+                    catch (JsonException) { /* malformed model argument payload */ }
+                }
+            }
+            catch (JsonException) { /* not a complete fallback call */ }
+
+            return parsed;
+        }
+
+        private static bool TryExtractJsonValue(string source, out string value, out int length)
+        {
+            value = string.Empty;
+            length = 0;
+            if (string.IsNullOrEmpty(source) || source[0] is not ('{' or '['))
+                return false;
+
+            int depth = 0;
+            bool quoted = false;
+            bool escaped = false;
+            for (int i = 0; i < source.Length; i++)
+            {
+                char c = source[i];
+                if (quoted)
+                {
+                    if (escaped) escaped = false;
+                    else if (c == '\\') escaped = true;
+                    else if (c == '"') quoted = false;
+                    continue;
+                }
+                if (c == '"') { quoted = true; continue; }
+                if (c is '{' or '[') depth++;
+                else if (c is '}' or ']')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        value = source[..(i + 1)];
+                        length = i + 1;
+                        return true;
+                    }
+                    if (depth < 0) return false;
+                }
+            }
+            return false;
         }
 
         private static IReadOnlyList<OpenRouterToolCall> ExtractToolCalls(JsonElement message)
@@ -2589,8 +2678,8 @@ namespace Axiom.Core.Chat
                     AliasLabel: CustomEndpointModelLabel,
                     PrimaryApiModelId: _customEndpointModelId,
                     AlternativeApiModelIds: [],
-                    IsCodeSpecialized: false,
-                    ApproximateContextWindowTokens: CustomEndpointContextWindowTokens,
+                    IsCodeSpecialized: true,
+                    ApproximateContextWindowTokens: _customEndpointContextWindowTokens,
                     IsCustomEndpoint: true);
             }
 

@@ -71,6 +71,22 @@ namespace Axiom.Core.Tests.Agent
         }
 
         [Fact]
+        public void Filter_UsesCompactToolSurfaceForAnAttachedCodingRequest()
+        {
+            var result = ToolGatingHeuristics.Filter(FullCatalog, "fix the bug in Program.cs", workspaceAttached: true);
+            var names = result.Select(t => t.Name).ToHashSet();
+
+            Assert.Contains("read_file", names);
+            Assert.Contains("write_file", names);
+            Assert.Contains("str_replace", names);
+            Assert.Contains("run_tests", names);
+            Assert.DoesNotContain("apply_patch", names);
+            Assert.DoesNotContain("write_files", names);
+            Assert.DoesNotContain("git_commit", names);
+            Assert.DoesNotContain("spawn_subagent", names);
+        }
+
+        [Fact]
         public void Filter_IncludesShellToolsForBuildOrRunRequest()
         {
             var result = ToolGatingHeuristics.Filter(FullCatalog, "run the tests and tell me if they pass", workspaceAttached: false);

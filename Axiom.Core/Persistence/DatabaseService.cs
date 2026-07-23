@@ -14,8 +14,10 @@ namespace Axiom.Core.Persistence
         private const string CustomEndpointApiKeySettingKey = "custom_endpoint_api_key";
         public const string CustomEndpointBaseUrlSettingKey = "custom_endpoint_base_url";
         public const string CustomEndpointModelIdSettingKey = "custom_endpoint_model_id";
+        public const string CustomEndpointContextWindowSettingKey = "custom_endpoint_context_window_tokens";
         private readonly SqliteConnection _connection;
         private readonly ISecretStore _secretStore;
+        private readonly PersistentSettingsStore _settingsBackup;
         private readonly object _gate = new();
         private bool _isInitialized;
         private bool _disposed;
@@ -25,6 +27,7 @@ namespace Axiom.Core.Persistence
         public DatabaseService(ISecretStore? secretStore = null, string? databasePath = null)
         {
             _secretStore = secretStore ?? SecretStoreFactory.Create();
+            _settingsBackup = new PersistentSettingsStore();
             try
             {
                 string connectionString = $"Data Source={databasePath ?? AppPaths.DatabaseFile}";
@@ -230,6 +233,8 @@ namespace Axiom.Core.Persistence
 
         public void SaveSetting(string key, string value)
         {
+            // Persist before SQLite: a transient lock must not erase the user's next launch.
+            try { _settingsBackup.Save(key, value ?? string.Empty); } catch { /* best effort */ }
             if (!IsReady) return;
             try
             {
@@ -254,7 +259,8 @@ namespace Axiom.Core.Persistence
 
         public string GetSetting(string key)
         {
-            if (!IsReady) return "";
+            if (!IsReady)
+                return _settingsBackup.Get(key);
             try
             {
                 lock (_gate)
@@ -263,20 +269,19 @@ namespace Axiom.Core.Persistence
                     command.CommandText = "SELECT SettingValue FROM Settings WHERE SettingKey = @key";
                     command.Parameters.AddWithValue("@key", key);
                     var result = command.ExecuteScalar();
-                    return result?.ToString() ?? "";
+                    string value = result?.ToString() ?? "";
+                    return string.IsNullOrWhiteSpace(value) ? _settingsBackup.Get(key) : value;
                 }
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"GetSetting error: {ex.Message}");
-                return "";
+                return _settingsBackup.Get(key);
             }
         }
 
         public void SaveOpenRouterApiKey(string apiKey)
         {
-            if (!IsReady) return;
-
             try
             {
                 string normalized = (apiKey ?? string.Empty).Trim();
@@ -297,8 +302,6 @@ namespace Axiom.Core.Persistence
 
         public string? LoadOpenRouterApiKey()
         {
-            if (!IsReady) return null;
-
             try
             {
                 string stored = GetSetting(OpenRouterApiKeySettingKey);
@@ -312,14 +315,12 @@ namespace Axiom.Core.Persistence
             {
                 Debug.WriteLine($"LoadOpenRouterApiKey error: {ex.Message}");
                 _ = BackendLogService.LogErrorAsync("DatabaseService.LoadOpenRouterApiKey", ex);
-                return null;
+                return TryLoadBackupSecret(OpenRouterApiKeySettingKey);
             }
         }
 
         public void SaveCustomEndpointApiKey(string apiKey)
         {
-            if (!IsReady) return;
-
             try
             {
                 string normalized = (apiKey ?? string.Empty).Trim();
@@ -340,8 +341,6 @@ namespace Axiom.Core.Persistence
 
         public string? LoadCustomEndpointApiKey()
         {
-            if (!IsReady) return null;
-
             try
             {
                 string stored = GetSetting(CustomEndpointApiKeySettingKey);
@@ -355,6 +354,22 @@ namespace Axiom.Core.Persistence
             {
                 Debug.WriteLine($"LoadCustomEndpointApiKey error: {ex.Message}");
                 _ = BackendLogService.LogErrorAsync("DatabaseService.LoadCustomEndpointApiKey", ex);
+                return TryLoadBackupSecret(CustomEndpointApiKeySettingKey);
+            }
+        }
+
+        private string? TryLoadBackupSecret(string settingKey)
+        {
+            try
+            {
+                string stored = _settingsBackup.Get(settingKey);
+                if (string.IsNullOrWhiteSpace(stored))
+                    return null;
+                string plaintext = _secretStore.Unprotect(stored).Trim();
+                return string.IsNullOrWhiteSpace(plaintext) ? null : plaintext;
+            }
+            catch
+            {
                 return null;
             }
         }

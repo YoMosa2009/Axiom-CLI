@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -54,6 +55,9 @@ internal sealed class ChatTui : IDisposable
     private CancellationTokenSource? _turnCts;
     private readonly StringBuilder _streamBuffer = new();
     private int _streamAssistantIndex = -1;
+    // Council roles may report from parallel worker tasks. The terminal itself is single-threaded,
+    // so workers enqueue events and the input/render loop applies them in order.
+    private readonly ConcurrentQueue<CouncilEvent> _pendingCouncilEvents = new();
     private TaskCompletionSource<bool>? _approvalTcs;
     private string _approvalPrompt = string.Empty;
     private TaskCompletionSource<string>? _criticPickTcs;
@@ -1572,51 +1576,9 @@ internal sealed class ChatTui : IDisposable
         _streamBuffer.Clear();
         _streamAssistantIndex = -1;
 
-        var progress = new Progress<CouncilEvent>(evt =>
-        {
-            switch (evt.Kind)
-            {
-                case CouncilEventKind.Status:
-                case CouncilEventKind.Warning:
-                    SetActivity(evt.Message);
-                    break;
-                case CouncilEventKind.Tool:
-                    PushSystem(evt.Message);
-                    break;
-                case CouncilEventKind.Token:
-                    AppendStreamToken(evt.Message);
-                    break;
-                case CouncilEventKind.ArchitectOutput:
-                    SetActivity("Council · Architect done");
-                    FlushStreamAsSystem("Architect plan");
-                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
-                        PushSystem("Architect plan\n" + Truncate(evt.Message, 1200));
-                    break;
-                case CouncilEventKind.BuilderOutput:
-                    SetActivity("Council · Builder working");
-                    // Final builder text becomes the assistant answer later; keep stream as working log.
-                    FlushStreamAsSystem("Builder draft");
-                    break;
-                case CouncilEventKind.CriticOutput:
-                    SetActivity("Council · Critic reviewing");
-                    FlushStreamAsSystem("Critic");
-                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
-                        PushSystem("Critic review\n" + Truncate(evt.Message, 800));
-                    break;
-                case CouncilEventKind.ExploreOutput:
-                    SetActivity("Council · Explore done");
-                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
-                        PushSystem("Explore lane\n" + Truncate(evt.Message, 800));
-                    break;
-                case CouncilEventKind.Completed:
-                    SetActivity("Council · Finished");
-                    break;
-                case CouncilEventKind.Failed:
-                    SetActivity("Council · Failed");
-                    break;
-            }
-            ThrottledPaint();
-        });
+        while (_pendingCouncilEvents.TryDequeue(out _)) { }
+        IProgress<CouncilEvent> progress = new InlineProgress<CouncilEvent>(
+            evt => _pendingCouncilEvents.Enqueue(evt));
 
         ConnectedWorkspaceState? wsState = null;
         if (_session.Workspace.Roots.Count > 0)
@@ -1655,6 +1617,7 @@ internal sealed class ChatTui : IDisposable
             token);
 
         await PumpScrollWhileAsync(task);
+        DrainCouncilEvents();
         CouncilResult result = await task;
         sw.Stop();
 
@@ -1728,10 +1691,63 @@ internal sealed class ChatTui : IDisposable
             PushSystem($"{label} streamed ({text.Length} chars)");
     }
 
+    private void DrainCouncilEvents()
+    {
+        bool changed = false;
+        while (_pendingCouncilEvents.TryDequeue(out CouncilEvent evt))
+        {
+            changed = true;
+            switch (evt.Kind)
+            {
+                case CouncilEventKind.Status:
+                case CouncilEventKind.Warning:
+                    SetActivity(evt.Message);
+                    break;
+                case CouncilEventKind.Tool:
+                    PushSystem(evt.Message);
+                    break;
+                case CouncilEventKind.Token:
+                    AppendStreamToken(evt.Message);
+                    break;
+                case CouncilEventKind.ArchitectOutput:
+                    SetActivity("Council · Architect done");
+                    FlushStreamAsSystem("Architect plan");
+                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
+                        PushSystem("Architect plan\n" + Truncate(evt.Message, 1200));
+                    break;
+                case CouncilEventKind.BuilderOutput:
+                    SetActivity("Council · Builder working");
+                    FlushStreamAsSystem("Builder draft");
+                    break;
+                case CouncilEventKind.CriticOutput:
+                    SetActivity("Council · Critic reviewing");
+                    FlushStreamAsSystem("Critic");
+                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
+                        PushSystem("Critic review\n" + Truncate(evt.Message, 800));
+                    break;
+                case CouncilEventKind.ExploreOutput:
+                    SetActivity("Council · Explore done");
+                    if (_session?.Tools.RoleVisibility != CouncilRoleVisibility.FinalOnly)
+                        PushSystem("Explore lane\n" + Truncate(evt.Message, 800));
+                    break;
+                case CouncilEventKind.Completed:
+                    SetActivity("Council · Finished");
+                    break;
+                case CouncilEventKind.Failed:
+                    SetActivity("Council · Failed");
+                    break;
+            }
+        }
+
+        if (changed)
+            ThrottledPaint();
+    }
+
     private async Task PumpScrollWhileAsync(Task task)
     {
         while (!task.IsCompleted)
         {
+            DrainCouncilEvents();
             while (Console.KeyAvailable)
             {
                 ConsoleKeyInfo k = Console.ReadKey(intercept: true);
@@ -1744,6 +1760,11 @@ internal sealed class ChatTui : IDisposable
             }
             await Task.Delay(20);
         }
+    }
+
+    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
     }
 
     private static string Truncate(string s, int max)

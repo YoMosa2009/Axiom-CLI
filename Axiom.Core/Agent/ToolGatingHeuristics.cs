@@ -67,6 +67,15 @@ namespace Axiom.Core.Agent
             "spawn_subagent"
         };
 
+        // Granite 3.2 8B has substantially better call accuracy when it sees a focused coding
+        // surface instead of every possible Git/network/worktree/package operation. Keep the
+        // read tools available, then expose only the two direct edit primitives plus verification.
+        private static readonly HashSet<string> CompactEditTools = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "read_file", "list_dir", "search_files", "find_symbol",
+            "write_file", "str_replace", "diagnostics", "run_tests"
+        };
+
         public static bool LooksLikeBuildOrRunTask(string message) => ContainsAny(message, BuildRunSignalWords);
         public static bool LooksLikeGitTask(string message) => ContainsAny(message, GitSignalWords);
         public static bool LooksLikeNetworkTask(string message) => ContainsAny(message, NetworkSignalWords);
@@ -98,6 +107,9 @@ namespace Axiom.Core.Agent
             bool looksLikeGit = LooksLikeGitTask(message);
             bool looksLikeNetwork = LooksLikeNetworkTask(message);
             bool looksLikeSubagent = LooksLikeSubagentTask(message);
+
+            if (looksLikeEdit)
+                return tools.Where(t => CompactEditTools.Contains(t.Name)).ToList();
 
             return tools.Where(t => ShouldKeep(t.Name, looksLikeEdit, looksLikeBuildOrRun, looksLikeGit, looksLikeNetwork, looksLikeSubagent)).ToList();
         }

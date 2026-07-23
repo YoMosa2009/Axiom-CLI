@@ -55,6 +55,18 @@ namespace Axiom.Core.Tests.Chat
         }
 
         [Fact]
+        public void CustomEndpoint_UsesItsConfiguredContextWindowAcrossBudgeting()
+        {
+            var service = new OpenRouterChatService();
+            service.SetCustomEndpoint(
+                "https://ai.axiominference.work/v1", "test-key", "granite3.2:8b", contextWindowTokens: 32768);
+
+            Assert.Equal(32768, service.GetApproximateContextWindowTokens(OpenRouterChatService.CustomEndpointModelId));
+            Assert.Equal(32768, service.GetInferenceSettingsSnapshot(OpenRouterChatService.CustomEndpointModelId).ContextWindowTokens);
+            Assert.True(service.GetPromptTokenBudgetForModel(OpenRouterChatService.CustomEndpointModelId, 2048) > 28000);
+        }
+
+        [Fact]
         public void GetApproximateContextWindowTokens_StillFloorsRealOpenRouterAliases()
         {
             var service = new OpenRouterChatService();
