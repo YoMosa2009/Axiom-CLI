@@ -18,6 +18,10 @@ namespace Axiom.Core.Persistence
         public bool WebSearchEnabled { get; set; } = true;
         public bool SandboxEnabled { get; set; }
         public bool CalculatorEnabled { get; set; } = true;
+        // Per-machine override for where kestral's persistent memory store lives (e.g. a
+        // dedicated drive with more room) -- null means AppPaths.KestralMemoryRoot's default.
+        public string? KestralMemoryDir { get; set; }
+        public long? KestralMemoryByteBudget { get; set; }
         public List<string> WorkspaceRoots { get; set; } = new();
         public bool WorkspaceExclusive { get; set; }
         public bool OnboardingComplete { get; set; }

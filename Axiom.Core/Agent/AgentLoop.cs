@@ -27,17 +27,20 @@ namespace Axiom.Core.Agent
         private readonly AgentToolExecutor _tools;
         private readonly WorkspaceSession _workspace;
         private readonly string _modelId;
+        private readonly KestralMemoryStore? _kestralMemory;
 
         public AgentLoop(
             OpenRouterChatService chat,
             AgentToolExecutor tools,
             WorkspaceSession workspace,
-            string modelId)
+            string modelId,
+            KestralMemoryStore? kestralMemory = null)
         {
             _chat = chat;
             _tools = tools;
             _workspace = workspace;
             _modelId = modelId;
+            _kestralMemory = kestralMemory;
         }
 
         public async Task<AgentTurnResult> RunAsync(
@@ -76,6 +79,7 @@ namespace Axiom.Core.Agent
             string planBlock = _tools.Workflow.Plan.ToPromptBlock();
             string repoMap = string.Empty;
             string retrieval = string.Empty;
+            string kestralMem = string.Empty;
             string gitBlock = string.Empty;
             string root = _workspace.PrimaryRoot;
 
@@ -96,6 +100,20 @@ namespace Axiom.Core.Agent
                 }
             }
             catch { /* optional */ }
+
+            // Kestral-only persistent memory: retrieval is a cheap indexed SQL query so it always
+            // runs when a workspace is attached; ingestion follows the same includeExpensiveContext
+            // gating as RepoMapService/RepoRetrievalService above since it's comparable in cost.
+            if (isCustomEndpoint && _kestralMemory != null && !string.IsNullOrWhiteSpace(root))
+            {
+                try
+                {
+                    if (includeExpensiveContext)
+                        _kestralMemory.IngestWorkspace(root, cancellationToken);
+                    kestralMem = _kestralMemory.Retrieve(root, userMessage);
+                }
+                catch { /* optional */ }
+            }
 
             string fewShot = includeExpensiveContext ? IntelligenceHelpers.FewShotFromHistory(history, userMessage) : string.Empty;
             string? regression = _tools.Workflow.RegressionGuardBlock();
@@ -137,10 +155,36 @@ namespace Axiom.Core.Agent
                 effectiveUser += "\n\n" + repoMap;
             if (!string.IsNullOrWhiteSpace(retrieval))
                 effectiveUser += "\n\n" + retrieval;
+            if (!string.IsNullOrWhiteSpace(kestralMem))
+                effectiveUser += "\n\n" + kestralMem;
             if (!string.IsNullOrWhiteSpace(memory))
                 effectiveUser += "\n\n" + memory;
             if (!string.IsNullOrWhiteSpace(workspaceBlock))
                 effectiveUser += "\n\n" + workspaceBlock;
+
+            // No aggregate size check existed here before -- for kestral, clamp the combined
+            // per-turn blob to its real budget instead of the unchecked concatenation above
+            // (see ContextBudget; downstream trimming exempts the current turn's content).
+            if (isCustomEndpoint)
+            {
+                var blocks = new List<ContextBudget.Block>
+                {
+                    new("user-message", sticky + userMessage, 100),
+                    new("goal", goalBlock, 95),
+                    new("workspace-listing", workspaceBlock, 90),
+                    new("kestral-memory", kestralMem, 70),
+                    new("repo-retrieval", retrieval, 65),
+                    new("repo-map", repoMap, 60),
+                    new("plan-board", planBlock, 55),
+                    new("project-memory", memory, 50),
+                    new("git-branch", gitBlock, 45),
+                    new("specialty", specialtyBlock, 40),
+                    new("regression-guard", regression, 35),
+                    new("few-shot", fewShot, 20),
+                };
+                int budget = ContextBudget.CharBudgetForContextWindow(_chat.GetApproximateContextWindowTokens(_modelId));
+                effectiveUser = ContextBudget.EnforceBudget(blocks, budget);
+            }
 
             int promptTokens = _chat.EstimateConversationTokens(
                 new List<OpenRouterMessage>(history) { new("user", effectiveUser) },
@@ -301,6 +345,12 @@ namespace Axiom.Core.Agent
 
             history.Add(new OpenRouterMessage("user", userMessage));
             history.Add(new OpenRouterMessage("assistant", finalText));
+
+            if (isCustomEndpoint && _kestralMemory != null && !cancelled && !string.IsNullOrWhiteSpace(root))
+            {
+                try { _kestralMemory.RecordTurn(root, userMessage, finalText, criticSummary: null); }
+                catch { /* best effort */ }
+            }
 
             return new AgentTurnResult(
                 finalText,

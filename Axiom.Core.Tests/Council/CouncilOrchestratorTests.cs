@@ -1,5 +1,9 @@
+using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Axiom.Core.Agent;
+using Axiom.Core.Chat;
 using Axiom.Core.Council;
 using Axiom.Core.Workspace;
 using Xunit;
@@ -168,6 +172,90 @@ namespace Axiom.Core.Tests.Council
             Assert.False(result.Success);
             Assert.Null(result.Patch);
             Assert.Equal(3, pipeline.Calls.Count); // architect + builder + one format-correction retry
+        }
+
+        // Regression guard for the Kestral Memory feature: a KestralMemoryStore wired into a
+        // non-custom-endpoint orchestrator must be a true no-op (IsCustomEndpointModel gates every
+        // access) -- proven by asserting the db never grows (schema creation alone writes some
+        // bytes at construction time, so file-existence isn't the right signal; no growth means
+        // no ingest/retrieve/record call ever happened).
+        [Fact]
+        public async Task WorkspaceTask_NonKestralModel_NeverTouchesKestralMemoryStore()
+        {
+            string rootDir = Path.Combine(Path.GetTempPath(), "axiom-cli-kmem-noop-root-" + Guid.NewGuid());
+            string memDir = Path.Combine(Path.GetTempPath(), "axiom-cli-kmem-noop-mem-" + Guid.NewGuid());
+            Directory.CreateDirectory(rootDir);
+            Directory.CreateDirectory(memDir);
+            string dbPath = Path.Combine(memDir, "kestral_memory.db");
+            try
+            {
+                using var kestralMemory = new KestralMemoryStore(dbPath, byteBudget: 10_000_000);
+                long sizeAfterConstruction = new FileInfo(dbPath).Length;
+
+                var pipeline = new FakeChatPipeline("1. Edit Program.cs", ValidPatch, CriticOk);
+                var orchestrator = new CouncilOrchestrator(
+                    pipeline, "test-model", agentTools: null, kestralMemory: kestralMemory);
+                var workspace = new ConnectedWorkspaceState
+                {
+                    CodebaseEditAccessEnabled = true,
+                    RootPath = rootDir
+                };
+
+                CouncilResult result = await orchestrator.RunAsync(
+                    new CouncilRequest("Fix the bug", workspace), progress: null, CancellationToken.None);
+
+                Assert.True(result.Success);
+                long sizeAfterRun = new FileInfo(dbPath).Length;
+                Assert.Equal(sizeAfterConstruction, sizeAfterRun);
+            }
+            finally
+            {
+                try { Directory.Delete(rootDir, recursive: true); } catch { /* best effort */ }
+                try { Directory.Delete(memDir, recursive: true); } catch { /* best effort */ }
+            }
+        }
+
+        // End-to-end proof that Kestral Memory retrieval/recording actually flows through the real
+        // RunAsync path (not just KestralMemoryStore's own isolated tests): a fact recorded in one
+        // turn should surface in a later turn's Architect input via [[PAST CONVERSATION]].
+        [Fact]
+        public async Task WorkspaceTask_CustomEndpoint_RecallsPriorTurnFromKestralMemory()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "axiom-cli-kmem-recall-" + Guid.NewGuid());
+            Directory.CreateDirectory(dataDir);
+            string dbPath = Path.Combine(dataDir, "kestral_memory.db");
+            try
+            {
+                using var kestralMemory = new KestralMemoryStore(dbPath, byteBudget: 10_000_000);
+                var workspace = new ConnectedWorkspaceState
+                {
+                    CodebaseEditAccessEnabled = true,
+                    RootPath = dataDir
+                };
+
+                // Non-edit-shaped prompts (no "rename"/"fix"/"add"/etc.) so expectPatch stays false
+                // with agentTools:null -- otherwise the run would bail out before ever reaching
+                // RecordTurn, since a non-agentic edit-shaped turn requires a patch envelope.
+                var firstPipeline = new FakeChatPipeline("1. Do the thing", "WidgetFactory builds GadgetWidget instances.", CriticOk);
+                var firstOrchestrator = new CouncilOrchestrator(
+                    firstPipeline, OpenRouterChatService.CustomEndpointModelId, agentTools: null, kestralMemory: kestralMemory);
+                await firstOrchestrator.RunAsync(
+                    new CouncilRequest("what does WidgetFactory build", workspace), progress: null, CancellationToken.None);
+
+                var secondPipeline = new FakeChatPipeline("1. Do the thing", "Answer", CriticOk);
+                var secondOrchestrator = new CouncilOrchestrator(
+                    secondPipeline, OpenRouterChatService.CustomEndpointModelId, agentTools: null, kestralMemory: kestralMemory);
+                await secondOrchestrator.RunAsync(
+                    new CouncilRequest("explain how WidgetFactory works", workspace), progress: null, CancellationToken.None);
+
+                // Architect call (index 0) on the second run should have the first turn's outcome folded in.
+                Assert.Contains("PAST CONVERSATION", secondPipeline.Calls[0].UserInput, StringComparison.Ordinal);
+                Assert.Contains("GadgetWidget", secondPipeline.Calls[0].UserInput, StringComparison.Ordinal);
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, recursive: true); } catch { /* best effort */ }
+            }
         }
     }
 }

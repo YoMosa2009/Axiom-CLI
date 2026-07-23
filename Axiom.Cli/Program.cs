@@ -436,6 +436,8 @@ internal static class Program
         session.Tools.SandboxEnabled = profile.SandboxEnabled;
         session.Tools.CalculatorEnabled = profile.CalculatorEnabled;
         session.Tools.ApprovalMode = UserProfileStore.ParseApproval(profile.ApprovalMode);
+        session.KestralMemoryDir = profile.KestralMemoryDir;
+        session.KestralMemoryByteBudget = profile.KestralMemoryByteBudget;
         session.ApplyToolSettings();
 
         using var tui = new ChatTui();
@@ -544,13 +546,22 @@ internal static class Program
             WebSearchEnabled = profile.WebSearchEnabled,
             ApprovalMode = yesFlag ? ApprovalMode.Auto : UserProfileStore.ParseApproval(profile.ApprovalMode)
         };
+        KestralMemoryStore? kestralMemory = null;
+        if (string.Equals(councilModelId, OpenRouterChatService.CustomEndpointModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            string memDir = !string.IsNullOrWhiteSpace(profile.KestralMemoryDir) ? profile.KestralMemoryDir! : AppPaths.KestralMemoryRoot;
+            long memBudget = profile.KestralMemoryByteBudget is > 0 ? profile.KestralMemoryByteBudget.Value : 10_000_000_000L;
+            kestralMemory = new KestralMemoryStore(Path.Combine(memDir, "kestral_memory.db"), memBudget);
+        }
+
         var orchestrator = new CouncilOrchestrator(
             pipeline,
             councilModelId,
             workspaceAccess,
             sandbox: null,
             chat: chatService,
-            agentTools: agentTools);
+            agentTools: agentTools,
+            kestralMemory: kestralMemory);
 
         ConnectedWorkspaceState workspaceState = workspaceAccess.CreateFolderConnection(root);
         // --yes: auto-apply patch envelopes (CI / non-interactive).

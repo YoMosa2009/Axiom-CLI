@@ -34,6 +34,7 @@ namespace Axiom.Core.Council
         private readonly CouncilCodeSandbox _sandbox;
         private readonly OpenRouterChatService? _chat;
         private readonly AgentToolExecutor? _agentTools;
+        private readonly KestralMemoryStore? _kestralMemory;
 
         public CouncilOrchestrator(
             IChatPipeline pipeline,
@@ -41,7 +42,8 @@ namespace Axiom.Core.Council
             WorkspaceAccessService? workspace = null,
             CouncilCodeSandbox? sandbox = null,
             OpenRouterChatService? chat = null,
-            AgentToolExecutor? agentTools = null)
+            AgentToolExecutor? agentTools = null,
+            KestralMemoryStore? kestralMemory = null)
         {
             _pipeline = pipeline ?? throw new ArgumentNullException(nameof(pipeline));
             _modelId = modelId;
@@ -49,6 +51,7 @@ namespace Axiom.Core.Council
             _sandbox = sandbox ?? new CouncilCodeSandbox();
             _chat = chat;
             _agentTools = agentTools;
+            _kestralMemory = kestralMemory;
         }
 
         private bool CanRunAgenticBuilder(CouncilToolOptions tools)
@@ -73,9 +76,7 @@ namespace Axiom.Core.Council
                 return WorkspaceContextBudgetChars;
 
             int contextWindow = _chat?.GetApproximateContextWindowTokens(_modelId) ?? OpenRouterChatService.CustomEndpointContextWindowTokens;
-            const double workspaceShareOfWindow = 0.35;
-            const double approxCharsPerToken = 3.5;
-            return (int)(contextWindow * workspaceShareOfWindow * approxCharsPerToken);
+            return ContextBudget.CharBudgetForContextWindow(contextWindow);
         }
 
         public async Task<CouncilResult> RunAsync(
@@ -95,6 +96,10 @@ namespace Axiom.Core.Council
             // patch envelope is produced. Without tools, edit turns still require a patch proposal.
             bool expectPatch = workspaceConnected && looksLikeEdit && !agentic;
             string workspaceContext = string.Empty;
+            // Tracks the same blocks added to workspaceContext below, so kestral can clamp the
+            // combined size to its real budget instead of the unchecked concatenation every other
+            // model gets (see ContextBudget -- there was no aggregate size check here before).
+            var budgetBlocks = new List<ContextBudget.Block>();
             IReadOnlyList<string> workspaceFilesRead = Array.Empty<string>();
             int totalToolCalls = 0;
             var changedFiles = new List<string>();
@@ -105,6 +110,7 @@ namespace Axiom.Core.Council
                 WorkspaceContextResult context = _workspace.BuildContextPacket(
                     request.Workspace!, request.UserPrompt, ResolveWorkspaceContextBudgetChars());
                 workspaceContext = context.Packet;
+                budgetBlocks.Add(new ContextBudget.Block("workspace-content", workspaceContext, 90));
                 workspaceFilesRead = context.FilesRead;
                 bool hasAccessNotice = workspaceContext.Contains("YOU HAVE ACCESS", StringComparison.Ordinal);
                 Report(progress, CouncilEventKind.Status,
@@ -126,6 +132,7 @@ namespace Axiom.Core.Council
                 workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
                     ? memoryBlock
                     : memoryBlock + "\n\n" + workspaceContext;
+                budgetBlocks.Add(new ContextBudget.Block("project-memory", memoryBlock, 50));
                 Report(progress, CouncilEventKind.Status, "Project memory loaded (AXIOM.md / AGENTS.md).");
             }
             string goalBlock = goal.ToPromptBlock();
@@ -134,6 +141,7 @@ namespace Axiom.Core.Council
                 workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
                     ? goalBlock
                     : goalBlock + "\n\n" + workspaceContext;
+                budgetBlocks.Add(new ContextBudget.Block("task-contract", goalBlock, 100));
             }
 
             // Repo map + lexical retrieval for smarter planning
@@ -149,10 +157,35 @@ namespace Axiom.Core.Council
                         workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
                             ? intel
                             : intel + "\n\n" + workspaceContext;
+                        budgetBlocks.Add(new ContextBudget.Block("repo-map-retrieval", intel, 60));
                         Report(progress, CouncilEventKind.Status, "Repo map / retrieval attached.");
                     }
                 }
                 catch { /* optional */ }
+
+                // Kestral-only persistent memory: retrieval is a cheap indexed SQL query so it
+                // always runs; ingestion (hash-compare + re-chunk) is comparable in cost to the
+                // repo map/retrieval walk above, so it follows the same edit/coding-shaped gating
+                // the parallel Explore lane already uses just below.
+                if (IsCustomEndpointModel && _kestralMemory != null)
+                {
+                    try
+                    {
+                        if (looksLikeEdit || taskKind == CouncilTaskKind.Coding)
+                            _kestralMemory.IngestWorkspace(rootPath, cancellationToken);
+
+                        string kestralMem = _kestralMemory.Retrieve(rootPath, request.UserPrompt);
+                        if (!string.IsNullOrWhiteSpace(kestralMem))
+                        {
+                            workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
+                                ? kestralMem
+                                : kestralMem + "\n\n" + workspaceContext;
+                            budgetBlocks.Add(new ContextBudget.Block("kestral-memory", kestralMem, 70));
+                            Report(progress, CouncilEventKind.Status, "Kestral memory attached.");
+                        }
+                    }
+                    catch { /* optional */ }
+                }
             }
 
             string specialtyBlock = IntelligenceHelpers.SpecialtyPromptBlock(specialty);
@@ -161,6 +194,7 @@ namespace Axiom.Core.Council
                 workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
                     ? specialtyBlock
                     : specialtyBlock + "\n\n" + workspaceContext;
+                budgetBlocks.Add(new ContextBudget.Block("specialty", specialtyBlock, 40));
             }
 
             string? regression = _agentTools?.Workflow.RegressionGuardBlock();
@@ -169,6 +203,7 @@ namespace Axiom.Core.Council
                 workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
                     ? regression
                     : regression + "\n\n" + workspaceContext;
+                budgetBlocks.Add(new ContextBudget.Block("regression-guard", regression, 45));
             }
 
             string acceptance = AcceptanceCriteria.Load(rootPath);
@@ -177,6 +212,7 @@ namespace Axiom.Core.Council
                 workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
                     ? acceptance
                     : acceptance + "\n\n" + workspaceContext;
+                budgetBlocks.Add(new ContextBudget.Block("acceptance-criteria", acceptance, 55));
                 Report(progress, CouncilEventKind.Status, "Acceptance criteria loaded (.axiom/acceptance.md).");
             }
 
@@ -207,7 +243,10 @@ namespace Axiom.Core.Council
             Report(progress, CouncilEventKind.Status, "Architect is planning...");
             string architectSystem = FoundationSystemPrompt.Apply(
                 CouncilRolePrompts.Architect(taskKind, workspaceConnected, agentic, IsCustomEndpointModel, isArtifactTask));
-            string architectInput = BuildContextualInput(request.UserPrompt, workspaceContext);
+            string architectContext = IsCustomEndpointModel
+                ? ContextBudget.EnforceBudget(budgetBlocks, ResolveWorkspaceContextBudgetChars())
+                : workspaceContext;
+            string architectInput = BuildContextualInput(request.UserPrompt, architectContext);
             architectPlan = CouncilRolePrompts.StripRoleMarkers(
                 await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken, streamTokens: true));
 
@@ -242,6 +281,7 @@ namespace Axiom.Core.Council
                 workspaceContext = string.IsNullOrWhiteSpace(workspaceContext)
                     ? workflowExtra
                     : workflowExtra + "\n\n" + workspaceContext;
+                budgetBlocks.Add(new ContextBudget.Block("workflow-context", workflowExtra, 80));
             }
 
             // Merge parallel explore results into Builder context
@@ -255,7 +295,9 @@ namespace Axiom.Core.Council
                     {
                         exploreSummary = exploreText.Length > 4000 ? exploreText[..4000] + "…" : exploreText;
                         Report(progress, CouncilEventKind.ExploreOutput, exploreSummary);
-                        workspaceContext += "\n\n[[EXPLORE LANE FINDINGS]]\n" + exploreSummary + "\n[[END EXPLORE LANE]]";
+                        string exploreBlock = "[[EXPLORE LANE FINDINGS]]\n" + exploreSummary + "\n[[END EXPLORE LANE]]";
+                        workspaceContext += "\n\n" + exploreBlock;
+                        budgetBlocks.Add(new ContextBudget.Block("explore-lane", exploreBlock, 30));
                         Report(progress, CouncilEventKind.Status, "Explore lane merged into Builder context.");
                     }
                 }
@@ -274,7 +316,10 @@ namespace Axiom.Core.Council
                 : null;
             string builderSystem = FoundationSystemPrompt.Apply(
                 CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, looksLikeEdit, builderToolsForPrompt, IsCustomEndpointModel, isArtifactTask));
-            string builderInput = BuildBuilderInput(request.UserPrompt, architectPlan, workspaceContext);
+            string builderContext = IsCustomEndpointModel
+                ? ContextBudget.EnforceBudget(budgetBlocks, ResolveWorkspaceContextBudgetChars())
+                : workspaceContext;
+            string builderInput = BuildBuilderInput(request.UserPrompt, architectPlan, builderContext);
 
             Report(progress, CouncilEventKind.Status,
                 agentic ? "Builder is implementing with tools..." : "Builder is implementing...");
@@ -602,6 +647,17 @@ namespace Axiom.Core.Council
                 totalToolCalls > 0
                     ? $"Council run complete · {totalToolCalls} tool call(s)."
                     : "Council run complete.");
+
+            if (IsCustomEndpointModel && _kestralMemory != null && workspaceConnected && !string.IsNullOrWhiteSpace(rootPath))
+            {
+                try
+                {
+                    string criticSummary = $"{report.Status}: {report.FindingsCount} finding(s)";
+                    _kestralMemory.RecordTurn(rootPath, request.UserPrompt, builderOutput, criticSummary);
+                }
+                catch { /* best effort */ }
+            }
+
             return new CouncilResult(
                 true,
                 builderOutput,

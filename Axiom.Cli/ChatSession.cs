@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Axiom.Core;
 using Axiom.Core.Agent;
 using Axiom.Core.Chat;
 using Axiom.Core.Council;
@@ -11,9 +13,13 @@ namespace Axiom.Cli;
 // Live chat session state shared by Program and the full-window ChatTui.
 internal sealed class ChatSession
 {
+    private const long DefaultKestralMemoryByteBudget = 10_000_000_000L; // 10 GB
+
     private readonly object _contextGate = new();
     private OpenRouterChatService? _trackedUsageService;
     private int _peakPromptTokensThisTurn;
+    private KestralMemoryStore? _kestralMemoryStore;
+    private bool _kestralMemoryAttempted;
 
     public required OpenRouterChatService ChatService { get; init; }
     public required string ModelId { get; set; }
@@ -22,6 +28,12 @@ internal sealed class ChatSession
     public List<OpenRouterMessage> History { get; } = new();
     public required WorkspaceSession Workspace { get; init; }
     public required AgentToolExecutor ToolExecutor { get; init; }
+
+    // Per-machine override for kestral's persistent memory store (path/budget) -- set from the
+    // active UserProfile at session construction. Null values fall back to AppPaths' cross
+    // -platform default and a 10GB budget.
+    public string? KestralMemoryDir { get; set; }
+    public long? KestralMemoryByteBudget { get; set; }
 
     public void ApplyToolSettings()
     {
@@ -37,7 +49,7 @@ internal sealed class ChatSession
     public AgentLoop CreateAgent()
     {
         ApplyToolSettings();
-        return new AgentLoop(ChatService, ToolExecutor, Workspace, ModelId);
+        return new AgentLoop(ChatService, ToolExecutor, Workspace, ModelId, ResolveKestralMemory());
     }
 
     public CouncilOrchestrator CreateCouncil()
@@ -50,7 +62,28 @@ internal sealed class ChatSession
             workspace: null,
             sandbox: null,
             chat: ChatService,
-            agentTools: ToolExecutor);
+            agentTools: ToolExecutor,
+            kestralMemory: ResolveKestralMemory());
+    }
+
+    // Lazy + cached for the session's lifetime: only ever constructed when kestral is the active
+    // model, so eidos/hepha sessions never touch disk for this at all. If the user switches models
+    // mid-session, re-resolves (a stale store for a since-abandoned model id is harmless -- it's
+    // simply not passed to a future non-kestral Create*() call).
+    private KestralMemoryStore? ResolveKestralMemory()
+    {
+        bool isCustomEndpoint = string.Equals(ModelId, OpenRouterChatService.CustomEndpointModelId, StringComparison.OrdinalIgnoreCase);
+        if (!isCustomEndpoint)
+            return null;
+        if (_kestralMemoryAttempted)
+            return _kestralMemoryStore;
+
+        _kestralMemoryAttempted = true;
+        string dir = !string.IsNullOrWhiteSpace(KestralMemoryDir) ? KestralMemoryDir! : AppPaths.KestralMemoryRoot;
+        long budget = KestralMemoryByteBudget is > 0 ? KestralMemoryByteBudget.Value : DefaultKestralMemoryByteBudget;
+        string dbPath = Path.Combine(dir, "kestral_memory.db");
+        _kestralMemoryStore = new KestralMemoryStore(dbPath, budget);
+        return _kestralMemoryStore;
     }
 
     public CouncilToolOptions CouncilTools()
