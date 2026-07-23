@@ -82,23 +82,12 @@ namespace Axiom.Core.Council
             return CouncilTaskKind.General;
         }
 
-        public static bool IsWebsiteBuildRequest(string? prompt)
-        {
-            if (string.IsNullOrWhiteSpace(prompt))
-                return false;
-
-            string text = prompt.ToLowerInvariant();
-            bool website = Regex.IsMatch(text, @"\b(website|web\s*site|webpage|web\s*page|landing\s+page|frontend|front-end)\b");
-            bool build = Regex.IsMatch(text, @"\b(build|create|make|design|generate|implement|redesign|scaffold)\b");
-            return website && build;
-        }
-
         public static string Architect(
             CouncilTaskKind kind,
             bool workspaceConnected,
             bool agenticBuilder,
             bool isCustomEndpoint = false,
-            bool isWebsiteTask = false)
+            bool isArtifactTask = false)
         {
             string core =
                 "You are the Architect. Your ONLY job is to produce a numbered step-by-step plan. " +
@@ -125,12 +114,12 @@ namespace Axiom.Core.Council
                     "Plan concrete file/shell steps the Builder should execute on disk.";
             }
 
-            if (isWebsiteTask)
+            if (isArtifactTask)
             {
                 core +=
-                    "\n[WEBSITE DELIVERABLE] Plan the visual direction, responsive section hierarchy, " +
-                    "and concrete HTML/CSS files. Include a final browser-render quality check; a text-only " +
-                    "or browser-default page is not an acceptable implementation.";
+                    "\n[DELIVERABLE QUALITY] Plan a concrete verification step against the files that will be " +
+                    "written. Match verification to the artifact: compile/test executable code, validate data/config, " +
+                    "and inspect rendering/usability for human-facing interfaces.";
             }
 
             core += kind switch
@@ -160,7 +149,7 @@ namespace Axiom.Core.Council
             bool looksLikeEdit,
             IReadOnlyList<OpenRouterToolDefinition>? availableTools = null,
             bool isCustomEndpoint = false,
-            bool isWebsiteTask = false)
+            bool isArtifactTask = false)
         {
             string core =
                 "You are the Builder. Your role is IMPLEMENTATION ONLY. " +
@@ -180,13 +169,13 @@ namespace Axiom.Core.Council
                     "Never claim you lack filesystem access.";
             }
 
-            if (isWebsiteTask)
+            if (isArtifactTask)
             {
                 core +=
-                    "\n[WEBSITE QUALITY BAR] This is visual UI work, not a text outline. Produce a complete " +
-                    "responsive page with intentional CSS (a non-empty <style> block or stylesheet), viewport meta tag, " +
-                    "clear visual hierarchy, deliberate spacing/type/color, and working requested interactions. " +
-                    "Do not ship a browser-default unstyled document. Before finishing, read the written HTML and verify these requirements.";
+                    "\n[DELIVERABLE QUALITY BAR] Produce a complete usable artifact, not a sketch, placeholder, " +
+                    "or summary. Write the real files, then inspect them before finishing. Verify behavior appropriate " +
+                    "to the artifact: code must be structurally valid and tested when possible; configuration/data must be " +
+                    "parseable; human-facing interfaces must have intentional layout, styling, responsive behavior, and working requested interactions.";
             }
 
             if (agentic)
@@ -293,7 +282,7 @@ namespace Axiom.Core.Council
             bool workspaceConnected,
             bool agenticInspect,
             bool isCustomEndpoint = false,
-            bool isWebsiteTask = false)
+            bool isArtifactTask = false)
         {
             string core =
                 "You are the Critic, a thorough independent reviewer. " +
@@ -319,11 +308,12 @@ namespace Axiom.Core.Council
                     "to falsify claims against the actual workspace. Prefer reading the files the Builder wrote.";
             }
 
-            if (isWebsiteTask)
+            if (isArtifactTask)
             {
                 core +=
-                    "\n[WEBSITE REVIEW] Inspect the generated HTML/CSS, not just the Builder summary. Reject browser-default " +
-                    "or unstyled output, missing responsive viewport configuration, weak visual hierarchy, and requested interactions that do not work.";
+                    "\n[DELIVERABLE REVIEW] Inspect the actual written artifacts, not just the Builder summary. " +
+                    "Reject incomplete, placeholder, invalid, or unverified output. Apply the standards appropriate to " +
+                    "the artifact type, including rendering/usability for user-facing interfaces.";
             }
 
             core += kind switch

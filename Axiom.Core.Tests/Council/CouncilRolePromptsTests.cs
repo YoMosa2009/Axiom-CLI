@@ -17,13 +17,6 @@ namespace Axiom.Core.Tests.Council
         }
 
         [Fact]
-        public void IsWebsiteBuildRequest_DetectsExplicitWebsiteCreation()
-        {
-            Assert.True(CouncilRolePrompts.IsWebsiteBuildRequest("Make a polished landing page website for an AI lab."));
-            Assert.False(CouncilRolePrompts.IsWebsiteBuildRequest("Explain how a website works."));
-        }
-
-        [Fact]
         public void ArchitectPrompt_MentionsAgenticWhenEnabled()
         {
             string p = CouncilRolePrompts.Architect(CouncilTaskKind.Coding, workspaceConnected: true, agenticBuilder: true);
@@ -115,14 +108,13 @@ namespace Axiom.Core.Tests.Council
         }
 
         [Fact]
-        public void WebsitePrompts_RequireVisualQualityAndReview()
+        public void ArtifactPrompts_RequireGeneralDeliverableQualityAndReview()
         {
-            string builder = CouncilRolePrompts.Builder(CouncilTaskKind.Coding, true, false, true, true, isWebsiteTask: true);
-            string critic = CouncilRolePrompts.Critic(CouncilTaskKind.Coding, true, true, isWebsiteTask: true);
+            string builder = CouncilRolePrompts.Builder(CouncilTaskKind.Coding, true, false, true, true, isArtifactTask: true);
+            string critic = CouncilRolePrompts.Critic(CouncilTaskKind.Coding, true, true, isArtifactTask: true);
 
-            Assert.Contains("WEBSITE QUALITY BAR", builder);
-            Assert.Contains("browser-default", builder, System.StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("WEBSITE REVIEW", critic);
+            Assert.Contains("DELIVERABLE QUALITY BAR", builder);
+            Assert.Contains("actual written artifacts", critic, System.StringComparison.OrdinalIgnoreCase);
         }
     }
 }

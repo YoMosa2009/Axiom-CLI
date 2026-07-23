@@ -86,11 +86,12 @@ namespace Axiom.Core.Council
         {
             CouncilToolOptions tools = request.Tools ?? CouncilToolOptions.Default;
             bool agentic = CanRunAgenticBuilder(tools);
+            CouncilTaskKind taskKind = CouncilRolePrompts.DetectTaskKind(request.UserPrompt);
             // Folder connected for context (index + file contents). Patch-only mode is separate:
             // Q&A / explore turns must still answer from the connected tree, not claim "no access".
             bool workspaceConnected = request.Workspace is { CodebaseEditAccessEnabled: true };
             bool looksLikeEdit = LooksLikeCodeEditRequest(request.UserPrompt);
-            bool isWebsiteTask = CouncilRolePrompts.IsWebsiteBuildRequest(request.UserPrompt);
+            bool isArtifactTask = taskKind == CouncilTaskKind.Coding || looksLikeEdit;
             // With agentic tools, edits go through write_file/shell — do not fail the turn if no
             // patch envelope is produced. Without tools, edit turns still require a patch proposal.
             bool expectPatch = workspaceConnected && looksLikeEdit && !agentic;
@@ -115,7 +116,6 @@ namespace Axiom.Core.Council
                             : "Workspace flag set, but no local folder path was available.");
             }
 
-            CouncilTaskKind taskKind = CouncilRolePrompts.DetectTaskKind(request.UserPrompt);
             TaskSpecialty specialty = IntelligenceHelpers.DetectSpecialty(request.UserPrompt);
             GoalContract goal = GoalContract.FromPrompt(request.UserPrompt);
             string memoryBlock = string.Empty;
@@ -207,7 +207,7 @@ namespace Axiom.Core.Council
             // ── Architect: plan (desktop Workplace role contract) ─────────────
             Report(progress, CouncilEventKind.Status, "Architect is planning...");
             string architectSystem = FoundationSystemPrompt.Apply(
-                CouncilRolePrompts.Architect(taskKind, workspaceConnected, agentic, IsCustomEndpointModel, isWebsiteTask));
+                CouncilRolePrompts.Architect(taskKind, workspaceConnected, agentic, IsCustomEndpointModel, isArtifactTask));
             string architectInput = BuildContextualInput(request.UserPrompt, workspaceContext);
             architectPlan = CouncilRolePrompts.StripRoleMarkers(
                 await CallRoleAsync(architectSystem, architectInput, progress, cancellationToken, streamTokens: true));
@@ -274,7 +274,7 @@ namespace Axiom.Core.Council
                 ? _agentTools?.GetToolDefinitions(AgentToolExecutor.ToolScope.Full, request.UserPrompt, IsCustomEndpointModel)
                 : null;
             string builderSystem = FoundationSystemPrompt.Apply(
-                CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, looksLikeEdit, builderToolsForPrompt, IsCustomEndpointModel, isWebsiteTask));
+                CouncilRolePrompts.Builder(taskKind, workspaceConnected, expectPatch, agentic, looksLikeEdit, builderToolsForPrompt, IsCustomEndpointModel, isArtifactTask));
             string builderInput = BuildBuilderInput(request.UserPrompt, architectPlan, workspaceContext);
 
             Report(progress, CouncilEventKind.Status,
@@ -366,7 +366,7 @@ namespace Axiom.Core.Council
             {
                 // Deterministic rails before every Critic call (desktop Stage 2.5 / sandbox).
                 CriticEvidence evidence = await GatherCriticEvidenceAsync(
-                    builderOutput, expectPatch || patch != null, tools, progress, cancellationToken, isWebsiteTask);
+                    builderOutput, expectPatch || patch != null, tools, progress, cancellationToken);
 
                 Report(progress, CouncilEventKind.Status, "Critic is reviewing...");
                 string criticInput = BuildCriticInput(request.UserPrompt, patch != null, builderOutput, evidence);
@@ -374,7 +374,7 @@ namespace Axiom.Core.Council
                     criticInput = acceptance + "\n\n" + criticInput;
                 bool criticInspect = agentic && workspaceConnected;
                 string criticSystem = FoundationSystemPrompt.Apply(
-                    CouncilRolePrompts.Critic(taskKind, workspaceConnected, criticInspect, IsCustomEndpointModel, isWebsiteTask));
+                    CouncilRolePrompts.Critic(taskKind, workspaceConnected, criticInspect, IsCustomEndpointModel, isArtifactTask));
                 (string criticOutput, int criticTools) = await CallCriticAsync(
                     criticSystem, criticInput, criticInspect, progress, cancellationToken);
                 criticOutput = CouncilRolePrompts.StripRoleMarkers(criticOutput);
@@ -566,14 +566,14 @@ namespace Axiom.Core.Council
                     }
 
                     CriticEvidence postEv = await GatherCriticEvidenceAsync(
-                        postBody, true, tools, progress, cancellationToken, isWebsiteTask);
+                        postBody, true, tools, progress, cancellationToken);
                     string postInput = BuildCriticInput(request.UserPrompt, true, postBody, postEv);
                     if (!string.IsNullOrWhiteSpace(acceptance))
                         postInput = acceptance + "\n\n" + postInput;
                     postInput += "\n\n[POST-MERGE] Review the applied changes and diagnostics. " +
                                  "Flag regressions only.";
                     string postSystem = FoundationSystemPrompt.Apply(
-                        CouncilRolePrompts.Critic(taskKind, true, agentic, IsCustomEndpointModel, isWebsiteTask));
+                        CouncilRolePrompts.Critic(taskKind, true, agentic, IsCustomEndpointModel, isArtifactTask));
                     (string postCritic, int postTools) = await CallCriticAsync(
                         postSystem, postInput, agentic, progress, cancellationToken);
                     totalToolCalls += postTools;
@@ -699,8 +699,7 @@ namespace Axiom.Core.Council
             bool isWorkspaceTask,
             CouncilToolOptions tools,
             IProgress<CouncilEvent>? progress,
-            CancellationToken cancellationToken,
-            bool isWebsiteTask)
+            CancellationToken cancellationToken)
         {
             var findings = new List<string>();
             string sandboxLogs = string.Empty;
@@ -721,13 +720,10 @@ namespace Axiom.Core.Council
                 }
             }
 
-            if (isWebsiteTask)
+            foreach ((string source, string content) in GetWrittenArtifacts())
             {
-                foreach ((string source, string html) in GetWrittenWebsiteDocuments(builderOutput))
-                {
-                    foreach (string finding in StaticValidation.RunWebsiteQualityChecks(html))
-                        findings.Add($"{source}: {finding}");
-                }
+                foreach (string finding in StaticValidation.RunArtifactChecks(content, source))
+                    findings.Add($"{source}: {finding}");
             }
 
             bool runSandbox = tools.SandboxEnabled
@@ -763,17 +759,14 @@ namespace Axiom.Core.Council
             return new CriticEvidence(findings, sandboxLogs, sandboxFailed, language);
         }
 
-        private IReadOnlyList<(string Source, string Html)> GetWrittenWebsiteDocuments(string builderOutput)
+        private IReadOnlyList<(string Source, string Content)> GetWrittenArtifacts()
         {
-            var documents = new List<(string Source, string Html)>();
-            bool foundWrittenDocument = false;
+            var documents = new List<(string Source, string Content)>();
             foreach (string path in _agentTools?.WrittenPaths ?? Array.Empty<string>())
             {
-                if (!string.Equals(Path.GetExtension(path), ".html", StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(Path.GetExtension(path), ".htm", StringComparison.OrdinalIgnoreCase))
-                {
+                string extension = Path.GetExtension(path);
+                if (!IsTextArtifactExtension(extension))
                     continue;
-                }
 
                 try
                 {
@@ -781,9 +774,9 @@ namespace Axiom.Core.Council
                     if (!info.Exists || info.Length > 512_000)
                         continue;
 
-                    string html = File.ReadAllText(path);
-                    foundWrittenDocument = true;
-                    documents.Add((Path.GetFileName(path), html));
+                    string content = File.ReadAllText(path);
+                    if (!content.Contains('\0'))
+                        documents.Add((Path.GetFileName(path), content));
                 }
                 catch
                 {
@@ -791,11 +784,14 @@ namespace Axiom.Core.Council
                 }
             }
 
-            if (!foundWrittenDocument && StaticValidation.DetectLanguage(builderOutput) == "html")
-                documents.Add(("Builder output", StaticValidation.ExtractCodeBlock(builderOutput, "html")));
-
             return documents;
         }
+
+        private static bool IsTextArtifactExtension(string extension)
+            => extension.ToLowerInvariant() is ".cs" or ".csx" or ".js" or ".jsx" or ".ts" or ".tsx"
+                or ".py" or ".java" or ".go" or ".rs" or ".cpp" or ".c" or ".h" or ".hpp"
+                or ".html" or ".htm" or ".css" or ".json" or ".xml" or ".yml" or ".yaml"
+                or ".md" or ".txt" or ".sql" or ".sh" or ".ps1";
 
         private static CriticReport MergeDeterministicFindings(CriticReport report, CriticEvidence evidence)
         {
@@ -805,7 +801,7 @@ namespace Axiom.Core.Council
             var hardFindings = evidence.Findings
                 .Where(f => f.Contains("CRITICAL", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("RUNTIME", StringComparison.OrdinalIgnoreCase)
-                    || f.Contains("WEBSITE QUALITY", StringComparison.OrdinalIgnoreCase)
+                    || f.Contains("RENDER QUALITY", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("Mismatched", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("truncated", StringComparison.OrdinalIgnoreCase)
                     || f.Contains("not defined", StringComparison.OrdinalIgnoreCase))

@@ -64,22 +64,40 @@ namespace Axiom.Core.Tests.Council
         }
 
         [Fact]
-        public void RunWebsiteQualityChecks_UnstyledDocument_FlagsBrowserDefaultOutput()
+        public void RunArtifactChecks_UnstyledFullHtml_FlagsBrowserDefaultOutput()
         {
             string html = "<!doctype html><html><head><title>Demo</title></head><body><h1>Demo</h1></body></html>";
 
-            var findings = StaticValidation.RunWebsiteQualityChecks(html);
+            var findings = StaticValidation.RunArtifactChecks(html);
 
             Assert.Contains(findings, f => f.Contains("no stylesheet", StringComparison.OrdinalIgnoreCase));
             Assert.Contains(findings, f => f.Contains("viewport", StringComparison.OrdinalIgnoreCase));
         }
 
         [Fact]
-        public void RunWebsiteQualityChecks_StyledResponsiveDocument_Passes()
+        public void RunArtifactChecks_StyledResponsiveHtml_Passes()
         {
             string html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><style>body { color: #eee; }</style></head><body></body></html>";
 
-            Assert.Empty(StaticValidation.RunWebsiteQualityChecks(html));
+            Assert.Empty(StaticValidation.RunArtifactChecks(html));
+        }
+
+        [Fact]
+        public void RunArtifactChecks_CSharpArtifact_UsesGeneralStructuralValidation()
+        {
+            string code = "public class Broken { void Run() {";
+
+            var findings = StaticValidation.RunArtifactChecks(code);
+
+            Assert.Contains(findings, f => f.Contains("Mismatched braces", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public void RunArtifactChecks_InvalidJson_FlagsConfigurationArtifact()
+        {
+            var findings = StaticValidation.RunArtifactChecks("{\"enabled\":}", "settings.json");
+
+            Assert.Contains(findings, f => f.Contains("Invalid JSON", StringComparison.OrdinalIgnoreCase));
         }
     }
 }

@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
+using System.Xml.Linq;
 using System.Text.RegularExpressions;
 
 namespace Axiom.Core.Council
@@ -179,29 +182,45 @@ namespace Axiom.Core.Council
             return findings.Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToList();
         }
 
-        // A structurally valid HTML document can still be an unstyled browser-default page.
-        // Keep this separate from Run(): plain HTML fragments, emails, and templates are valid
-        // in many code tasks. The Council invokes these checks only for an explicit website build.
-        public static List<string> RunWebsiteQualityChecks(string html)
+        // Validate written deliverables by their actual type. Run() supplies generic structural
+        // checks for every language; JSON/XML are parsed, and full HTML documents additionally
+        // need a render baseline. Fragments/templates remain exempt from document-level checks.
+        public static List<string> RunArtifactChecks(string content, string? path = null)
         {
-            var findings = new List<string>();
-            if (string.IsNullOrWhiteSpace(html))
+            var findings = Run(content);
+            if (string.IsNullOrWhiteSpace(content))
                 return findings;
 
-            string lower = html.ToLowerInvariant();
+            string lower = content.ToLowerInvariant();
+            string extension = Path.GetExtension(path ?? string.Empty).ToLowerInvariant();
+            if (extension == ".json")
+            {
+                try { JsonDocument.Parse(content).Dispose(); }
+                catch (JsonException ex) { findings.Add("[HIGH — ARTIFACT VALIDATION] Invalid JSON: " + ex.Message); }
+            }
+            else if (extension == ".xml")
+            {
+                try { XDocument.Parse(content); }
+                catch (System.Xml.XmlException ex) { findings.Add("[HIGH — ARTIFACT VALIDATION] Invalid XML: " + ex.Message); }
+            }
+
+            bool fullHtmlDocument = lower.Contains("<!doctype html") || lower.Contains("<html");
+            if (!fullHtmlDocument)
+                return findings.Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToList();
+
             bool hasEmbeddedCss = Regex.IsMatch(lower, @"<style\b[^>]*>\s*[^<]+", RegexOptions.IgnoreCase);
             bool hasStylesheet = Regex.IsMatch(lower, "<link\\b[^>]*rel\\s*=\\s*['\\\"]?stylesheet", RegexOptions.IgnoreCase);
             if (!hasEmbeddedCss && !hasStylesheet)
             {
-                findings.Add("[HIGH — WEBSITE QUALITY] The website has no stylesheet or non-empty <style> block, so it will render with browser-default styling.");
+                findings.Add("[HIGH — RENDER QUALITY] The full HTML document has no stylesheet or non-empty <style> block, so it will render with browser-default styling.");
             }
 
             if (!lower.Contains("name=\"viewport\"") && !lower.Contains("name='viewport'"))
             {
-                findings.Add("[MEDIUM — WEBSITE QUALITY] The website is missing a viewport meta tag, so mobile rendering is not configured.");
+                findings.Add("[MEDIUM — RENDER QUALITY] The full HTML document is missing a viewport meta tag, so mobile rendering is not configured.");
             }
 
-            return findings;
+            return findings.Distinct(StringComparer.OrdinalIgnoreCase).Take(24).ToList();
         }
 
         public static List<string> DetectSandboxErrors(string sandboxOutput)
