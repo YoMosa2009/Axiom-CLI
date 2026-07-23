@@ -246,7 +246,7 @@ namespace Axiom.Core.Tests.Council
                 var secondOrchestrator = new CouncilOrchestrator(
                     secondPipeline, OpenRouterChatService.CustomEndpointModelId, agentTools: null, kestralMemory: kestralMemory);
                 await secondOrchestrator.RunAsync(
-                    new CouncilRequest("explain how WidgetFactory works", workspace), progress: null, CancellationToken.None);
+                    new CouncilRequest("what does WidgetFactory build", workspace), progress: null, CancellationToken.None);
 
                 // Architect call (index 0) on the second run should have the first turn's outcome folded in.
                 Assert.Contains("PAST CONVERSATION", secondPipeline.Calls[0].UserInput, StringComparison.Ordinal);
