@@ -62,5 +62,24 @@ namespace Axiom.Core.Tests.Council
         {
             Assert.False(StaticValidation.LooksLikeCode("The capital of France is Paris."));
         }
+
+        [Fact]
+        public void RunWebsiteQualityChecks_UnstyledDocument_FlagsBrowserDefaultOutput()
+        {
+            string html = "<!doctype html><html><head><title>Demo</title></head><body><h1>Demo</h1></body></html>";
+
+            var findings = StaticValidation.RunWebsiteQualityChecks(html);
+
+            Assert.Contains(findings, f => f.Contains("no stylesheet", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(findings, f => f.Contains("viewport", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public void RunWebsiteQualityChecks_StyledResponsiveDocument_Passes()
+        {
+            string html = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><style>body { color: #eee; }</style></head><body></body></html>";
+
+            Assert.Empty(StaticValidation.RunWebsiteQualityChecks(html));
+        }
     }
 }

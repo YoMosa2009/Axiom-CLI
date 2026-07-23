@@ -82,11 +82,23 @@ namespace Axiom.Core.Council
             return CouncilTaskKind.General;
         }
 
+        public static bool IsWebsiteBuildRequest(string? prompt)
+        {
+            if (string.IsNullOrWhiteSpace(prompt))
+                return false;
+
+            string text = prompt.ToLowerInvariant();
+            bool website = Regex.IsMatch(text, @"\b(website|web\s*site|webpage|web\s*page|landing\s+page|frontend|front-end)\b");
+            bool build = Regex.IsMatch(text, @"\b(build|create|make|design|generate|implement|redesign|scaffold)\b");
+            return website && build;
+        }
+
         public static string Architect(
             CouncilTaskKind kind,
             bool workspaceConnected,
             bool agenticBuilder,
-            bool isCustomEndpoint = false)
+            bool isCustomEndpoint = false,
+            bool isWebsiteTask = false)
         {
             string core =
                 "You are the Architect. Your ONLY job is to produce a numbered step-by-step plan. " +
@@ -111,6 +123,14 @@ namespace Axiom.Core.Council
                 core +=
                     "\n[AGENTIC BUILDER] The Builder has tools (write_file, run_shell, list_dir, read_file, search_files). " +
                     "Plan concrete file/shell steps the Builder should execute on disk.";
+            }
+
+            if (isWebsiteTask)
+            {
+                core +=
+                    "\n[WEBSITE DELIVERABLE] Plan the visual direction, responsive section hierarchy, " +
+                    "and concrete HTML/CSS files. Include a final browser-render quality check; a text-only " +
+                    "or browser-default page is not an acceptable implementation.";
             }
 
             core += kind switch
@@ -139,7 +159,8 @@ namespace Axiom.Core.Council
             bool agentic,
             bool looksLikeEdit,
             IReadOnlyList<OpenRouterToolDefinition>? availableTools = null,
-            bool isCustomEndpoint = false)
+            bool isCustomEndpoint = false,
+            bool isWebsiteTask = false)
         {
             string core =
                 "You are the Builder. Your role is IMPLEMENTATION ONLY. " +
@@ -157,6 +178,15 @@ namespace Axiom.Core.Council
                 core +=
                     "\n\n[CONNECTED WORKSPACE] You HAVE access to the local folder via context and/or tools. " +
                     "Never claim you lack filesystem access.";
+            }
+
+            if (isWebsiteTask)
+            {
+                core +=
+                    "\n[WEBSITE QUALITY BAR] This is visual UI work, not a text outline. Produce a complete " +
+                    "responsive page with intentional CSS (a non-empty <style> block or stylesheet), viewport meta tag, " +
+                    "clear visual hierarchy, deliberate spacing/type/color, and working requested interactions. " +
+                    "Do not ship a browser-default unstyled document. Before finishing, read the written HTML and verify these requirements.";
             }
 
             if (agentic)
@@ -258,7 +288,12 @@ namespace Axiom.Core.Council
             return core;
         }
 
-        public static string Critic(CouncilTaskKind kind, bool workspaceConnected, bool agenticInspect, bool isCustomEndpoint = false)
+        public static string Critic(
+            CouncilTaskKind kind,
+            bool workspaceConnected,
+            bool agenticInspect,
+            bool isCustomEndpoint = false,
+            bool isWebsiteTask = false)
         {
             string core =
                 "You are the Critic, a thorough independent reviewer. " +
@@ -282,6 +317,13 @@ namespace Axiom.Core.Council
                 core +=
                     "\n[INSPECT TOOLS] You may use read_file, list_dir, search_files, and run_shell (tests only) " +
                     "to falsify claims against the actual workspace. Prefer reading the files the Builder wrote.";
+            }
+
+            if (isWebsiteTask)
+            {
+                core +=
+                    "\n[WEBSITE REVIEW] Inspect the generated HTML/CSS, not just the Builder summary. Reject browser-default " +
+                    "or unstyled output, missing responsive viewport configuration, weak visual hierarchy, and requested interactions that do not work.";
             }
 
             core += kind switch

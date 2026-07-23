@@ -1643,13 +1643,16 @@ namespace Axiom.Core.Chat
 
         private void RecordTokenUsage(OpenRouterTokenUsage? usage, int estimatedPromptTokens)
         {
-            if (usage == null)
-                return;
+            // Some OpenAI-compatible self-hosted servers omit usage entirely. The CLI context
+            // chrome still needs to advance for that request, so publish the bounded request
+            // estimate as a fallback rather than leaving the previous turn's number on screen.
+            bool estimated = usage == null;
+            usage ??= new OpenRouterTokenUsage(Math.Max(0, estimatedPromptTokens), 0, Math.Max(0, estimatedPromptTokens));
 
             lock (_tokenUsageGate)
             {
                 _lastTokenUsage = usage;
-                if (usage.PromptTokens > 0 && estimatedPromptTokens > 0)
+                if (!estimated && usage.PromptTokens > 0 && estimatedPromptTokens > 0)
                 {
                     double observedRatio = Math.Clamp(usage.PromptTokens / (double)estimatedPromptTokens, 0.5d, 3d);
                     _promptTokenEstimateCorrectionFactor = Math.Clamp(

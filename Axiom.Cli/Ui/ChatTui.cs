@@ -903,6 +903,7 @@ internal sealed class ChatTui : IDisposable
         _attachPaths?.Invoke(input, _session);
         if (_session.Workspace.IsExclusive || _session.Workspace.Roots.Count > 0)
             MarkOnboarding("folder");
+        _session.BeginContextTurn();
         _scrollFromBottom = 0;
         Paint(force: true);
 

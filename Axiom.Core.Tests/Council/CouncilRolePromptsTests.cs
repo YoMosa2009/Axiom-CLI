@@ -17,6 +17,13 @@ namespace Axiom.Core.Tests.Council
         }
 
         [Fact]
+        public void IsWebsiteBuildRequest_DetectsExplicitWebsiteCreation()
+        {
+            Assert.True(CouncilRolePrompts.IsWebsiteBuildRequest("Make a polished landing page website for an AI lab."));
+            Assert.False(CouncilRolePrompts.IsWebsiteBuildRequest("Explain how a website works."));
+        }
+
+        [Fact]
         public void ArchitectPrompt_MentionsAgenticWhenEnabled()
         {
             string p = CouncilRolePrompts.Architect(CouncilTaskKind.Coding, workspaceConnected: true, agenticBuilder: true);
@@ -105,6 +112,17 @@ namespace Axiom.Core.Tests.Council
             string kestral = CouncilRolePrompts.Critic(CouncilTaskKind.Coding, true, true, isCustomEndpoint: true);
 
             Assert.True(kestral.Length < cloud.Length, $"Expected kestral prompt ({kestral.Length} chars) to be shorter than cloud prompt ({cloud.Length} chars).");
+        }
+
+        [Fact]
+        public void WebsitePrompts_RequireVisualQualityAndReview()
+        {
+            string builder = CouncilRolePrompts.Builder(CouncilTaskKind.Coding, true, false, true, true, isWebsiteTask: true);
+            string critic = CouncilRolePrompts.Critic(CouncilTaskKind.Coding, true, true, isWebsiteTask: true);
+
+            Assert.Contains("WEBSITE QUALITY BAR", builder);
+            Assert.Contains("browser-default", builder, System.StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("WEBSITE REVIEW", critic);
         }
     }
 }
