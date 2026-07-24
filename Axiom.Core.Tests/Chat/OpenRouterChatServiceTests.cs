@@ -59,6 +59,37 @@ namespace Axiom.Core.Tests.Chat
             Assert.False(json.RootElement.TryGetProperty("num_ctx", out _));
         }
 
+        // Root-cause regression guard for "context length is hardcoded": the client's num_ctx
+        // value should come from live-querying the server's own /api/ps, not a number someone has
+        // to remember to re-type. Ollama's native API lives at the host root; the configured
+        // base_url is always the /v1 (OpenAI-compat) form, so detection has to strip it back off.
+        [Theory]
+        [InlineData("https://ai.axiominference.work/v1", "/api/ps", "https://ai.axiominference.work/api/ps")]
+        [InlineData("https://ai.axiominference.work/v1/", "/api/ps", "https://ai.axiominference.work/api/ps")]
+        [InlineData("http://127.0.0.1:11434/v1", "/api/ps", "http://127.0.0.1:11434/api/ps")]
+        [InlineData("https://example.com", "/api/ps", "https://example.com/api/ps")]
+        public void BuildNativeOllamaUrl_StripsV1Suffix(string baseUrl, string nativePath, string expected)
+        {
+            Assert.Equal(expected, OpenRouterChatService.BuildNativeOllamaUrl(baseUrl, nativePath));
+        }
+
+        [Fact]
+        public async Task TryDetectCustomEndpointContextLengthAsync_ReturnsNull_WhenNoCustomEndpointConfigured()
+        {
+            var service = new OpenRouterChatService();
+            Assert.Null(await service.TryDetectCustomEndpointContextLengthAsync());
+        }
+
+        [Fact]
+        public async Task TryDetectCustomEndpointContextLengthAsync_ReturnsNull_WhenServerUnreachable()
+        {
+            var service = new OpenRouterChatService();
+            // RFC 2606 reserves .invalid to never resolve -- a fast, deterministic DNS failure
+            // instead of relying on network flakiness to exercise the real failure path.
+            service.SetCustomEndpoint("https://host.invalid/v1", "test-key", "granite3.2:8b");
+            Assert.Null(await service.TryDetectCustomEndpointContextLengthAsync());
+        }
+
         [Fact]
         public void HasValidCustomEndpoint_TrueOnceAllThreeFieldsAreSet()
         {

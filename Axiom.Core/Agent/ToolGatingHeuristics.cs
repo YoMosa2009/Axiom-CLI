@@ -38,7 +38,7 @@ namespace Axiom.Core.Agent
 
         private static readonly HashSet<string> AlwaysKeep = new(StringComparer.OrdinalIgnoreCase)
         {
-            "read_file", "list_dir", "search_files", "find_symbol", "read_csv", "read_notebook"
+            "read_file", "list_dir", "search_files", "find_symbol", "read_csv", "read_notebook", "calculator"
         };
 
         private static readonly HashSet<string> EditGatedTools = new(StringComparer.OrdinalIgnoreCase)
@@ -73,7 +73,7 @@ namespace Axiom.Core.Agent
         // writes or patches made multi-file tasks needlessly turn into fragile repeated calls.
         private static readonly HashSet<string> CompactEditTools = new(StringComparer.OrdinalIgnoreCase)
         {
-            "read_file", "list_dir", "search_files", "find_symbol",
+            "read_file", "list_dir", "search_files", "find_symbol", "calculator",
             "write_file", "str_replace", "apply_patch", "write_files",
             "diagnostics", "run_tests"
         };

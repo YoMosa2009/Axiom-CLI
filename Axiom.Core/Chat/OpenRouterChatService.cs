@@ -485,6 +485,80 @@ namespace Axiom.Core.Chat
 
         public int ConfiguredCustomEndpointContextWindowTokens => _customEndpointContextWindowTokens;
 
+        /// <summary>Overrides just the context window after SetCustomEndpoint, e.g. once a live
+        /// detection (<see cref="TryDetectCustomEndpointContextLengthAsync"/>) succeeds.</summary>
+        public void OverrideCustomEndpointContextWindowTokens(int contextWindowTokens)
+        {
+            _customEndpointContextWindowTokens = Math.Clamp(contextWindowTokens, 1024, 1_000_000);
+        }
+
+        // Queries the custom endpoint's native Ollama /api/ps for the currently-loaded model's real
+        // serving context length, so the CLI reflects whatever the server is actually configured
+        // for right now (num_ctx, KV cache settings, etc. all ultimately determine this) instead of
+        // a client-side number that silently goes stale the moment the server is retuned. This is
+        // the actual fix for "hardcoded context length" -- num_ctx is sent per-request, but what
+        // value to send should come from the machine, not a number someone has to remember to
+        // re-type into `axiom config` every time the server changes.
+        //
+        // Best-effort only: any failure (unreachable, not actually Ollama, model not loaded yet,
+        // proxy doesn't forward native paths) returns null and the caller falls back to the
+        // stored/manual value -- this must never block or break a session over a probe.
+        public async Task<int?> TryDetectCustomEndpointContextLengthAsync(CancellationToken cancellationToken = default)
+        {
+            if (!HasValidCustomEndpoint)
+                return null;
+
+            try
+            {
+                string psUrl = BuildNativeOllamaUrl(_customEndpointBaseUrl, "/api/ps");
+                using var request = new HttpRequestMessage(HttpMethod.Get, psUrl);
+                ApplyCustomEndpointHeaders(request);
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(3));
+
+                using HttpResponseMessage response = await Http.SendAsync(request, timeoutCts.Token);
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                string body = await response.Content.ReadAsStringAsync(timeoutCts.Token);
+                using JsonDocument doc = JsonDocument.Parse(body);
+                if (!doc.RootElement.TryGetProperty("models", out JsonElement models) || models.ValueKind != JsonValueKind.Array)
+                    return null;
+
+                foreach (JsonElement m in models.EnumerateArray())
+                {
+                    string name = m.TryGetProperty("model", out JsonElement nameEl) ? nameEl.GetString() ?? string.Empty : string.Empty;
+                    if (!string.Equals(name, _customEndpointModelId, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (m.TryGetProperty("context_length", out JsonElement ctxEl)
+                        && ctxEl.ValueKind == JsonValueKind.Number
+                        && ctxEl.TryGetInt32(out int ctx)
+                        && ctx > 0)
+                        return ctx;
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // Ollama's OpenAI-compatible surface lives under /v1; its own native API (used for /api/ps
+        // process status, among others) lives at the host root. The configured base_url is always
+        // the /v1 form (that's what every chat request needs), so this strips it back off to reach
+        // the native path -- best-effort string handling, not full URI parsing, since a custom
+        // endpoint's base_url is validated elsewhere to already be a well-formed https:// URL.
+        public static string BuildNativeOllamaUrl(string configuredBaseUrl, string nativePath)
+        {
+            string trimmed = (configuredBaseUrl ?? string.Empty).TrimEnd('/');
+            if (trimmed.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+                trimmed = trimmed[..^3];
+            return trimmed + nativePath;
+        }
+
         public bool HasValidCustomEndpoint =>
             !string.IsNullOrWhiteSpace(_customEndpointBaseUrl)
             && Uri.TryCreate(_customEndpointBaseUrl, UriKind.Absolute, out Uri? parsedUrl)

@@ -238,7 +238,8 @@ namespace Axiom.Core.Council
                         "\n[EVIDENCE DISCIPLINE] Never state file contents, counts, test/command output, or " +
                         "data analysis results from memory or inference — including estimating values from a " +
                         "CSV/data file instead of computing them. If a claim needs evidence you have not " +
-                        "retrieved this turn, call the tool that produces it first.";
+                        "retrieved this turn, call the tool that produces it first. Same for arithmetic — use " +
+                        "the calculator tool for any multi-step calculation or numeric fact.";
 
                     if (hasWriteTools)
                     {

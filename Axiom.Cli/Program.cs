@@ -274,7 +274,14 @@ internal static class Program
         // this model. Too low truncates context Axiom already budgeted for; too high for your
         // VRAM will fail or fall back to CPU. Granite 3.2 8B supports up to 128K, but most
         // consumer GPUs comfortably serve 16K-32K.
-        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Sent to the server as num_ctx on every request -- match what your hardware can serve.[/]");
+        //
+        // This is now only a FALLBACK: on every session start, Axiom queries the endpoint's own
+        // /api/ps for whatever context length the server is actually running the model at right
+        // now, and uses that automatically -- no more manually re-typing a number here every time
+        // the server gets retuned. This value only matters when that live query fails (server
+        // unreachable, or something other than Ollama on the other end).
+        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Sent to the server as num_ctx on every request. Axiom auto-detects the live value from the " +
+            "server on each run when reachable -- this is only the offline fallback.[/]");
         // Markup() parses [...] as a style tag -- a literal bracket around a number (e.g. the
         // "[8192]" default hint) must be escaped as [[ ]] or Spectre throws trying to parse
         // "8192" as a color code. This crashed every single "axiom config" run that reached the
@@ -354,13 +361,26 @@ internal static class Program
     // Both credentials can coexist on the one shared chatService instance -- which one is
     // actually used per-request is decided by which model alias is selected, not by which
     // credential was loaded. Blank values are harmless: HasValidCustomEndpoint just stays false.
-    private static void ApplyStoredCustomEndpoint(DatabaseService db, OpenRouterChatService chatService)
+    private static async Task ApplyStoredCustomEndpointAsync(DatabaseService db, OpenRouterChatService chatService)
     {
         string baseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
         string modelId = db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey);
         string apiKey = db.LoadCustomEndpointApiKey() ?? string.Empty;
         int contextWindow = ParseCustomEndpointContextWindow(db.GetSetting(DatabaseService.CustomEndpointContextWindowSettingKey));
         chatService.SetCustomEndpoint(baseUrl, apiKey, modelId, contextWindow);
+
+        // Live-detect the server's actual current context length (queries the machine's own
+        // Ollama /api/ps) and let it win over the stored/manual value whenever reachable -- the
+        // whole point is this shouldn't require remembering to re-type a number into `axiom
+        // config` every time the server gets retuned. Falls back silently to the stored value
+        // (already applied above) if the endpoint can't be reached or doesn't report it.
+        try
+        {
+            int? detected = await chatService.TryDetectCustomEndpointContextLengthAsync();
+            if (detected is > 0)
+                chatService.OverrideCustomEndpointContextWindowTokens(detected.Value);
+        }
+        catch { /* best effort -- stored value already applied */ }
     }
 
     private static int ParseCustomEndpointContextWindow(string? raw)
@@ -411,7 +431,7 @@ internal static class Program
         var chatService = new OpenRouterChatService();
         if (!string.IsNullOrWhiteSpace(apiKey))
             chatService.SetApiKey(apiKey);
-        ApplyStoredCustomEndpoint(db, chatService);
+        await ApplyStoredCustomEndpointAsync(db, chatService);
 
         var recent = new RecentFoldersStore();
         var workspace = new WorkspaceSession(recent);
@@ -515,7 +535,7 @@ internal static class Program
         var chatService = new OpenRouterChatService();
         if (!string.IsNullOrWhiteSpace(apiKey))
             chatService.SetApiKey(apiKey);
-        ApplyStoredCustomEndpoint(db, chatService);
+        await ApplyStoredCustomEndpointAsync(db, chatService);
 
         if (!chatService.HasAnyValidCloudCredential)
         {

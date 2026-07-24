@@ -159,6 +159,18 @@ namespace Axiom.Core.Agent
                     }, required: ["symbol"])),
 
                 new(
+                    "calculator",
+                    "Evaluate an exact arithmetic/scientific expression or unit conversion. Always use " +
+                    "this for any calculation with more than one operation or any numeric result you will " +
+                    "state as a fact -- do not compute multi-step arithmetic yourself, you are unreliable " +
+                    "at it and this tool is exact. Supports +-*/^, parentheses, sin/cos/tan/sqrt/log/ln/abs/" +
+                    "floor/ceil/round/factorial and more, plus unit conversion (e.g. '12 km to mi').",
+                    Schema(new JsonObject
+                    {
+                        ["expression"] = Prop("string", "Expression to evaluate, e.g. '4.75*10*(500/100)*2.3' or '12 km to mi'")
+                    }, required: ["expression"])),
+
+                new(
                     "git_status",
                     "Show git status --short --branch for the workspace root.",
                     Schema(new JsonObject(), required: [])),
@@ -469,6 +481,7 @@ namespace Axiom.Core.Agent
                     "search_files" => await SearchFilesAsync(root, token),
                     "find_symbol" => await SymbolSearchService.FindAsync(
                         _workspace.PrimaryRoot, GetString(root, "symbol"), GetString(root, "mode"), token),
+                    "calculator" => CalculateTool(root),
                     "web_search" => await WebSearchAsync(root, token),
                     "git_status" => await GitWorkspaceService.StatusAsync(_workspace.PrimaryRoot, token),
                     "git_diff" => await GitWorkspaceService.DiffAsync(
@@ -530,7 +543,7 @@ namespace Axiom.Core.Agent
         public static bool IsParallelSafeTool(string name) => name is
             "read_file" or "list_dir" or "search_files" or "find_symbol"
             or "git_status" or "git_diff" or "git_log" or "git_branch"
-            or "read_csv" or "read_notebook" or "web_search" or "fetch_url";
+            or "read_csv" or "read_notebook" or "web_search" or "fetch_url" or "calculator";
 
         private bool IsBigWrite(JsonElement root)
         {
@@ -1115,6 +1128,20 @@ namespace Axiom.Core.Agent
             if (!WorkspaceSession.TryNormalizePath(path, out path) || !_workspace.IsPathAllowed(path))
                 return $"Error: path outside attached workspaces: {path}";
             return DataFileTools.ReadNotebook(path, GetInt(root, "max_cells", 20));
+        }
+
+        // Reuses the same expression engine CalculatorToolAgent already uses for its passive
+        // [[calc: ...]] scan of the user's raw message -- exposed here as a real callable tool so
+        // the model can invoke it mid-reasoning instead of only benefiting when the user happens to
+        // type calculator syntax themselves.
+        private string CalculateTool(JsonElement root)
+        {
+            string expression = GetString(root, "expression");
+            if (string.IsNullOrWhiteSpace(expression))
+                return "Error: 'expression' is required.";
+            if (!CalculatorToolAgent.TryEvaluateExpression(expression, out string resultText))
+                return $"Error: could not evaluate expression: {expression}";
+            return resultText;
         }
 
         private async Task<string> FetchUrlAsync(JsonElement root, CancellationToken token)
