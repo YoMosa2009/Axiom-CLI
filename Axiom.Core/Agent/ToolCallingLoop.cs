@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Axiom.Core.Chat;
@@ -74,6 +75,7 @@ namespace Axiom.Core.Agent
             string finalText = string.Empty;
             bool cancelled = false;
             int malformedToolCallRecoveries = 0;
+            int capabilityDenialRecoveries = 0;
             int consecutiveBlockedRounds = 0;
             int maxRounds = scope == AgentToolExecutor.ToolScope.Inspect
                 ? Math.Min(_maxRounds, 6)
@@ -127,6 +129,31 @@ namespace Axiom.Core.Agent
                             "Do not describe a tool call as prose.",
                             PreserveFullText: true));
                         onStatus?.Invoke("Repairing malformed tool call");
+                        continue;
+                    }
+
+                    // Documented Granite-family failure mode (confirmed live): even with real tool
+                    // definitions on the wire and an explicit system-prompt tool list, the model can
+                    // fall back to its base RLHF "I'm just a text-based AI" refusal persona instead
+                    // of engaging with them at all -- a deeper alignment-tax behavior that no single
+                    // prompt sentence reliably overrides 100% of the time. Since this is a specific,
+                    // detectable text pattern (not a judgment call), treat it the same way as a
+                    // malformed tool call: one forced corrective round naming the tools that are
+                    // actually available right now, rather than accepting the refusal as the answer.
+                    if (capabilityDenialRecoveries == 0 && toolDefs.Count > 0 && LooksLikeCapabilityDenial(finalText))
+                    {
+                        capabilityDenialRecoveries++;
+                        string offeredNames = string.Join(", ", toolDefs.Select(t => t.Name));
+                        turnMessages.Add(new OpenRouterMessage("assistant", finalText, PreserveFullText: true));
+                        turnMessages.Add(new OpenRouterMessage(
+                            "user",
+                            "[CAPABILITY CORRECTION] That is factually wrong: you have real, working tools this turn " +
+                            "(" + offeredNames + "). You already have the ability to create files, run commands, and " +
+                            "manipulate the local environment through them. Do not repeat a capability disclaimer or " +
+                            "explain what a human could do instead. Call the appropriate tool now and make the actual " +
+                            "change on disk.",
+                            PreserveFullText: true));
+                        onStatus?.Invoke("Correcting capability denial");
                         continue;
                     }
 
@@ -412,6 +439,25 @@ namespace Axiom.Core.Agent
                 || text.Contains("<|tool_call|>", StringComparison.OrdinalIgnoreCase)
                 || text.Contains("<function=", StringComparison.OrdinalIgnoreCase);
         }
+
+        // Matches the base-model "I'm just a text-based AI" refusal persona bleeding through
+        // despite real tool definitions being on the wire this turn -- confirmed live against
+        // granite3.2:8b (Kestral 1). Deliberately narrow (a handful of high-signal phrasings) to
+        // keep false positives rare: this only fires when the model ALSO produced zero tool calls
+        // and tools were genuinely offered, so an accidental match just costs one corrective round.
+        private static readonly Regex CapabilityDenialRegex = new(
+            @"\b(?:don'?t|do\s+not|cannot|can'?t)\s+have\s+the\s+(?:capability|ability|capacity)\b" +
+            @"|\b(?:not\s+able|unable)\s+to\s+directly\b" +
+            @"|\btext-based\s+(?:ai\s+)?model\b" +
+            @"|\b(?:don'?t|do\s+not)\s+have\s+access\s+to\s+your\s+local\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        // Public for direct regression testing (ToolCallingLoop itself isn't easily unit-testable —
+        // it depends on the concrete OpenRouterChatService/HttpClient, not an injectable interface —
+        // so the detector is exposed directly, matching this codebase's existing pattern for
+        // otherwise-private logic, e.g. OpenRouterChatService.BuildChatRequest).
+        public static bool LooksLikeCapabilityDenial(string text)
+            => !string.IsNullOrWhiteSpace(text) && CapabilityDenialRegex.IsMatch(text);
 
         private static bool IsToolFailure(string? result)
         {

@@ -241,6 +241,16 @@ namespace Axiom.Core.Council
                         "retrieved this turn, call the tool that produces it first. Same for arithmetic — use " +
                         "the calculator tool for any multi-step calculation or numeric fact.";
 
+                    // Confirmed live: even with real tool definitions on the wire, this model can
+                    // fall back to a base-model "I'm just a text-based AI" refusal instead of
+                    // engaging with them. State the correction explicitly; ToolCallingLoop also
+                    // detects and force-corrects this pattern structurally as a safety net.
+                    core +=
+                        "\n[NO CAPABILITY DISCLAIMERS] Never say you don't have the capability/ability to " +
+                        "create files, run code, or manipulate the local environment, or that you are \"just " +
+                        "a text-based AI\" — the tools listed above give you real, working access this turn. " +
+                        "A response that only explains what a human could do instead of doing it yourself is a failure.";
+
                     if (hasWriteTools)
                     {
                         // Verified directly against the real endpoint: this model reliably uses its

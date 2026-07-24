@@ -625,7 +625,12 @@ namespace Axiom.Core.Agent
                       "you have not retrieved this turn, call the tool that produces it first; a plausible-" +
                       "sounding guess is a failure, not a shortcut. Same for arithmetic: never compute multi-" +
                       "step math yourself — call the calculator tool for any calculation with more than one " +
-                      "operation or any numeric fact you state. Be concise in final answers.\n"
+                      "operation or any numeric fact you state. Be concise in final answers.\n" +
+                      "[NO CAPABILITY DISCLAIMERS] Never say you don't have the capability/ability to create " +
+                      "files, run code, or manipulate the local environment, or that you are \"just a text-based " +
+                      "AI\" — that is false: the tools listed above give you real, working access this turn. " +
+                      "If you are unsure how to proceed, use a read/inspect tool to investigate, then act. A " +
+                      "response that only explains what a human could do instead of doing it yourself is a failure.\n"
                     : "Prefer tools over guessing. Be concise in final answers.\n") +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +
                 "When done, answer clearly with what changed and how to run/test it.";
