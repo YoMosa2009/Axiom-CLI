@@ -269,6 +269,12 @@ internal static class Program
             db.SaveSetting(DatabaseService.CustomEndpointModelIdSettingKey, modelIdInput);
 
         int displayedContextWindow = ParseCustomEndpointContextWindow(existingContextWindow);
+        // This value is sent to the server as num_ctx on every request (not just a client-side
+        // budgeting guess) -- set it to what your Ollama server/hardware can actually serve for
+        // this model. Too low truncates context Axiom already budgeted for; too high for your
+        // VRAM will fail or fall back to CPU. Granite 3.2 8B supports up to 128K, but most
+        // consumer GPUs comfortably serve 16K-32K.
+        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Sent to the server as num_ctx on every request -- match what your hardware can serve.[/]");
         // Markup() parses [...] as a style tag -- a literal bracket around a number (e.g. the
         // "[8192]" default hint) must be escaped as [[ ]] or Spectre throws trying to parse
         // "8192" as a color code. This crashed every single "axiom config" run that reached the

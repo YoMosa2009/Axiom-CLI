@@ -277,7 +277,9 @@ namespace Axiom.Core.Chat
         public const string WorkplaceCouncilDefaultModelLabel = "Poolside: Laguna M.1 (free)";
         public const string CustomEndpointModelId = "custom-endpoint";
         public const string CustomEndpointModelLabel = "Kestral 1";
-        // Keep in sync with the OLLAMA_CONTEXT_LENGTH the target server actually runs with.
+        // Sent to the server as num_ctx on every request (see BuildChatRequest) -- this is now the
+        // authoritative context window, not just a client-side budgeting guess. Still worth
+        // matching to OLLAMA_CONTEXT_LENGTH if the server enforces its own ceiling below this.
         public const int CustomEndpointContextWindowTokens = 9216;
         public const string DefaultModelId = Eidos1ModelId;
         public const string DefaultModelLabel = Eidos1ModelLabel;
@@ -1365,7 +1367,10 @@ namespace Axiom.Core.Chat
             }
         }
 
-        private HttpRequestMessage BuildChatRequest(
+        // Public for direct regression testing of wire-payload shape (num_ctx, tools, reasoning) --
+        // matches this class's existing pattern (GetPromptTokenBudgetForModel etc.) of exposing
+        // otherwise-internal logic rather than adding a separate HttpMessageHandler test seam.
+        public HttpRequestMessage BuildChatRequest(
             List<OpenRouterMessage> messages,
             string systemPrompt,
             string modelId,
@@ -1386,6 +1391,18 @@ namespace Axiom.Core.Chat
                 ["max_tokens"] = maxTokens,
                 ["stream"] = stream
             };
+
+            // The entire custom-endpoint context-budgeting apparatus (ContextBudget, per-block
+            // budgets, _customEndpointContextWindowTokens) previously only shaped the CLIENT-side
+            // prompt -- it never told the server how much context to actually allocate. Ollama
+            // defaults its OpenAI-compatible endpoint to a small internal context (historically
+            // 2048-4096 tokens) regardless of what the model supports, silently truncating
+            // everything the app carefully budgeted for unless num_ctx is set per-request. Ollama's
+            // OpenAI-compatible /v1/chat/completions accepts num_ctx as a top-level field (this is
+            // Ollama-specific, not part of the OpenAI schema, but Ollama documents it explicitly and
+            // other OpenAI-compatible servers generically ignore unrecognized top-level fields).
+            if (isCustomEndpoint && _customEndpointContextWindowTokens > 0)
+                payload["num_ctx"] = _customEndpointContextWindowTokens;
 
             if (SupportsParameter(modelId, "temperature"))
                 payload["temperature"] = temperature;

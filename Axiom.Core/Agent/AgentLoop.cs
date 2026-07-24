@@ -618,7 +618,13 @@ namespace Axiom.Core.Agent
                 "For human-facing interfaces, verify requested content, visual hierarchy, typography, spacing, alignment, asset integrity, responsive behavior, and interactions against the actual files.\n" +
                 planGuidance +
                 "When [[REGRESSION GUARD]] lists failed tests, re-run them before claiming done.\n" +
-                "Prefer tools over guessing. Be concise in final answers.\n" +
+                (isCustomEndpoint
+                    ? "[EVIDENCE DISCIPLINE] Never state file contents, line/row counts, test or command " +
+                      "output, or data analysis results from memory or inference — including summarizing a " +
+                      "CSV/data file by estimating values instead of computing them. If a claim needs evidence " +
+                      "you have not retrieved this turn, call the tool that produces it first; a plausible-" +
+                      "sounding guess is a failure, not a shortcut. Be concise in final answers.\n"
+                    : "Prefer tools over guessing. Be concise in final answers.\n") +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +
                 "When done, answer clearly with what changed and how to run/test it.";
         }

@@ -230,6 +230,16 @@ namespace Axiom.Core.Council
                         "Request 'what does this function do' with no edit needed -> read and explain, call no write tools. " +
                         "Only call write/shell tools when the plan actually requires a file or command change.";
 
+                    // Documented Granite-family failure mode: over-relying on inference instead of
+                    // calling an available tool (e.g. estimating/eyeballing CSV values instead of
+                    // computing them). Called out explicitly rather than relying on generic
+                    // "use tools" guidance, which this model does not reliably generalize from.
+                    core +=
+                        "\n[EVIDENCE DISCIPLINE] Never state file contents, counts, test/command output, or " +
+                        "data analysis results from memory or inference — including estimating values from a " +
+                        "CSV/data file instead of computing them. If a claim needs evidence you have not " +
+                        "retrieved this turn, call the tool that produces it first.";
+
                     if (hasWriteTools)
                     {
                         // Verified directly against the real endpoint: this model reliably uses its
@@ -318,6 +328,13 @@ namespace Axiom.Core.Council
                 core +=
                     "\n[INSPECT TOOLS] You may use read_file, list_dir, search_files, and run_shell (tests only) " +
                     "to falsify claims against the actual workspace. Prefer reading the files the Builder wrote.";
+
+                if (isCustomEndpoint)
+                {
+                    core +=
+                        "\n[EVIDENCE DISCIPLINE] Read the actual written files before judging them — do not " +
+                        "accept or reject the Builder's claims from memory or inference alone.";
+                }
             }
 
             if (isArtifactTask)

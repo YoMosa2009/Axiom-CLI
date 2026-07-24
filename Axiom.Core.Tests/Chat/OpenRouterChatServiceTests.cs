@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using System.Text.Json;
+using System.Threading.Tasks;
 using Axiom.Core.Chat;
 using Xunit;
 
@@ -5,6 +8,57 @@ namespace Axiom.Core.Tests.Chat
 {
     public class OpenRouterChatServiceTests
     {
+        // Root-cause regression guard: the entire custom-endpoint context-budgeting apparatus
+        // (ContextBudget, per-block budgets, CustomEndpointContextWindowTokens) only ever shaped
+        // the client-side prompt -- it never told Ollama's server how much context to actually
+        // allocate, so Ollama silently truncated to its own internal default regardless of what
+        // was budgeted for. num_ctx must be sent as a top-level field on every custom-endpoint
+        // request, and must never be sent for OpenRouter cloud models (not part of their schema).
+        [Fact]
+        public async Task BuildChatRequest_IncludesNumCtx_ForCustomEndpoint()
+        {
+            var service = new OpenRouterChatService();
+            service.SetCustomEndpoint(
+                "https://ai.axiominference.work/v1", "test-key", "granite3.2:8b", contextWindowTokens: 32768);
+
+            using var request = service.BuildChatRequest(
+                new List<OpenRouterMessage> { new("user", "hi") },
+                systemPrompt: "system",
+                modelId: OpenRouterChatService.CustomEndpointModelId,
+                thinkingEnabled: false,
+                temperature: 0.7,
+                topP: 0.9,
+                maxTokens: 512,
+                tools: null,
+                isCustomEndpoint: true);
+
+            string body = await request.Content!.ReadAsStringAsync();
+            using JsonDocument json = JsonDocument.Parse(body);
+            Assert.True(json.RootElement.TryGetProperty("num_ctx", out JsonElement numCtx));
+            Assert.Equal(32768, numCtx.GetInt32());
+        }
+
+        [Fact]
+        public async Task BuildChatRequest_OmitsNumCtx_ForCloudModels()
+        {
+            var service = new OpenRouterChatService();
+
+            using var request = service.BuildChatRequest(
+                new List<OpenRouterMessage> { new("user", "hi") },
+                systemPrompt: "system",
+                modelId: OpenRouterChatService.Eidos1ModelId,
+                thinkingEnabled: false,
+                temperature: 0.7,
+                topP: 0.9,
+                maxTokens: 512,
+                tools: null,
+                isCustomEndpoint: false);
+
+            string body = await request.Content!.ReadAsStringAsync();
+            using JsonDocument json = JsonDocument.Parse(body);
+            Assert.False(json.RootElement.TryGetProperty("num_ctx", out _));
+        }
+
         [Fact]
         public void HasValidCustomEndpoint_TrueOnceAllThreeFieldsAreSet()
         {
