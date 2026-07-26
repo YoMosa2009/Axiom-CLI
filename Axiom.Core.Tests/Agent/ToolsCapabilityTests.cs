@@ -29,6 +29,29 @@ namespace Axiom.Core.Tests.Agent
         }
 
         [Fact]
+        public void BuildWrappedWindowsShellCommand_ForcesUtf8ForFileWriteCmdlets()
+        {
+            // Regression test for a real reproduced bug: a model creating a file via run_shell
+            // (Out-File/Set-Content/> redirection) instead of the write_file tool got a correct
+            // text file with UTF-16LE-BOM bytes on disk, because Windows PowerShell 5.1 defaults
+            // those cmdlets to UTF-16LE with a BOM. The wrapped command must force UTF-8 before
+            // the user's command runs.
+            string wrapped = AgentToolExecutor.BuildWrappedWindowsShellCommand(
+                "C:\\workspace", "Set-Content -Path greeting.txt -Value 'hi'");
+
+            Assert.Contains("[System.Text.UTF8Encoding]::new($false)", wrapped);
+            Assert.Contains("$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'", wrapped);
+            Assert.Contains("$PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'", wrapped);
+            Assert.Contains("$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'", wrapped);
+            Assert.Contains("Set-Location -LiteralPath 'C:\\workspace'", wrapped);
+            Assert.EndsWith("Set-Content -Path greeting.txt -Value 'hi'", wrapped);
+            // The encoding preamble must run before the user's command, not after.
+            Assert.True(
+                wrapped.IndexOf("PSDefaultParameterValues", StringComparison.Ordinal)
+                < wrapped.IndexOf("Set-Content -Path greeting.txt", StringComparison.Ordinal));
+        }
+
+        [Fact]
         public void StrReplace_ReplacesExactMatch()
         {
             string dir = Path.Combine(Path.GetTempPath(), "axiom-sr-" + Guid.NewGuid().ToString("N"));

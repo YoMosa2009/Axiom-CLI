@@ -694,11 +694,7 @@ namespace Axiom.Core.Agent
             {
                 string shell = ResolveWindowsShell();
                 string safeCwd = cwd.Replace("'", "''");
-                // Force location, then run user command. Set-Location overrides still validated above.
-                string wrapped =
-                    $"Set-Location -LiteralPath '{safeCwd}'; " +
-                    "$ErrorActionPreference = 'Continue'; " +
-                    command;
+                string wrapped = BuildWrappedWindowsShellCommand(safeCwd, command);
                 psi.FileName = shell;
                 psi.ArgumentList.Add("-NoLogo");
                 psi.ArgumentList.Add("-NoProfile");
@@ -1374,10 +1370,45 @@ namespace Axiom.Core.Agent
             ["description"] = description
         };
 
+        // Public for direct regression testing of the wrapped command shape (matches this
+        // codebase's existing pattern of exposing otherwise-internal wire/command construction
+        // for testability, e.g. OpenRouterChatService.BuildChatRequest).
+        //
+        // Windows PowerShell 5.1 (still the default on most Windows installs) writes
+        // Out-File/Set-Content/Add-Content/> redirection as UTF-16LE with a BOM unless told
+        // otherwise -- a model asked to create a text file via a shell command (rather than the
+        // write_file tool) inherits that default, producing a file whose content is correct but
+        // whose on-disk bytes are UTF-16, breaking any downstream tool expecting UTF-8/ASCII text.
+        // PowerShell 7+ already defaults these to UTF-8 no-BOM, so this preamble is a no-op there;
+        // on 5.1 it's not possible to fully suppress the BOM via these cmdlets' own -Encoding
+        // parameter (no utf8NoBOM value exists pre-6.0), but UTF-8-with-BOM is still a large,
+        // low-risk improvement over UTF-16-with-BOM -- most tools skip a UTF-8 BOM silently, none
+        // tolerate UTF-16 as if it were UTF-8.
+        public static string BuildWrappedWindowsShellCommand(string safeCwd, string command)
+        {
+            string encodingPreamble =
+                "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
+                "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
+                "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'; " +
+                "$PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'; " +
+                "$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'; ";
+            // Force location, then run user command. Set-Location overrides still validated by
+            // the caller before this is invoked.
+            return
+                $"Set-Location -LiteralPath '{safeCwd}'; " +
+                "$ErrorActionPreference = 'Continue'; " +
+                encodingPreamble +
+                command;
+        }
+
         private static string ResolveWindowsShell()
         {
-            // Prefer Windows PowerShell 5.x (ubiquitous), then PowerShell 7+ if only that is installed.
-            foreach (string candidate in new[] { "powershell.exe", "pwsh.exe", "pwsh" })
+            // Prefer PowerShell 7+ when installed: unlike Windows PowerShell 5.1, it defaults
+            // Out-File/Set-Content/Add-Content/> redirection to true UTF-8 with no BOM, so the
+            // encoding preamble in RunShellAsync is a complete fix there rather than a partial one
+            // (5.1 has no utf8NoBOM option for these cmdlets). Fall back to 5.1 since it ships with
+            // every Windows install and the preamble still substantially improves its output.
+            foreach (string candidate in new[] { "pwsh.exe", "pwsh", "powershell.exe" })
             {
                 if (CommandExistsOnPath(candidate))
                     return candidate;
