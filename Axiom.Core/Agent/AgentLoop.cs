@@ -585,16 +585,6 @@ namespace Axiom.Core.Agent
                 ? "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n"
                 : "";
 
-            // Verified directly against the real endpoint: a small self-hosted model reliably uses
-            // its own native <tool_call>[...] format when told the EXACT syntax explicitly -- but
-            // improvises a different, unparseable pseudo-format (code-fenced pseudo function calls,
-            // prose descriptions, etc.) when only told "use your tools" without specifying how.
-            string toolCallFormatInstruction = isCustomEndpoint
-                ? "\nTo call a tool, respond with EXACTLY this format and nothing else: " +
-                  "<tool_call>[{\"name\": \"tool_name\", \"arguments\": {\"key\": \"value\"}}]. " +
-                  "Do not use code fences, Python syntax, or prose descriptions of the call — only that exact tag and JSON array."
-                : "";
-
             return
                 "You are Axiom, a terminal coding agent with tools for shell, files, git, search, diagnostics, and downloads.\n" +
                 approval +
@@ -611,8 +601,7 @@ namespace Axiom.Core.Agent
                     : "write_file, str_replace (preferred for small edits), apply_patch, write_files, " +
                       "read_file (offset/limit), list_dir, search_files, find_symbol, run_shell, " +
                       "git_*, diagnostics, run_tests, package_install, docker_run, fetch_url, read_csv, read_notebook, " +
-                      "worktree_*, spawn_subagent, plan_board, run_background, open_pr, web_search") + "." +
-                toolCallFormatInstruction + "\n" +
+                      "worktree_*, spawn_subagent, plan_board, run_background, open_pr, web_search") + ".\n" +
                 editGuidance +
                 "For implementation tasks: inspect relevant files, implement the complete deliverable, reread every changed file, and run type-appropriate verification before claiming done. A scaffold is never a final result.\n" +
                 "For human-facing interfaces, verify requested content, visual hierarchy, typography, spacing, alignment, asset integrity, responsive behavior, and interactions against the actual files.\n" +

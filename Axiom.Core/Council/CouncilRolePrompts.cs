@@ -250,20 +250,6 @@ namespace Axiom.Core.Council
                         "create files, run code, or manipulate the local environment, or that you are \"just " +
                         "a text-based AI\" — the tools listed above give you real, working access this turn. " +
                         "A response that only explains what a human could do instead of doing it yourself is a failure.";
-
-                    if (hasWriteTools)
-                    {
-                        // Verified directly against the real endpoint: this model reliably uses its
-                        // own native <tool_call>[...] format when told the EXACT syntax explicitly --
-                        // but improvises a different, unparseable pseudo-format (code-fenced pseudo
-                        // function calls, prose descriptions, etc.) when only told "use your tools"
-                        // without specifying how. This single instruction is the actual fix, not
-                        // just a hint.
-                        core +=
-                            "\nTo call a tool, respond with EXACTLY this format and nothing else: " +
-                            "<tool_call>[{\"name\": \"tool_name\", \"arguments\": {\"key\": \"value\"}}]. " +
-                            "Do not use code fences, Python syntax, or prose descriptions of the call — only that exact tag and JSON array.";
-                    }
                 }
 
                 if (looksLikeEdit)

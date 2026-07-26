@@ -278,9 +278,11 @@ namespace Axiom.Core.Chat
         public const string CustomEndpointModelId = "custom-endpoint";
         public const string CustomEndpointModelLabel = "Kestral 1";
         // Sent to the server as num_ctx on every request (see BuildChatRequest) -- this is now the
-        // authoritative context window, not just a client-side budgeting guess. Still worth
-        // matching to OLLAMA_CONTEXT_LENGTH if the server enforces its own ceiling below this.
-        public const int CustomEndpointContextWindowTokens = 9216;
+        // authoritative context window, not just a client-side budgeting guess. Used before
+        // TryDetectCustomEndpointContextLengthAsync completes, and as its fallback if detection
+        // ever fails. Matches Kestral 1's real configured OLLAMA_CONTEXT_LENGTH (omnicoder-2-9b
+        // Q5_K_M @ 45056, replacing granite3.2:8b's 9216).
+        public const int CustomEndpointContextWindowTokens = 45056;
         public const string DefaultModelId = Eidos1ModelId;
         public const string DefaultModelLabel = Eidos1ModelLabel;
         public static string WorkplaceCouncilDisplayLabel => SupportedModelProfiles

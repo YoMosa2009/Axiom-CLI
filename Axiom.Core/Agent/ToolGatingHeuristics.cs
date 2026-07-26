@@ -67,10 +67,11 @@ namespace Axiom.Core.Agent
             "spawn_subagent"
         };
 
-        // Granite 3.2 8B has substantially better call accuracy when it sees a focused coding
-        // surface instead of every possible Git/network/worktree/package operation. Keep core
-        // inspection, every normal file-edit primitive, and verification together: hiding batch
-        // writes or patches made multi-file tasks needlessly turn into fragile repeated calls.
+        // Small self-hosted models have substantially better call accuracy when they see a
+        // focused coding surface instead of every possible Git/network/worktree/package
+        // operation. Keep core inspection, every normal file-edit primitive, and verification
+        // together: hiding batch writes or patches made multi-file tasks needlessly turn into
+        // fragile repeated calls. Kestral 1 is currently omnicoder-2-9b (previously granite3.2:8b).
         private static readonly HashSet<string> CompactEditTools = new(StringComparer.OrdinalIgnoreCase)
         {
             "read_file", "list_dir", "search_files", "find_symbol", "calculator",

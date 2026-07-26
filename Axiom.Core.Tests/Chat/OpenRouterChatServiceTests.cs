@@ -135,8 +135,11 @@ namespace Axiom.Core.Tests.Chat
 
             int contextWindow = service.GetApproximateContextWindowTokens(OpenRouterChatService.CustomEndpointModelId);
 
+            // The custom-endpoint branch of GetApproximateContextWindowTokens returns the
+            // configured value as-is, with no Math.Max(32768, ...) floor applied (that floor only
+            // applies to cloud profiles) -- so this must hold regardless of whether the real
+            // configured window happens to be above or below 32768.
             Assert.Equal(OpenRouterChatService.CustomEndpointContextWindowTokens, contextWindow);
-            Assert.True(contextWindow < 32768);
         }
 
         [Fact]
