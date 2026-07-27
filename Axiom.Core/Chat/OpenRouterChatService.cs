@@ -283,6 +283,8 @@ namespace Axiom.Core.Chat
         // ever fails. Matches Kestral 1's real configured OLLAMA_CONTEXT_LENGTH (omnicoder-2-9b
         // Q5_K_M @ 45056, replacing granite3.2:8b's 9216).
         public const int CustomEndpointContextWindowTokens = 45056;
+        // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
+        public const int CustomEndpointTopK = 20;
         public const string DefaultModelId = Eidos1ModelId;
         public const string DefaultModelLabel = Eidos1ModelLabel;
         public static string WorkplaceCouncilDisplayLabel => SupportedModelProfiles
@@ -1485,6 +1487,13 @@ namespace Axiom.Core.Chat
 
             if (SupportsParameter(modelId, "top_p"))
                 payload["top_p"] = topP;
+
+            // top_k is an Ollama/llama.cpp sampling extension, not part of the true OpenAI schema
+            // (mirrors num_ctx above) -- Tesslate's OmniCoder-9B model card recommends top_k: 20
+            // for both general and agentic/tool-calling use, and Axiom-CLI never sent it at all
+            // before this, leaving Ollama's own default in effect.
+            if (isCustomEndpoint)
+                payload["top_k"] = CustomEndpointTopK;
 
             JsonArray stopPayload = BuildStopPayload(stopSequences);
             if (stopPayload.Count > 0)
@@ -2808,6 +2817,16 @@ namespace Axiom.Core.Chat
 
         private static double ResolveTemperature(OpenRouterModelProfile profile, bool isCodingRequest, bool isPythonRequest)
         {
+            // Checked before the shared IsCodeSpecialized branch below (which Hepha 1 and the
+            // Workplace Council default also set) so this only affects Kestral 1. Tesslate's
+            // OmniCoder-9B model card recommends temperature 0.2-0.4 for agentic/tool-calling
+            // tasks and ~0.6 for general use; the previous 0.08-0.2 values were tuned for
+            // granite3.2:8b's weaker tool-call format reliability and sat below the model's own
+            // recommended floor for a model that's already proven reliable at structured
+            // tool-calling (verified directly against this server).
+            if (profile?.IsCustomEndpoint == true)
+                return isCodingRequest ? (isPythonRequest ? 0.25 : 0.3) : 0.4;
+
             if (profile?.IsCodeSpecialized == true)
                 return isCodingRequest ? (isPythonRequest ? 0.08 : 0.12) : 0.2;
 
@@ -2816,6 +2835,12 @@ namespace Axiom.Core.Chat
 
         private static double ResolveTopP(OpenRouterModelProfile profile, bool isCodingRequest)
         {
+            // Same reasoning and Kestral-1-only scope as ResolveTemperature above. OmniCoder-9B's
+            // model card recommends top_p 0.95 uniformly (coding and general alike) rather than a
+            // lower value for coding specifically.
+            if (profile?.IsCustomEndpoint == true)
+                return 0.95;
+
             if (profile?.IsCodeSpecialized == true)
                 return isCodingRequest ? 0.72 : 0.82;
 

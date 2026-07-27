@@ -14,8 +14,8 @@ namespace Axiom.Core.Persistence
         public string? DefaultModelId { get; set; }
         public string? DefaultModelLabel { get; set; }
         public string ApprovalMode { get; set; } = "auto";
-        public bool CouncilEnabled { get; set; } = true;
-        public bool WebSearchEnabled { get; set; } = true;
+        public bool CouncilEnabled { get; set; }
+        public bool WebSearchEnabled { get; set; }
         public bool SandboxEnabled { get; set; }
         public bool CalculatorEnabled { get; set; } = true;
         // Per-machine override for where kestral's persistent memory store lives (e.g. a

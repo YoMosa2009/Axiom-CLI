@@ -8,9 +8,9 @@ namespace Axiom.Cli;
 internal sealed class SessionToolSettings
 {
     public bool CalculatorEnabled { get; set; } = true;
-    public bool WebSearchEnabled { get; set; } = true;
+    public bool WebSearchEnabled { get; set; }
     public bool SandboxEnabled { get; set; }
-    public bool CouncilEnabled { get; set; } = true;
+    public bool CouncilEnabled { get; set; }
 
     /// <summary>Auto | Ask | Plan — how freely tools may mutate the workspace.</summary>
     public ApprovalMode ApprovalMode { get; set; } = ApprovalMode.Auto;

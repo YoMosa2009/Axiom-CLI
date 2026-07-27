@@ -14,7 +14,7 @@ namespace Axiom.Core.Council
     public sealed record CouncilToolOptions(
         bool SandboxEnabled = false,
         bool CalculatorEnabled = true,
-        bool WebSearchEnabled = true,
+        bool WebSearchEnabled = false,
         bool AgenticBuilderEnabled = true,
         CriticSeverityPolicy SeverityPolicy = CriticSeverityPolicy.Strict,
         bool ParallelExplore = true,

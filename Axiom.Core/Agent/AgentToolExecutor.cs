@@ -38,7 +38,7 @@ namespace Axiom.Core.Agent
         }
 
         /// <summary>When false, web_search is omitted from the tool list and rejected if called.</summary>
-        public bool WebSearchEnabled { get; set; } = true;
+        public bool WebSearchEnabled { get; set; }
 
         public ApprovalMode ApprovalMode { get; set; } = ApprovalMode.Auto;
 
