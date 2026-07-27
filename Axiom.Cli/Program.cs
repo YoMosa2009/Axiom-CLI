@@ -220,7 +220,7 @@ internal static class Program
         return 1;
     }
 
-    private static Task<int> RunConfigAsync()
+    private static async Task<int> RunConfigAsync()
     {
         using var db = new DatabaseService();
         if (!db.IsReady)
@@ -244,7 +244,7 @@ internal static class Program
         AnsiConsole.MarkupLine($"[bold]Self-hosted endpoint[/] [{AxiomTheme.Hex(AxiomTheme.SystemMuted)}](optional — leave any field blank to skip)[/]");
 
         string existingBaseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
-        string existingContextWindow = db.GetSetting(DatabaseService.CustomEndpointContextWindowSettingKey);
+        string existingModelId = db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey);
         string? existingCustomKey = db.LoadCustomEndpointApiKey();
         if (!string.IsNullOrWhiteSpace(existingBaseUrl) || !string.IsNullOrWhiteSpace(existingCustomKey))
         {
@@ -263,53 +263,63 @@ internal static class Program
         if (!string.IsNullOrWhiteSpace(baseUrlInput))
             db.SaveSetting(DatabaseService.CustomEndpointBaseUrlSettingKey, baseUrlInput);
 
-        AnsiConsole.Markup("Model id (e.g. llama3.1:8b): ");
-        string modelIdInput = (ReadLinePlain() ?? string.Empty).Trim();
-        if (!string.IsNullOrWhiteSpace(modelIdInput))
-            db.SaveSetting(DatabaseService.CustomEndpointModelIdSettingKey, modelIdInput);
-
-        int displayedContextWindow = ParseCustomEndpointContextWindow(existingContextWindow);
-        // This value is sent to the server as num_ctx on every request (not just a client-side
-        // budgeting guess) -- set it to what your Ollama server/hardware can actually serve for
-        // this model. Too low truncates context Axiom already budgeted for; too high for your
-        // VRAM will fail or fall back to CPU. Granite 3.2 8B supports up to 128K, but most
-        // consumer GPUs comfortably serve 16K-32K.
-        //
-        // This is now only a FALLBACK: on every session start, Axiom queries the endpoint's own
-        // /api/ps for whatever context length the server is actually running the model at right
-        // now, and uses that automatically -- no more manually re-typing a number here every time
-        // the server gets retuned. This value only matters when that live query fails (server
-        // unreachable, or something other than Ollama on the other end).
-        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Sent to the server as num_ctx on every request. Axiom auto-detects the live value from the " +
-            "server on each run when reachable -- this is only the offline fallback.[/]");
-        // Markup() parses [...] as a style tag -- a literal bracket around a number (e.g. the
-        // "[8192]" default hint) must be escaped as [[ ]] or Spectre throws trying to parse
-        // "8192" as a color code. This crashed every single "axiom config" run that reached the
-        // self-hosted endpoint's context-window prompt, always -- there is no unbroken value here.
-        AnsiConsole.Markup($"Context window tokens [[{displayedContextWindow}]]: ");
-        string contextWindowInput = (ReadLinePlain() ?? string.Empty).Trim();
-        if (!string.IsNullOrWhiteSpace(contextWindowInput))
-        {
-            if (int.TryParse(contextWindowInput, out int contextWindow)
-                && contextWindow is >= 1024 and <= 1_000_000)
-            {
-                db.SaveSetting(DatabaseService.CustomEndpointContextWindowSettingKey, contextWindow.ToString());
-            }
-            else
-            {
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Context window must be a number from 1,024 to 1,000,000. Keeping {displayedContextWindow}.[/]");
-            }
-        }
-
         AnsiConsole.Markup("API key: ");
         string customKeyInput = ReadLineSecret() ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(customKeyInput))
             db.SaveCustomEndpointApiKey(customKeyInput);
 
+        // Pick a model from what the server actually has instead of requiring the exact tag
+        // (e.g. "hf.co/Tesslate/OmniCoder-9B-GGUF:Q5_K_M") to be typed by hand. Falls back to
+        // whichever base URL/key are already on file when the user leaves either blank here, so
+        // "just fix my model choice" works by pressing Enter through everything else.
+        string modelIdInput = string.Empty;
+        string probeBaseUrl = !string.IsNullOrWhiteSpace(baseUrlInput) ? baseUrlInput : existingBaseUrl;
+        string probeApiKey = !string.IsNullOrWhiteSpace(customKeyInput) ? customKeyInput : (existingCustomKey ?? string.Empty);
+        IReadOnlyList<string> availableModels = Array.Empty<string>();
+        if (!string.IsNullOrWhiteSpace(probeBaseUrl)
+            && Uri.TryCreate(probeBaseUrl, UriKind.Absolute, out Uri? probeUri)
+            && probeUri.Scheme == Uri.UriSchemeHttps)
+        {
+            var probeService = new OpenRouterChatService();
+            probeService.SetCustomEndpoint(probeBaseUrl, probeApiKey, modelId: string.Empty);
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Looking up available models...[/]");
+            availableModels = await probeService.TryListCustomEndpointModelsAsync();
+        }
+
+        if (availableModels.Count > 0)
+        {
+            AnsiConsole.MarkupLine("Available models:");
+            for (int i = 0; i < availableModels.Count; i++)
+            {
+                string marker = string.Equals(availableModels[i], existingModelId, StringComparison.OrdinalIgnoreCase)
+                    ? $" [{AxiomTheme.Hex(AxiomTheme.SystemMuted)}](current)[/]"
+                    : string.Empty;
+                AnsiConsole.MarkupLine($"  {i + 1}. {availableModels[i].EscapeMarkup()}{marker}");
+            }
+            AnsiConsole.Markup($"Pick a model [[1-{availableModels.Count}]], or leave blank to skip: ");
+            string pickInput = (ReadLinePlain() ?? string.Empty).Trim();
+            if (int.TryParse(pickInput, out int pickIndex) && pickIndex >= 1 && pickIndex <= availableModels.Count)
+                modelIdInput = availableModels[pickIndex - 1];
+            else if (!string.IsNullOrWhiteSpace(pickInput))
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Not a number in that range — model choice unchanged.[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Couldn't reach the server to list models (unreachable, or this isn't Ollama) -- type the model id manually.[/]");
+            AnsiConsole.Markup("Model id (e.g. llama3.1:8b): ");
+            modelIdInput = (ReadLinePlain() ?? string.Empty).Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(modelIdInput))
+            db.SaveSetting(DatabaseService.CustomEndpointModelIdSettingKey, modelIdInput);
+
+        // No context-window prompt: it is now purely auto-detected each session (see
+        // ApplyStoredCustomEndpointAsync) or falls back to a hardware-validated default -- there is
+        // nothing left here for a manually-typed number to get stale against.
+
         bool configuredCustomEndpoint = !string.IsNullOrWhiteSpace(baseUrlInput)
             || !string.IsNullOrWhiteSpace(modelIdInput)
-            || !string.IsNullOrWhiteSpace(customKeyInput)
-            || !string.IsNullOrWhiteSpace(contextWindowInput);
+            || !string.IsNullOrWhiteSpace(customKeyInput);
         if (configuredCustomEndpoint)
         {
             // "Saved" only ever meant "at least one field was written" -- which silently misled
@@ -318,7 +328,6 @@ internal static class Program
             // Report the real, final state instead of a blanket success message.
             string finalBaseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
             string finalModelId = db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey);
-            int finalContextWindow = ParseCustomEndpointContextWindow(db.GetSetting(DatabaseService.CustomEndpointContextWindowSettingKey));
             string? finalApiKey = db.LoadCustomEndpointApiKey();
             var missing = new List<string>();
             if (string.IsNullOrWhiteSpace(finalBaseUrl)) missing.Add("base URL");
@@ -329,7 +338,6 @@ internal static class Program
 
             if (missing.Count == 0 && finalUrlValid)
             {
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Configured context window: {finalContextWindow:n0} tokens.[/]");
                 AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Custom endpoint saved and ready — 'kestral' is usable now.[/]");
             }
             else if (missing.Count == 0)
@@ -349,11 +357,11 @@ internal static class Program
         if (!savedAnything)
         {
             AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Nothing entered.[/]");
-            return Task.FromResult(1);
+            return 1;
         }
 
         AnsiConsole.MarkupLine($"Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom[/] to start chatting.");
-        return Task.FromResult(0);
+        return 0;
     }
 
     private static string Last4(string value) => value.Length <= 4 ? value : value[^4..];
@@ -366,27 +374,23 @@ internal static class Program
         string baseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
         string modelId = db.GetSetting(DatabaseService.CustomEndpointModelIdSettingKey);
         string apiKey = db.LoadCustomEndpointApiKey() ?? string.Empty;
-        int contextWindow = ParseCustomEndpointContextWindow(db.GetSetting(DatabaseService.CustomEndpointContextWindowSettingKey));
-        chatService.SetCustomEndpoint(baseUrl, apiKey, modelId, contextWindow);
+        // No stored context window to read -- `axiom config` never asks for one (see
+        // RunConfigAsync), so there is nothing here that can go stale. Starts from the validated
+        // default (OpenRouterChatService.CustomEndpointContextWindowTokens) and the live detection
+        // below overrides it whenever the server is reachable.
+        chatService.SetCustomEndpoint(baseUrl, apiKey, modelId);
 
         // Live-detect the server's actual current context length (queries the machine's own
-        // Ollama /api/ps) and let it win over the stored/manual value whenever reachable -- the
-        // whole point is this shouldn't require remembering to re-type a number into `axiom
-        // config` every time the server gets retuned. Falls back silently to the stored value
-        // (already applied above) if the endpoint can't be reached or doesn't report it.
+        // Ollama /api/ps) and let it win over the default whenever reachable -- reflects whatever
+        // the server is really running right now instead of a number that could go stale.
         try
         {
             int? detected = await chatService.TryDetectCustomEndpointContextLengthAsync();
             if (detected is > 0)
                 chatService.OverrideCustomEndpointContextWindowTokens(detected.Value);
         }
-        catch { /* best effort -- stored value already applied */ }
+        catch { /* best effort -- default already applied */ }
     }
-
-    private static int ParseCustomEndpointContextWindow(string? raw)
-        => int.TryParse(raw, out int value) && value is >= 1024 and <= 1_000_000
-            ? value
-            : OpenRouterChatService.CustomEndpointContextWindowTokens;
 
     private static string? ReadLineSecret()
     {

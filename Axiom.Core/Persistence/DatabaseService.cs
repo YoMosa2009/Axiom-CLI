@@ -14,7 +14,6 @@ namespace Axiom.Core.Persistence
         private const string CustomEndpointApiKeySettingKey = "custom_endpoint_api_key";
         public const string CustomEndpointBaseUrlSettingKey = "custom_endpoint_base_url";
         public const string CustomEndpointModelIdSettingKey = "custom_endpoint_model_id";
-        public const string CustomEndpointContextWindowSettingKey = "custom_endpoint_context_window_tokens";
         private readonly SqliteConnection _connection;
         private readonly ISecretStore _secretStore;
         private readonly PersistentSettingsStore _settingsBackup;

@@ -179,6 +179,36 @@ namespace Axiom.Core.Tests.Chat
         }
 
         [Fact]
+        public async Task TryListCustomEndpointModelsAsync_ReturnsEmpty_WhenNoBaseUrlSet()
+        {
+            var service = new OpenRouterChatService();
+            Assert.Empty(await service.TryListCustomEndpointModelsAsync());
+        }
+
+        [Fact]
+        public async Task TryListCustomEndpointModelsAsync_ReturnsEmpty_WhenServerUnreachable()
+        {
+            var service = new OpenRouterChatService();
+            service.SetCustomEndpoint("https://host.invalid/v1", "test-key", modelId: string.Empty);
+            Assert.Empty(await service.TryListCustomEndpointModelsAsync());
+        }
+
+        // Regression guard: unlike HasValidCustomEndpoint (used to gate actually sending chat
+        // requests), listing models must work with an EMPTY model id -- axiom config calls this
+        // precisely to find out what the model id should be, before it's known.
+        [Fact]
+        public async Task TryListCustomEndpointModelsAsync_DoesNotRequireModelId()
+        {
+            var service = new OpenRouterChatService();
+            service.SetCustomEndpoint("https://ai.axiominference.work/v1", "test-key", modelId: string.Empty);
+            Assert.False(service.HasValidCustomEndpoint);
+            // Should still attempt the query (and fail gracefully on network reachability in a
+            // test sandbox) rather than short-circuiting on the missing model id.
+            IReadOnlyList<string> result = await service.TryListCustomEndpointModelsAsync();
+            Assert.NotNull(result);
+        }
+
+        [Fact]
         public void HasValidCustomEndpoint_TrueOnceAllThreeFieldsAreSet()
         {
             var service = new OpenRouterChatService();

@@ -277,9 +277,19 @@ namespace Axiom.Core.Chat
         // Sent to the server as num_ctx on every request (see BuildOllamaNativeChatRequest) -- this
         // is now the authoritative context window, not just a client-side budgeting guess. Used
         // before TryDetectCustomEndpointContextLengthAsync completes, and as its fallback if
-        // detection ever fails. Matches Kestral 1's real configured OLLAMA_CONTEXT_LENGTH
-        // (omnicoder-2-9b Q5_K_M @ 45056, replacing granite3.2:8b's 9216).
-        public const int CustomEndpointContextWindowTokens = 45056;
+        // detection ever fails. `axiom config` no longer asks for this at all (see RunConfigAsync)
+        // -- it is purely auto-detected or this validated default, never a manually-typed number
+        // that can go stale.
+        //
+        // 65536 was chosen empirically against Kestral 1's real hardware (GTX 1080, 8GB VRAM) with
+        // full GPU residency (CustomEndpointNumGpuLayers) already forced: 45056/65536/98304 all
+        // measured identical generation speed (~25.8 tok/s) and 100% GPU-resident, but 98304 left
+        // only ~411MB VRAM free and 131072 left ~98MB free with a measured 5x prefill slowdown
+        // (30.7 vs 146 tok/s) -- almost certainly the driver's system-memory-fallback kicking in
+        // under near-zero headroom. 65536 leaves a comfortable ~839MB free under real desktop
+        // conditions (other GPU-using apps included) with zero measured cost, a meaningful increase
+        // over the previous 45056 default with no downside.
+        public const int CustomEndpointContextWindowTokens = 65536;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
         // llama.cpp/Ollama convention: any value >= the model's real layer count offloads every
@@ -562,6 +572,55 @@ namespace Axiom.Core.Chat
             catch
             {
                 return null;
+            }
+        }
+
+        // Lets `axiom config` offer a pick-list of models actually present on the server instead
+        // of requiring the exact tag (e.g. "hf.co/Tesslate/OmniCoder-9B-GGUF:Q5_K_M") to be typed
+        // by hand. Deliberately does NOT require HasValidCustomEndpoint (which needs a model id) --
+        // this runs precisely when the model id isn't known yet, so it only needs a plausible base
+        // URL. Best-effort: any failure (unreachable, not Ollama, no models pulled yet) returns an
+        // empty list and the caller falls back to manual entry.
+        public async Task<IReadOnlyList<string>> TryListCustomEndpointModelsAsync(CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(_customEndpointBaseUrl)
+                || !Uri.TryCreate(_customEndpointBaseUrl, UriKind.Absolute, out Uri? parsedBaseUrl)
+                || parsedBaseUrl.Scheme != Uri.UriSchemeHttps)
+                return Array.Empty<string>();
+
+            try
+            {
+                string tagsUrl = BuildNativeOllamaUrl(_customEndpointBaseUrl, "/api/tags");
+                using var request = new HttpRequestMessage(HttpMethod.Get, tagsUrl);
+                ApplyCustomEndpointHeaders(request);
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+
+                using HttpResponseMessage response = await Http.SendAsync(request, timeoutCts.Token);
+                if (!response.IsSuccessStatusCode)
+                    return Array.Empty<string>();
+
+                string body = await response.Content.ReadAsStringAsync(timeoutCts.Token);
+                using JsonDocument doc = JsonDocument.Parse(body);
+                if (!doc.RootElement.TryGetProperty("models", out JsonElement models) || models.ValueKind != JsonValueKind.Array)
+                    return Array.Empty<string>();
+
+                var names = new List<string>();
+                foreach (JsonElement m in models.EnumerateArray())
+                {
+                    if (!m.TryGetProperty("name", out JsonElement nameEl) || nameEl.ValueKind != JsonValueKind.String)
+                        continue;
+                    string name = nameEl.GetString() ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(name))
+                        names.Add(name);
+                }
+
+                return names;
+            }
+            catch
+            {
+                return Array.Empty<string>();
             }
         }
 
