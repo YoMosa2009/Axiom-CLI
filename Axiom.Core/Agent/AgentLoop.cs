@@ -619,7 +619,21 @@ namespace Axiom.Core.Agent
                       "files, run code, or manipulate the local environment, or that you are \"just a text-based " +
                       "AI\" — that is false: the tools listed above give you real, working access this turn. " +
                       "If you are unsure how to proceed, use a read/inspect tool to investigate, then act. A " +
-                      "response that only explains what a human could do instead of doing it yourself is a failure.\n"
+                      "response that only explains what a human could do instead of doing it yourself is a failure.\n" +
+                      "[INCREMENTAL WRITES] For a large or detailed deliverable (a full page with multiple " +
+                      "sections, a sizeable script, anything you'd expect to run past a few hundred lines), do " +
+                      "not attempt it as one single write_file call, and never call write_file with empty or " +
+                      "placeholder content that you intend to fill in with a later call — if this connection " +
+                      "is interrupted before that later call runs, an empty or stub file is what gets left " +
+                      "behind, which is worse than not having written it at all. Instead, every write_file or " +
+                      "str_replace call must leave the file it touches in a real, complete, usable state right " +
+                      "then: write_file the first section (or a small standalone file) with its actual finished " +
+                      "content, then use additional write_file or str_replace calls to append or add each " +
+                      "remaining real section, each one leaving the file valid and non-empty on disk. One tool " +
+                      "call generating a very large amount of content in a single response can exceed this " +
+                      "connection's response window and fail outright — smaller calls of REAL content each " +
+                      "complete safely and the file ends up just as complete either way, without ever passing " +
+                      "through an empty or broken intermediate state.\n"
                     : "Prefer tools over guessing. Be concise in final answers.\n") +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +
                 "When done, answer clearly with what changed and how to run/test it.";

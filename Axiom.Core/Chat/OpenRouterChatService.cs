@@ -125,6 +125,22 @@ namespace Axiom.Core.Chat
         public event Action<OpenRouterTokenUsage>? TokenUsageRecorded;
 
         private static readonly HttpClient Http = new();
+        // HttpClient.Timeout governs the ENTIRE logical operation, not just the connect phase --
+        // confirmed directly (a request against the real server with Timeout=8s threw
+        // TaskCanceledException citing "the configured HttpClient.Timeout of 8 seconds elapsing"
+        // while still reading the response stream well past ResponseHeadersRead). That silently
+        // overrode every one of the carefully-tuned custom-endpoint idle/duration bounds below
+        // (StreamFirstLineIdleTimeout, CustomEndpointStreamLineIdleTimeout,
+        // StreamTotalDurationLimit, NonStreamBodyReadTimeout) with a hard 90s ceiling on the total
+        // request the moment a real generation ran long -- manifesting as an uncaught
+        // TaskCanceledException that skipped the graceful StreamInterrupted handling entirely
+        // (that only wraps the read loop, not the initial SendAsync) and surfaced all the way up
+        // to Council's generic "stopped by user" catch, which has no idea a timeout even
+        // happened. Custom-endpoint requests use this separate client with no client-level
+        // timeout so the explicit, purpose-built bounds actually govern instead of being silently
+        // preempted. Cloud OpenRouter requests keep using `Http` (its 90s ceiling is intentional
+        // there -- see the comment on Http.Timeout below).
+        private static readonly HttpClient CustomEndpointHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
         private static readonly string[] CodingRequestSignals =
         [
             "write", "code", "script", "function", "program", "generate", "build", "create", "implement",
@@ -233,11 +249,13 @@ namespace Axiom.Core.Chat
             Http.Timeout = TimeSpan.FromSeconds(90);
         }
 
-        // HttpClient.Timeout stops covering the connection the moment SendAsync returns with
-        // ResponseHeadersRead — reading the body afterwards has NO deadline. A free-tier provider
-        // that accepts the request (200 + SSE headers) and then stalls used to hold the read loop
-        // — and the whole chat turn — open forever: the "endless loading" hang. These deadlines
-        // cover the body phase so a stall becomes a model-fallback instead of a frozen turn.
+        // These are on top of (not instead of) Http.Timeout, which -- despite ResponseHeadersRead
+        // -- actually covers the whole operation including the body read (see CustomEndpointHttp's
+        // comment above for how that was confirmed). For the cloud `Http` client the two happen to
+        // land at the same 90s ceiling today, which is harmless, but a free-tier provider that
+        // accepts the request (200 + SSE headers) and then stalls needs its own explicit deadline
+        // regardless: these cover the body phase so a stall becomes a model-fallback instead of a
+        // frozen turn.
         //
         // Line-level idle: OpenRouter emits keep-alive comment lines every few seconds while a
         // provider queues, so a healthy stream is never silent for long — a long line gap means
@@ -258,6 +276,15 @@ namespace Axiom.Core.Chat
         private static readonly TimeSpan StreamTotalDurationLimit = TimeSpan.FromMinutes(10);
         // Non-streamed body reads after ResponseHeadersRead have the same unbounded-read exposure.
         private static readonly TimeSpan NonStreamBodyReadTimeout = TimeSpan.FromSeconds(100);
+        // A mid-stream interruption on the custom endpoint (idle timeout, dropped connection,
+        // truncated record) can be a real internet-tunnel hiccup or the server briefly reloading --
+        // not necessarily a dead end. One retry of the whole request (a partial stream can't be
+        // resumed; the model has no memory of the aborted attempt) recovers from that instead of
+        // surfacing "[Kestral connection interrupted]" for something a second try would have
+        // completed. Bounded to 1 so a genuinely broken connection still fails within a few
+        // minutes rather than repeatedly waiting out the full idle timeout.
+        private const int CustomEndpointStreamInterruptionRetryLimit = 1;
+        private static readonly TimeSpan CustomEndpointStreamRetryDelay = TimeSpan.FromSeconds(2);
 
         private static async Task<string> ReadBodyWithTimeoutAsync(HttpResponseMessage response, CancellationToken cancellationToken)
         {
@@ -1727,7 +1754,7 @@ namespace Axiom.Core.Chat
             {
                 using var request = BuildOllamaNativeChatRequest(
                     messages, systemPrompt, modelId, temperature, topP, maxTokens, tools, stream: false, stopSequences: null);
-                using HttpResponseMessage response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                using HttpResponseMessage response = await CustomEndpointHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 statusCode = response.StatusCode;
                 responseBody = await ReadBodyWithTimeoutAsync(response, cancellationToken);
 
@@ -1780,13 +1807,39 @@ namespace Axiom.Core.Chat
             IReadOnlyList<string>? stopSequences,
             int estimatedPromptTokens)
         {
+            for (int streamRetryAttempt = 0; ; streamRetryAttempt++)
+            {
+                OpenRouterChatResponse attempt = await SendCustomEndpointChatStreamOnceAsync(
+                    messages, systemPrompt, modelId, temperature, topP, maxTokens, tools, onToken,
+                    cancellationToken, stopSequences, estimatedPromptTokens);
+
+                if (!attempt.StreamInterrupted || streamRetryAttempt >= CustomEndpointStreamInterruptionRetryLimit)
+                    return attempt;
+
+                await Task.Delay(CustomEndpointStreamRetryDelay, cancellationToken);
+            }
+        }
+
+        private async Task<OpenRouterChatResponse> SendCustomEndpointChatStreamOnceAsync(
+            List<OpenRouterMessage> messages,
+            string systemPrompt,
+            string modelId,
+            double temperature,
+            double topP,
+            int maxTokens,
+            IReadOnlyList<OpenRouterToolDefinition>? tools,
+            Action<string>? onToken,
+            CancellationToken cancellationToken,
+            IReadOnlyList<string>? stopSequences,
+            int estimatedPromptTokens)
+        {
             HttpResponseMessage? response = null;
             for (int retryAttempt = 0; ; retryAttempt++)
             {
                 response?.Dispose();
                 using var request = BuildOllamaNativeChatRequest(
                     messages, systemPrompt, modelId, temperature, topP, maxTokens, tools, stream: true, stopSequences);
-                response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                response = await CustomEndpointHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.OK)
                     break;
 

@@ -81,9 +81,18 @@ namespace Axiom.Core.Agent
             int maxRounds = scope == AgentToolExecutor.ToolScope.Inspect
                 ? Math.Min(_maxRounds, 6)
                 : _maxRounds;
+            // The 2,560 ceiling (was 3,072) is deliberately conservative, not scaled up alongside
+            // the recent context-window increases: measured live, a completion that actually used
+            // the full 3,072-token budget took ~120s of real generation time on Kestral's
+            // hardware -- already past the ~100s origin-response window a Cloudflare Tunnel
+            // enforces by default, which is how this self-hosted endpoint is exposed. Going higher
+            // makes a single large tool call (e.g. one big write_file) more likely to blow that
+            // window and fail outright rather than land. [INCREMENTAL WRITES] in
+            // BuildAgentSystemPrompt is the actual fix for large deliverables -- several smaller
+            // calls each comfortably inside the window instead of one call racing the clock.
             int? maxTokensOverride = gateForCustomEndpoint
                 ? scope == AgentToolExecutor.ToolScope.Full
-                    ? Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 4, 1_024, 3_072)
+                    ? Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 4, 1_024, 2_560)
                     : Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 6, 768, 1_536)
                 : null;
 
