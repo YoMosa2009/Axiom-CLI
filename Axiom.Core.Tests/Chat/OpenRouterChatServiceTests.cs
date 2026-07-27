@@ -8,57 +8,116 @@ namespace Axiom.Core.Tests.Chat
 {
     public class OpenRouterChatServiceTests
     {
+        // Root-cause regression guard: Ollama's OpenAI-compatibility shim (/v1/chat/completions)
+        // silently ignores "think": false -- verified live, a plain "hello"-class message produced
+        // 7,337 tokens of unrequested chain-of-thought before any real answer (442s wall clock)
+        // when sent through that shim, versus a complete equally-correct answer in 12-14s when sent
+        // to Ollama's native /api/chat with the same flag. The custom endpoint must always use
+        // BuildOllamaNativeChatRequest (POSTed to /api/chat), never BuildChatRequest's OpenAI shape.
+        [Fact]
+        public async Task BuildOllamaNativeChatRequest_DisablesThinking()
+        {
+            var service = new OpenRouterChatService();
+            service.SetCustomEndpoint("https://ai.axiominference.work/v1", "test-key", "granite3.2:8b");
+
+            using var request = service.BuildOllamaNativeChatRequest(
+                new List<OpenRouterMessage> { new("user", "hi") },
+                systemPrompt: "system",
+                modelId: OpenRouterChatService.CustomEndpointModelId,
+                temperature: 0.7,
+                topP: 0.9,
+                maxTokens: 512,
+                tools: null,
+                stream: true,
+                stopSequences: null);
+
+            Assert.EndsWith("/api/chat", request.RequestUri!.ToString());
+            string body = await request.Content!.ReadAsStringAsync();
+            using JsonDocument json = JsonDocument.Parse(body);
+            Assert.True(json.RootElement.TryGetProperty("think", out JsonElement think));
+            Assert.False(think.GetBoolean());
+        }
+
         // Root-cause regression guard: the entire custom-endpoint context-budgeting apparatus
         // (ContextBudget, per-block budgets, CustomEndpointContextWindowTokens) only ever shaped
         // the client-side prompt -- it never told Ollama's server how much context to actually
         // allocate, so Ollama silently truncated to its own internal default regardless of what
-        // was budgeted for. num_ctx must be sent as a top-level field on every custom-endpoint
-        // request, and must never be sent for OpenRouter cloud models (not part of their schema).
+        // was budgeted for. Ollama's native /api/chat takes num_ctx (and temperature/top_p/top_k)
+        // nested under "options", not as top-level fields like the OpenAI-compat shim accepts.
         [Fact]
-        public async Task BuildChatRequest_IncludesNumCtx_ForCustomEndpoint()
+        public async Task BuildOllamaNativeChatRequest_IncludesNumCtxInOptions()
         {
             var service = new OpenRouterChatService();
             service.SetCustomEndpoint(
                 "https://ai.axiominference.work/v1", "test-key", "granite3.2:8b", contextWindowTokens: 32768);
 
-            using var request = service.BuildChatRequest(
+            using var request = service.BuildOllamaNativeChatRequest(
                 new List<OpenRouterMessage> { new("user", "hi") },
                 systemPrompt: "system",
                 modelId: OpenRouterChatService.CustomEndpointModelId,
-                thinkingEnabled: false,
                 temperature: 0.7,
                 topP: 0.9,
                 maxTokens: 512,
                 tools: null,
-                isCustomEndpoint: true);
+                stream: true,
+                stopSequences: null);
 
             string body = await request.Content!.ReadAsStringAsync();
             using JsonDocument json = JsonDocument.Parse(body);
-            Assert.True(json.RootElement.TryGetProperty("num_ctx", out JsonElement numCtx));
+            Assert.True(json.RootElement.TryGetProperty("options", out JsonElement options));
+            Assert.True(options.TryGetProperty("num_ctx", out JsonElement numCtx));
             Assert.Equal(32768, numCtx.GetInt32());
+            Assert.True(options.TryGetProperty("top_k", out JsonElement topK));
+            Assert.Equal(OpenRouterChatService.CustomEndpointTopK, topK.GetInt32());
         }
 
-        // Regression guard: Ollama's own default (evict after 5 minutes idle) applies whenever a
-        // request omits keep_alive, so any real pause between chat turns risked a full model
-        // reload (disk read + VRAM reallocation) before the next reply could even start. Every
-        // custom-endpoint request must pin this explicitly instead of relying on the server's
-        // default; must never be sent for OpenRouter cloud models (not part of their schema).
+        // Regression guard: Ollama's own automatic GPU-layer-split heuristic was measured leaving
+        // free VRAM unused on real hardware (24-of-32 layers offloaded with ~1.1GB still free);
+        // forcing full GPU residency measured a real, reproducible ~50% generation-speed
+        // improvement. See CustomEndpointNumGpuLayers for the full rationale.
         [Fact]
-        public async Task BuildChatRequest_IncludesKeepAlive_ForCustomEndpoint()
+        public async Task BuildOllamaNativeChatRequest_ForcesFullGpuResidency()
         {
             var service = new OpenRouterChatService();
             service.SetCustomEndpoint("https://ai.axiominference.work/v1", "test-key", "granite3.2:8b");
 
-            using var request = service.BuildChatRequest(
+            using var request = service.BuildOllamaNativeChatRequest(
                 new List<OpenRouterMessage> { new("user", "hi") },
                 systemPrompt: "system",
                 modelId: OpenRouterChatService.CustomEndpointModelId,
-                thinkingEnabled: false,
                 temperature: 0.7,
                 topP: 0.9,
                 maxTokens: 512,
                 tools: null,
-                isCustomEndpoint: true);
+                stream: true,
+                stopSequences: null);
+
+            string body = await request.Content!.ReadAsStringAsync();
+            using JsonDocument json = JsonDocument.Parse(body);
+            Assert.True(json.RootElement.TryGetProperty("options", out JsonElement options));
+            Assert.True(options.TryGetProperty("num_gpu", out JsonElement numGpu));
+            Assert.Equal(OpenRouterChatService.CustomEndpointNumGpuLayers, numGpu.GetInt32());
+        }
+
+        // Regression guard: Ollama's own default (evict after 5 minutes idle) applies whenever a
+        // request omits keep_alive, so any real pause between chat turns risked a full model
+        // reload (disk read + VRAM reallocation) before the next reply could even start.
+        [Fact]
+        public async Task BuildOllamaNativeChatRequest_IncludesKeepAlive()
+        {
+            var service = new OpenRouterChatService();
+            service.SetCustomEndpoint("https://ai.axiominference.work/v1", "test-key", "granite3.2:8b");
+
+            using var request = service.BuildOllamaNativeChatRequest(
+                new List<OpenRouterMessage> { new("user", "hi") },
+                systemPrompt: "system",
+                modelId: OpenRouterChatService.CustomEndpointModelId,
+                temperature: 0.7,
+                topP: 0.9,
+                maxTokens: 512,
+                tools: null,
+                stream: true,
+                stopSequences: null);
 
             string body = await request.Content!.ReadAsStringAsync();
             using JsonDocument json = JsonDocument.Parse(body);
@@ -67,7 +126,7 @@ namespace Axiom.Core.Tests.Chat
         }
 
         [Fact]
-        public async Task BuildChatRequest_OmitsKeepAlive_ForCloudModels()
+        public async Task BuildChatRequest_OmitsKeepAliveAndThink_ForCloudModels()
         {
             var service = new OpenRouterChatService();
 
@@ -79,32 +138,12 @@ namespace Axiom.Core.Tests.Chat
                 temperature: 0.7,
                 topP: 0.9,
                 maxTokens: 512,
-                tools: null,
-                isCustomEndpoint: false);
+                tools: null);
 
             string body = await request.Content!.ReadAsStringAsync();
             using JsonDocument json = JsonDocument.Parse(body);
             Assert.False(json.RootElement.TryGetProperty("keep_alive", out _));
-        }
-
-        [Fact]
-        public async Task BuildChatRequest_OmitsNumCtx_ForCloudModels()
-        {
-            var service = new OpenRouterChatService();
-
-            using var request = service.BuildChatRequest(
-                new List<OpenRouterMessage> { new("user", "hi") },
-                systemPrompt: "system",
-                modelId: OpenRouterChatService.Eidos1ModelId,
-                thinkingEnabled: false,
-                temperature: 0.7,
-                topP: 0.9,
-                maxTokens: 512,
-                tools: null,
-                isCustomEndpoint: false);
-
-            string body = await request.Content!.ReadAsStringAsync();
-            using JsonDocument json = JsonDocument.Parse(body);
+            Assert.False(json.RootElement.TryGetProperty("think", out _));
             Assert.False(json.RootElement.TryGetProperty("num_ctx", out _));
         }
 

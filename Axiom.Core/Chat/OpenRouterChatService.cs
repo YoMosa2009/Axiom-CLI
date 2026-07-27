@@ -181,9 +181,6 @@ namespace Axiom.Core.Chat
         private const string KeyInfoUrl = "https://openrouter.ai/api/v1/key";
         private const string ModelsUrl = "https://openrouter.ai/api/v1/models";
         private const string ChatCompletionsUrl = "https://openrouter.ai/api/v1/chat/completions";
-        // The user configures the base including any path prefix their proxy needs
-        // (e.g. "https://ai.axiominference.work/v1"); this just appends the standard suffix.
-        private string CustomEndpointChatCompletionsUrl => _customEndpointBaseUrl.TrimEnd('/') + "/chat/completions";
         private static readonly Regex TokenWordRegex = new(@"[A-Za-z0-9_]+|[^\sA-Za-z0-9_]", RegexOptions.Compiled);
         private static readonly Regex RetryAfterSecondsRegex = new("\"retry_after_seconds\"\\s*:\\s*(?<value>\\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private const int TransientOpenRouterRetryLimit = 1;
@@ -277,14 +274,24 @@ namespace Axiom.Core.Chat
         public const string WorkplaceCouncilDefaultModelLabel = "Poolside: Laguna M.1 (free)";
         public const string CustomEndpointModelId = "custom-endpoint";
         public const string CustomEndpointModelLabel = "Kestral 1";
-        // Sent to the server as num_ctx on every request (see BuildChatRequest) -- this is now the
-        // authoritative context window, not just a client-side budgeting guess. Used before
-        // TryDetectCustomEndpointContextLengthAsync completes, and as its fallback if detection
-        // ever fails. Matches Kestral 1's real configured OLLAMA_CONTEXT_LENGTH (omnicoder-2-9b
-        // Q5_K_M @ 45056, replacing granite3.2:8b's 9216).
+        // Sent to the server as num_ctx on every request (see BuildOllamaNativeChatRequest) -- this
+        // is now the authoritative context window, not just a client-side budgeting guess. Used
+        // before TryDetectCustomEndpointContextLengthAsync completes, and as its fallback if
+        // detection ever fails. Matches Kestral 1's real configured OLLAMA_CONTEXT_LENGTH
+        // (omnicoder-2-9b Q5_K_M @ 45056, replacing granite3.2:8b's 9216).
         public const int CustomEndpointContextWindowTokens = 45056;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
+        // llama.cpp/Ollama convention: any value >= the model's real layer count offloads every
+        // layer to GPU (safe regardless of how many layers a given model actually has). Ollama's
+        // own automatic layer-split heuristic was measured leaving free VRAM on the table on
+        // Kestral 1's actual hardware (a 24-of-32-layer split with ~1.1GB VRAM still free) --
+        // forcing full GPU residency measured a real, reproducible ~50% generation-speed
+        // improvement (17.2 -> 25.9 tok/s) at zero cost to the model weights or context length,
+        // since it only changes *where* the existing layers run, not what they are. If a future
+        // model+context combination genuinely does not fit, Ollama returns an error for that
+        // request rather than silently corrupting anything.
+        public const int CustomEndpointNumGpuLayers = 999;
         // Ollama's own default keep_alive (5 minutes, applied whenever a request omits the field)
         // is short enough that any real pause between chat turns -- reading the reply, thinking
         // about the next message -- can evict the model, so the very next "hello" pays a full
@@ -888,6 +895,16 @@ namespace Axiom.Core.Chat
             double temperature = ResolveTemperature(requestedModelProfile, isCodingRequest, isPythonRequest);
             double topP = ResolveTopP(requestedModelProfile, isCodingRequest);
 
+            // Custom endpoint talks to Ollama's native /api/chat instead of the OpenAI-compatible
+            // shim -- see BuildOllamaNativeChatRequest for why. None of the OpenRouter-specific
+            // retry/fallback/degeneration machinery below applies to a self-hosted server.
+            if (requestedModelProfile.IsCustomEndpoint)
+            {
+                return await SendCustomEndpointChatAsync(
+                    messages, systemPrompt, effectiveModelId, temperature, topP, maxCompletionTokens,
+                    tools, cancellationToken, estimatedPromptTokens);
+            }
+
             HttpStatusCode finalStatusCode = HttpStatusCode.OK;
             string responseBody = string.Empty;
             for (int retryAttempt = 0; ; retryAttempt++)
@@ -900,8 +917,7 @@ namespace Axiom.Core.Chat
                     temperature,
                     topP,
                     maxCompletionTokens,
-                    tools,
-                    isCustomEndpoint: requestedModelProfile.IsCustomEndpoint);
+                    tools);
 
                 using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 finalStatusCode = response.StatusCode;
@@ -1056,6 +1072,16 @@ namespace Axiom.Core.Chat
             double temperature = ResolveTemperature(requestedModelProfile, isCodingRequest, isPythonRequest);
             double topP = ResolveTopP(requestedModelProfile, isCodingRequest);
 
+            // Custom endpoint talks to Ollama's native /api/chat instead of the OpenAI-compatible
+            // shim -- see BuildOllamaNativeChatRequest for why. None of the OpenRouter-specific
+            // retry/fallback/degeneration machinery below applies to a self-hosted server.
+            if (requestedModelProfile.IsCustomEndpoint)
+            {
+                return await SendCustomEndpointChatStreamAsync(
+                    messages, systemPrompt, effectiveModelId, temperature, topP, maxCompletionTokens,
+                    tools, onToken, cancellationToken, stopSequences, estimatedPromptTokens);
+            }
+
             HttpResponseMessage? response = null;
             for (int retryAttempt = 0; ; retryAttempt++)
             {
@@ -1070,8 +1096,7 @@ namespace Axiom.Core.Chat
                     maxCompletionTokens,
                     tools,
                     stream: true,
-                    stopSequences,
-                    isCustomEndpoint: requestedModelProfile.IsCustomEndpoint);
+                    stopSequences);
 
                 response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.OK)
@@ -1466,8 +1491,7 @@ namespace Axiom.Core.Chat
             int maxTokens,
             IReadOnlyList<OpenRouterToolDefinition>? tools,
             bool stream = false,
-            IReadOnlyList<string>? stopSequences = null,
-            bool isCustomEndpoint = false)
+            IReadOnlyList<string>? stopSequences = null)
         {
             JsonArray messagePayload = BuildMessages(messages, systemPrompt);
             JsonObject payload = new()
@@ -1478,34 +1502,11 @@ namespace Axiom.Core.Chat
                 ["stream"] = stream
             };
 
-            // The entire custom-endpoint context-budgeting apparatus (ContextBudget, per-block
-            // budgets, _customEndpointContextWindowTokens) previously only shaped the CLIENT-side
-            // prompt -- it never told the server how much context to actually allocate. Ollama
-            // defaults its OpenAI-compatible endpoint to a small internal context (historically
-            // 2048-4096 tokens) regardless of what the model supports, silently truncating
-            // everything the app carefully budgeted for unless num_ctx is set per-request. Ollama's
-            // OpenAI-compatible /v1/chat/completions accepts num_ctx as a top-level field (this is
-            // Ollama-specific, not part of the OpenAI schema, but Ollama documents it explicitly and
-            // other OpenAI-compatible servers generically ignore unrecognized top-level fields).
-            if (isCustomEndpoint && _customEndpointContextWindowTokens > 0)
-                payload["num_ctx"] = _customEndpointContextWindowTokens;
-
             if (SupportsParameter(modelId, "temperature"))
                 payload["temperature"] = temperature;
 
             if (SupportsParameter(modelId, "top_p"))
                 payload["top_p"] = topP;
-
-            // top_k is an Ollama/llama.cpp sampling extension, not part of the true OpenAI schema
-            // (mirrors num_ctx above) -- Tesslate's OmniCoder-9B model card recommends top_k: 20
-            // for both general and agentic/tool-calling use, and Axiom-CLI never sent it at all
-            // before this, leaving Ollama's own default in effect.
-            if (isCustomEndpoint)
-                payload["top_k"] = CustomEndpointTopK;
-
-            // Ollama-native field (mirrors num_ctx/top_k above) -- see CustomEndpointKeepAlive.
-            if (isCustomEndpoint)
-                payload["keep_alive"] = CustomEndpointKeepAlive;
 
             JsonArray stopPayload = BuildStopPayload(stopSequences);
             if (stopPayload.Count > 0)
@@ -1536,15 +1537,280 @@ namespace Axiom.Core.Chat
                     payload["tool_choice"] = "auto";
             }
 
-            var request = new HttpRequestMessage(HttpMethod.Post, isCustomEndpoint ? CustomEndpointChatCompletionsUrl : ChatCompletionsUrl)
+            var request = new HttpRequestMessage(HttpMethod.Post, ChatCompletionsUrl)
             {
                 Content = new StringContent(payload.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web)), Encoding.UTF8, "application/json")
             };
-            if (isCustomEndpoint)
-                ApplyCustomEndpointHeaders(request);
-            else
-                ApplyHeaders(request);
+            ApplyHeaders(request);
             return request;
+        }
+
+        // Kestral 1 (OmniCoder-9B, a Qwen3.5-family hybrid attention/SSM model) is a reasoning-by-
+        // default model exactly like the "Nemotron and friends" case already handled above for
+        // cloud models -- except Ollama has no OpenAI-schema "reasoning" field to opt out with.
+        // Its own native /api/chat exposes a top-level "think" flag instead, and critically that
+        // flag is NOT forwarded by Ollama's OpenAI-compatibility shim (/v1/chat/completions):
+        // verified live that "think": false sent to /v1/chat/completions is silently ignored, while
+        // the same flag sent to /api/chat suppresses the reasoning pass entirely. Without it, a
+        // plain "hello"-class message measured 7,337 generated tokens of unrequested "Thinking
+        // Process: 1. Analyze the Request..." chain-of-thought before any real answer (442s wall
+        // clock at a perfectly normal 16.6 tok/s); with it, the same prompt produced a complete,
+        // equally correct answer in 12-14s. So the custom-endpoint path talks to /api/chat directly
+        // instead of the OpenAI-compatible endpoint the cloud models use. Verified this preserves
+        // tool-calling: /api/chat returns tool_calls in the same shape (function.name/arguments),
+        // just with `arguments` as a JSON object rather than a JSON-encoded string -- ParseOllamaNativeToolCalls
+        // below re-serializes it back to a string so the rest of the codebase (which expects
+        // ArgumentsJson as a string) needs no other changes.
+        //
+        // Public for direct regression testing of wire-payload shape, matching BuildChatRequest's
+        // existing pattern above.
+        public HttpRequestMessage BuildOllamaNativeChatRequest(
+            List<OpenRouterMessage> messages,
+            string systemPrompt,
+            string modelId,
+            double temperature,
+            double topP,
+            int maxTokens,
+            IReadOnlyList<OpenRouterToolDefinition>? tools,
+            bool stream,
+            IReadOnlyList<string>? stopSequences)
+        {
+            JsonArray messagePayload = BuildMessages(messages, systemPrompt);
+            var options = new JsonObject
+            {
+                ["num_ctx"] = _customEndpointContextWindowTokens,
+                ["temperature"] = temperature,
+                ["top_p"] = topP,
+                ["top_k"] = CustomEndpointTopK,
+                ["num_predict"] = maxTokens,
+                ["num_gpu"] = CustomEndpointNumGpuLayers
+            };
+            JsonArray stopPayload = BuildStopPayload(stopSequences);
+            if (stopPayload.Count > 0)
+                options["stop"] = stopPayload;
+
+            JsonObject payload = new()
+            {
+                ["model"] = modelId,
+                ["messages"] = messagePayload,
+                ["stream"] = stream,
+                ["think"] = false,
+                ["options"] = options,
+                ["keep_alive"] = CustomEndpointKeepAlive
+            };
+            if (tools != null && tools.Count > 0)
+                payload["tools"] = BuildTools(tools);
+
+            string url = BuildNativeOllamaUrl(_customEndpointBaseUrl, "/api/chat");
+            var request = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(payload.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web)), Encoding.UTF8, "application/json")
+            };
+            ApplyCustomEndpointHeaders(request);
+            return request;
+        }
+
+        private static IReadOnlyList<OpenRouterToolCall> ParseOllamaNativeToolCalls(JsonElement toolCallsElement)
+        {
+            var calls = new List<OpenRouterToolCall>();
+            int index = 0;
+            foreach (JsonElement callElement in toolCallsElement.EnumerateArray())
+            {
+                if (!callElement.TryGetProperty("function", out JsonElement functionElement))
+                {
+                    index++;
+                    continue;
+                }
+
+                string id = callElement.TryGetProperty("id", out JsonElement idElement)
+                    && idElement.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(idElement.GetString())
+                    ? idElement.GetString()!
+                    : $"call_{index}";
+                string name = functionElement.TryGetProperty("name", out JsonElement nameElement)
+                    ? nameElement.GetString() ?? string.Empty
+                    : string.Empty;
+                // `arguments` comes back as a JSON object here (not a JSON-encoded string like the
+                // OpenAI shape) -- GetRawText() reproduces it as the string ArgumentsJson expects.
+                string argsJson = functionElement.TryGetProperty("arguments", out JsonElement argsElement)
+                    ? argsElement.GetRawText()
+                    : "{}";
+                calls.Add(new OpenRouterToolCall(id, name, argsJson));
+                index++;
+            }
+
+            return calls;
+        }
+
+        private async Task<OpenRouterChatResponse> SendCustomEndpointChatAsync(
+            List<OpenRouterMessage> messages,
+            string systemPrompt,
+            string modelId,
+            double temperature,
+            double topP,
+            int maxTokens,
+            IReadOnlyList<OpenRouterToolDefinition>? tools,
+            CancellationToken cancellationToken,
+            int estimatedPromptTokens)
+        {
+            string responseBody = string.Empty;
+            HttpStatusCode statusCode = HttpStatusCode.OK;
+            for (int retryAttempt = 0; ; retryAttempt++)
+            {
+                using var request = BuildOllamaNativeChatRequest(
+                    messages, systemPrompt, modelId, temperature, topP, maxTokens, tools, stream: false, stopSequences: null);
+                using HttpResponseMessage response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                statusCode = response.StatusCode;
+                responseBody = await ReadBodyWithTimeoutAsync(response, cancellationToken);
+
+                if (statusCode == HttpStatusCode.OK)
+                    break;
+                if (IsServerTransientStatus(statusCode) && retryAttempt < TransientOpenRouterRetryLimit)
+                {
+                    await Task.Delay(GetRetryDelay(response, responseBody, retryAttempt), cancellationToken);
+                    continue;
+                }
+
+                throw new InvalidOperationException(
+                    $"Custom endpoint request failed with status {(int)statusCode} ({statusCode}): {Truncate(responseBody, 280)}");
+            }
+
+            using JsonDocument document = JsonDocument.Parse(responseBody);
+            JsonElement root = document.RootElement;
+            if (!root.TryGetProperty("message", out JsonElement messageElement))
+                return new OpenRouterChatResponse(string.Empty, string.Empty, Array.Empty<OpenRouterToolCall>());
+
+            string content = ExtractMessageContent(messageElement);
+            IReadOnlyList<OpenRouterToolCall> toolCalls = messageElement.TryGetProperty("tool_calls", out JsonElement toolCallsElement)
+                && toolCallsElement.ValueKind == JsonValueKind.Array
+                ? ParseOllamaNativeToolCalls(toolCallsElement)
+                : Array.Empty<OpenRouterToolCall>();
+
+            int promptTokens = root.TryGetProperty("prompt_eval_count", out JsonElement peEl) && peEl.TryGetInt32(out int pe) ? pe : 0;
+            int completionTokens = root.TryGetProperty("eval_count", out JsonElement ecEl) && ecEl.TryGetInt32(out int ec) ? ec : 0;
+            OpenRouterTokenUsage? usage = promptTokens > 0 || completionTokens > 0
+                ? new OpenRouterTokenUsage(promptTokens, completionTokens, promptTokens + completionTokens)
+                : null;
+
+            RecordTokenUsage(usage, estimatedPromptTokens);
+            SetDetectedModel(CustomEndpointModelId, CustomEndpointModelLabel);
+            (string finalContent, IReadOnlyList<OpenRouterToolCall> finalCalls) = ApplyFallbackTextToolCalls(content, toolCalls, tools);
+            return new OpenRouterChatResponse(finalContent, string.Empty, finalCalls, usage);
+        }
+
+        private async Task<OpenRouterChatResponse> SendCustomEndpointChatStreamAsync(
+            List<OpenRouterMessage> messages,
+            string systemPrompt,
+            string modelId,
+            double temperature,
+            double topP,
+            int maxTokens,
+            IReadOnlyList<OpenRouterToolDefinition>? tools,
+            Action<string>? onToken,
+            CancellationToken cancellationToken,
+            IReadOnlyList<string>? stopSequences,
+            int estimatedPromptTokens)
+        {
+            HttpResponseMessage? response = null;
+            for (int retryAttempt = 0; ; retryAttempt++)
+            {
+                response?.Dispose();
+                using var request = BuildOllamaNativeChatRequest(
+                    messages, systemPrompt, modelId, temperature, topP, maxTokens, tools, stream: true, stopSequences);
+                response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (response.StatusCode == HttpStatusCode.OK)
+                    break;
+
+                string retryBody = await ReadBodyWithTimeoutAsync(response, cancellationToken);
+                if (IsServerTransientStatus(response.StatusCode) && retryAttempt < TransientOpenRouterRetryLimit)
+                {
+                    await Task.Delay(GetRetryDelay(response, retryBody, retryAttempt), cancellationToken);
+                    continue;
+                }
+
+                throw new InvalidOperationException(
+                    $"Custom endpoint request failed with status {(int)response.StatusCode} ({response.StatusCode}): {Truncate(retryBody, 280)}");
+            }
+
+            var textBuilder = new StringBuilder();
+            IReadOnlyList<OpenRouterToolCall> toolCalls = Array.Empty<OpenRouterToolCall>();
+            OpenRouterTokenUsage? usage = null;
+
+            using (response)
+            {
+                await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var reader = new StreamReader(responseStream);
+                using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                DateTime streamStartUtc = DateTime.UtcNow;
+                bool firstLineReceived = false;
+
+                while (true)
+                {
+                    if (DateTime.UtcNow - streamStartUtc > StreamTotalDurationLimit)
+                        throw new InvalidOperationException("Custom endpoint stopped responding (exceeded max stream duration). Try again shortly.");
+
+                    string? line;
+                    try
+                    {
+                        idleCts.CancelAfter(firstLineReceived ? StreamLineIdleTimeout : StreamFirstLineIdleTimeout);
+                        line = await reader.ReadLineAsync(idleCts.Token);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        throw new InvalidOperationException("Custom endpoint stopped responding mid-stream. Try again shortly.");
+                    }
+
+                    if (line == null)
+                        break;
+                    firstLineReceived = true;
+                    if (string.IsNullOrWhiteSpace(line))
+                        continue;
+
+                    // Ollama's native /api/chat streams NDJSON -- one complete JSON object per line,
+                    // no "data: " SSE prefix and no "[DONE]" sentinel; the final line carries "done":
+                    // true plus the usage counters.
+                    using JsonDocument chunkDocument = JsonDocument.Parse(line);
+                    JsonElement root = chunkDocument.RootElement;
+
+                    if (root.TryGetProperty("message", out JsonElement messageElement))
+                    {
+                        if (messageElement.TryGetProperty("content", out JsonElement contentElement)
+                            && contentElement.ValueKind == JsonValueKind.String)
+                        {
+                            string delta = contentElement.GetString() ?? string.Empty;
+                            if (delta.Length > 0)
+                            {
+                                textBuilder.Append(delta);
+                                onToken?.Invoke(delta);
+                            }
+                        }
+
+                        // Tool calls arrive whole on a single line rather than accumulated in
+                        // pieces across the stream (verified live), so no delta-accumulator is
+                        // needed here unlike the OpenRouter SSE path below.
+                        if (messageElement.TryGetProperty("tool_calls", out JsonElement toolCallsElement)
+                            && toolCallsElement.ValueKind == JsonValueKind.Array
+                            && toolCallsElement.GetArrayLength() > 0)
+                        {
+                            toolCalls = ParseOllamaNativeToolCalls(toolCallsElement);
+                        }
+                    }
+
+                    if (root.TryGetProperty("done", out JsonElement doneElement) && doneElement.ValueKind == JsonValueKind.True)
+                    {
+                        int promptTokens = root.TryGetProperty("prompt_eval_count", out JsonElement peEl) && peEl.TryGetInt32(out int pe) ? pe : 0;
+                        int completionTokens = root.TryGetProperty("eval_count", out JsonElement ecEl) && ecEl.TryGetInt32(out int ec) ? ec : 0;
+                        if (promptTokens > 0 || completionTokens > 0)
+                            usage = new OpenRouterTokenUsage(promptTokens, completionTokens, promptTokens + completionTokens);
+                        break;
+                    }
+                }
+            }
+
+            RecordTokenUsage(usage, estimatedPromptTokens);
+            SetDetectedModel(CustomEndpointModelId, CustomEndpointModelLabel);
+            (string finalContent, IReadOnlyList<OpenRouterToolCall> finalCalls) = ApplyFallbackTextToolCalls(textBuilder.ToString(), toolCalls, tools);
+            return new OpenRouterChatResponse(finalContent, string.Empty, finalCalls, usage);
         }
 
         private static JsonArray BuildStopPayload(IReadOnlyList<string>? stopSequences)
