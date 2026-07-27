@@ -129,7 +129,7 @@ namespace Axiom.Core.Agent
                     string reason = string.IsNullOrWhiteSpace(response.StreamInterruptionReason)
                         ? "The self-hosted model connection ended before it sent its completion record."
                         : response.StreamInterruptionReason;
-                    finalText = BuildInterruptedStreamResponse(finalText);
+                    finalText = BuildInterruptedStreamResponse(finalText, reason);
                     toolLog.Add("Kestral stream interrupted: " + reason);
                     onStatus?.Invoke("Kestral stream interrupted — partial response preserved");
                     return new ToolCallingResult(
@@ -252,7 +252,7 @@ namespace Axiom.Core.Agent
                             string reason = string.IsNullOrWhiteSpace(finalResponse.StreamInterruptionReason)
                                 ? "The self-hosted model connection ended before it sent its completion record."
                                 : finalResponse.StreamInterruptionReason;
-                            finalText = BuildInterruptedStreamResponse(finalText);
+                            finalText = BuildInterruptedStreamResponse(finalText, reason);
                             toolLog.Add("Kestral stream interrupted: " + reason);
                             onStatus?.Invoke("Kestral stream interrupted — partial response preserved");
                             return new ToolCallingResult(
@@ -483,11 +483,16 @@ namespace Axiom.Core.Agent
 
         // Public for direct regression testing. A dropped native-Ollama response must not discard
         // text that already reached the user, nor should it be treated as permission to run an
-        // incomplete tool call.
-        public static string BuildInterruptedStreamResponse(string? partialText)
-            => string.IsNullOrWhiteSpace(partialText)
-                ? "[Kestral connection interrupted before it produced a response.]"
-                : partialText.TrimEnd() + "\n\n[Kestral connection interrupted — partial response preserved; no further tools were run.]";
+        // incomplete tool call. Includes the specific interruption reason (idle timeout vs. an
+        // early connection drop vs. a malformed record) rather than a single generic message, so
+        // a real occurrence is diagnosable from what the user sees without needing server logs.
+        public static string BuildInterruptedStreamResponse(string? partialText, string? reason = null)
+        {
+            string suffix = string.IsNullOrWhiteSpace(reason) ? string.Empty : $" ({reason})";
+            return string.IsNullOrWhiteSpace(partialText)
+                ? $"[Kestral connection interrupted before it produced a response{suffix}.]"
+                : partialText.TrimEnd() + $"\n\n[Kestral connection interrupted{suffix} — partial response preserved; no further tools were run.]";
+        }
 
         // Matches the base-model "I'm just a text-based AI" refusal persona bleeding through
         // despite real tool definitions being on the wire this turn -- confirmed live against
