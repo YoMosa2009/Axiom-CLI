@@ -285,6 +285,14 @@ namespace Axiom.Core.Chat
         public const int CustomEndpointContextWindowTokens = 45056;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
+        // Ollama's own default keep_alive (5 minutes, applied whenever a request omits the field)
+        // is short enough that any real pause between chat turns -- reading the reply, thinking
+        // about the next message -- can evict the model, so the very next "hello" pays a full
+        // reload (reading the weights back off disk and re-allocating VRAM) before it can even
+        // start answering. Sending an explicit keep_alive on every request makes that deterministic
+        // instead of accidental. 30 minutes comfortably covers a normal working pause without
+        // pinning VRAM indefinitely on a card with little to spare once other GPU work wants it back.
+        public const string CustomEndpointKeepAlive = "30m";
         public const string DefaultModelId = Eidos1ModelId;
         public const string DefaultModelLabel = Eidos1ModelLabel;
         public static string WorkplaceCouncilDisplayLabel => SupportedModelProfiles
@@ -1494,6 +1502,10 @@ namespace Axiom.Core.Chat
             // before this, leaving Ollama's own default in effect.
             if (isCustomEndpoint)
                 payload["top_k"] = CustomEndpointTopK;
+
+            // Ollama-native field (mirrors num_ctx/top_k above) -- see CustomEndpointKeepAlive.
+            if (isCustomEndpoint)
+                payload["keep_alive"] = CustomEndpointKeepAlive;
 
             JsonArray stopPayload = BuildStopPayload(stopSequences);
             if (stopPayload.Count > 0)

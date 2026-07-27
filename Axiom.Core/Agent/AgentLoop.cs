@@ -73,7 +73,7 @@ namespace Axiom.Core.Agent
             // for every model: the filter is a no-op unless isCustomEndpoint is true.
             var toolsForPrompt = _tools.GetToolDefinitions(AgentToolExecutor.ToolScope.Full, userMessage, isCustomEndpoint);
             bool planBoardAvailable = toolsForPrompt.Any(tool => tool.Name == "plan_board");
-            string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt(_tools.ApprovalMode, specialty, toolsForPrompt, isCustomEndpoint));
+            string system = FoundationSystemPrompt.Apply(BuildAgentSystemPrompt(_tools.ApprovalMode, isCustomEndpoint));
 
             string workspaceBlock = _workspace.BuildContextBlock(isCustomEndpoint ? 40 : 120);
             string memory = ProjectMemory.BuildContextBlock(_workspace.PrimaryRoot);
@@ -553,11 +553,18 @@ namespace Axiom.Core.Agent
             }
         }
 
-        private static string BuildAgentSystemPrompt(
-            ApprovalMode mode,
-            TaskSpecialty specialty,
-            IReadOnlyList<OpenRouterToolDefinition>? availableTools = null,
-            bool isCustomEndpoint = false)
+        // Deliberately depends ONLY on `mode` and `isCustomEndpoint` -- both fixed for the life of
+        // a session (mode only changes on an explicit /mode command). Earlier this also took the
+        // per-message-gated tool list and the per-message-detected task specialty, so the
+        // rendered text (which tool names it enumerated, whether the dual-pass line was present)
+        // changed on every single turn. The system prompt is always message zero, so any turn-to-
+        // turn difference there breaks the inference server's prefix/KV-cache reuse and forces a
+        // full reprocess of the *entire* accumulated conversation from token zero on every turn --
+        // on a local model that cost scales with conversation length and is the dominant reason a
+        // multi-turn session keeps feeling slow well past the first message. The specific tool
+        // menu is still gated per message (see ToolGatingHeuristics) and still travels via the
+        // request's own `tools` field -- this text just stops redundantly re-describing it.
+        private static string BuildAgentSystemPrompt(ApprovalMode mode, bool isCustomEndpoint = false)
         {
             string approval = mode switch
             {
@@ -570,42 +577,23 @@ namespace Axiom.Core.Agent
                     "Approval mode is AUTO inside the attached workspace sandbox.\n"
             };
 
-            string dual = specialty is TaskSpecialty.Review or TaskSpecialty.Docs or TaskSpecialty.General
-                ? IntelligenceHelpers.DualPassInstruction + "\n"
-                : "";
-            var toolNames = availableTools is { Count: > 0 }
-                ? availableTools.Select(tool => tool.Name).ToHashSet(StringComparer.OrdinalIgnoreCase)
-                : null;
-            bool hasPatchTool = toolNames == null || toolNames.Contains("apply_patch");
-            bool hasPlanBoard = toolNames == null || toolNames.Contains("plan_board");
-            string editGuidance = hasPatchTool
-                ? "Prefer str_replace/apply_patch over full-file write_file when editing existing files.\n"
-                : "Prefer str_replace over full-file write_file when editing existing files.\n";
-            string planGuidance = hasPlanBoard
-                ? "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n"
-                : "";
-
             return
                 "You are Axiom, a terminal coding agent with tools for shell, files, git, search, diagnostics, and downloads.\n" +
                 approval +
-                dual +
+                IntelligenceHelpers.DualPassInstruction + "\n" +
                 IntelligenceHelpers.UncertaintyInstruction + "\n" +
                 "When a message includes [[ATTACHED WORKSPACES — YOU HAVE ACCESS]], [[REPO MAP]], or [[PROJECT MEMORY]], " +
                 "the user's local project is connected — use tools; never claim you lack access.\n" +
                 "Use [[REPO MAP]] and [[REPO RETRIEVAL]] before blind searches when helpful.\n" +
                 "Follow [[PROJECT MEMORY]] conventions when present (AXIOM.md / AGENTS.md).\n" +
                 "Treat [[TASK CONTRACT]] R/C/L/A items as pass/fail requirements; preserve L literals verbatim.\n" +
-                "Tools available this turn: " +
-                (availableTools is { Count: > 0 }
-                    ? string.Join(", ", availableTools.Select(t => t.Name))
-                    : "write_file, str_replace (preferred for small edits), apply_patch, write_files, " +
-                      "read_file (offset/limit), list_dir, search_files, find_symbol, run_shell, " +
-                      "git_*, diagnostics, run_tests, package_install, docker_run, fetch_url, read_csv, read_notebook, " +
-                      "worktree_*, spawn_subagent, plan_board, run_background, open_pr, web_search") + ".\n" +
-                editGuidance +
+                "Only the tools actually offered to you this turn are callable — the exact set varies by " +
+                "message; if one you'd expect (e.g. apply_patch, plan_board) isn't offered right now, use the " +
+                "closest available alternative instead of asking for it.\n" +
+                "Prefer str_replace/apply_patch over full-file write_file when editing existing files.\n" +
                 "For implementation tasks: inspect relevant files, implement the complete deliverable, reread every changed file, and run type-appropriate verification before claiming done. A scaffold is never a final result.\n" +
                 "For human-facing interfaces, verify requested content, visual hierarchy, typography, spacing, alignment, asset integrity, responsive behavior, and interactions against the actual files.\n" +
-                planGuidance +
+                "When a [[PLAN BOARD]] is present, check off steps with plan_board as you finish them.\n" +
                 "When [[REGRESSION GUARD]] lists failed tests, re-run them before claiming done.\n" +
                 (isCustomEndpoint
                     ? "[EVIDENCE DISCIPLINE] Never state file contents, line/row counts, test or command " +

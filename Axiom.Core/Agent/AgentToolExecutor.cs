@@ -447,8 +447,14 @@ namespace Axiom.Core.Agent
                     if (ApprovalMode == ApprovalMode.Plan && IsMutatingTool(name))
                         return $"Plan-only: would run {name} — {summary}";
 
+                    // Auto mode is documented and shown to the user as "write/shell freely in
+                    // sandbox" (see /mode help) with no carve-out -- a big write_file used to force
+                    // an approval prompt anyway despite that, and combined with a separate bug
+                    // where that prompt's y/n keys could go unanswered forever (see ChatTui's
+                    // TryHandlePendingModalKey), a large file write in Auto mode could hang the CLI
+                    // outright. Ask/Plan modes are unaffected -- this only removes the Auto-only
+                    // exception so Auto actually means auto.
                     bool forceAsk = ApprovalMode == ApprovalMode.Ask
-                        || (ApprovalMode == ApprovalMode.Auto && name == "write_file" && IsBigWrite(root))
                         || (ApprovalMode == ApprovalMode.Auto && name is "package_install" or "docker_run")
                         || (_network.RequireApproval && _network.IsNetworkTool(name) && ApprovalMode != ApprovalMode.Plan);
 
@@ -544,16 +550,6 @@ namespace Axiom.Core.Agent
             "read_file" or "list_dir" or "search_files" or "find_symbol"
             or "git_status" or "git_diff" or "git_log" or "git_branch"
             or "read_csv" or "read_notebook" or "web_search" or "fetch_url" or "calculator";
-
-        private bool IsBigWrite(JsonElement root)
-        {
-            string content = GetString(root, "content");
-            int lines = content.Split('\n').Length;
-            if (lines >= _workflow.BigDiffLineThreshold)
-                return true;
-            // Also treat as big if this turn already touched many files
-            return _workflow.Changes.Files.Count + 1 >= _workflow.BigDiffFileThreshold;
-        }
 
         private string PlanBoardAction(JsonElement root)
         {

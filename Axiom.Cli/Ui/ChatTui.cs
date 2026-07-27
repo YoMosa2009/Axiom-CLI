@@ -385,64 +385,8 @@ internal sealed class ChatTui : IDisposable
 
                 ConsoleKeyInfo key = Console.ReadKey(intercept: true);
 
-                // Approve/deny modal takes Esc/y/n while waiting.
-                if (_approvalTcs != null)
-                {
-                    if (key.Key is ConsoleKey.Y || key.KeyChar is 'y' or 'Y')
-                    {
-                        _approvalTcs.TrySetResult(true);
-                        _approvalTcs = null;
-                        _approvalPrompt = string.Empty;
-                        Paint(force: true);
-                        continue;
-                    }
-                    if (key.Key is ConsoleKey.N or ConsoleKey.Escape || key.KeyChar is 'n' or 'N')
-                    {
-                        _approvalTcs.TrySetResult(false);
-                        _approvalTcs = null;
-                        _approvalPrompt = string.Empty;
-                        Paint(force: true);
-                        continue;
-                    }
-                }
-
-                // Critic user-in-loop: type all | none | 1,3 then Enter
-                if (_criticPickTcs != null)
-                {
-                    if (key.Key == ConsoleKey.Enter)
-                    {
-                        _criticPickTcs.TrySetResult(_criticPickBuffer.Trim());
-                        _criticPickTcs = null;
-                        _criticPickBuffer = string.Empty;
-                        _criticPickPrompt = string.Empty;
-                        Paint(force: true);
-                        continue;
-                    }
-                    if (key.Key == ConsoleKey.Escape)
-                    {
-                        _criticPickTcs.TrySetResult("all");
-                        _criticPickTcs = null;
-                        _criticPickBuffer = string.Empty;
-                        _criticPickPrompt = string.Empty;
-                        Paint(force: true);
-                        continue;
-                    }
-                    if (key.Key == ConsoleKey.Backspace && _criticPickBuffer.Length > 0)
-                    {
-                        _criticPickBuffer = _criticPickBuffer[..^1];
-                        SetActivity(_criticPickPrompt + _criticPickBuffer);
-                        Paint(force: true);
-                        continue;
-                    }
-                    if (!char.IsControl(key.KeyChar))
-                    {
-                        _criticPickBuffer += key.KeyChar;
-                        SetActivity(_criticPickPrompt + _criticPickBuffer);
-                        Paint(force: true);
-                        continue;
-                    }
+                if (TryHandlePendingModalKey(key))
                     continue;
-                }
 
                 // Esc stops the in-flight turn (Claude Code / Codex style).
                 if (_busy && key.Key == ConsoleKey.Escape)
@@ -1096,6 +1040,79 @@ internal sealed class ChatTui : IDisposable
             _approvalPrompt = string.Empty;
             _approvalTcs = null;
         }
+    }
+
+    // Shared by the main input loop and PumpScrollWhileAsync's inner key loop. Both loops read
+    // Console.ReadKey directly and only one of them is ever active at a time -- while an
+    // agent/council turn is in flight, PumpScrollWhileAsync owns the console's key stream instead
+    // of the main loop above. A tool-approval or Critic user-in-loop prompt is always raised from
+    // *inside* such a turn, so its y/n/Enter keys arrived at PumpScrollWhileAsync's loop, which
+    // only understood scroll/mouse-wheel keys -- it silently consumed and discarded them via its
+    // own Console.ReadKey(intercept: true) call before they could ever reach the branch below.
+    // The prompt then sat on screen forever no matter what was typed. Returns true if the key was
+    // consumed by an active modal and the caller should not do anything else with it.
+    private bool TryHandlePendingModalKey(ConsoleKeyInfo key)
+    {
+        // Approve/deny modal takes Esc/y/n while waiting.
+        if (_approvalTcs != null)
+        {
+            if (key.Key is ConsoleKey.Y || key.KeyChar is 'y' or 'Y')
+            {
+                _approvalTcs.TrySetResult(true);
+                _approvalTcs = null;
+                _approvalPrompt = string.Empty;
+                Paint(force: true);
+                return true;
+            }
+            if (key.Key is ConsoleKey.N or ConsoleKey.Escape || key.KeyChar is 'n' or 'N')
+            {
+                _approvalTcs.TrySetResult(false);
+                _approvalTcs = null;
+                _approvalPrompt = string.Empty;
+                Paint(force: true);
+                return true;
+            }
+        }
+
+        // Critic user-in-loop: type all | none | 1,3 then Enter
+        if (_criticPickTcs != null)
+        {
+            if (key.Key == ConsoleKey.Enter)
+            {
+                _criticPickTcs.TrySetResult(_criticPickBuffer.Trim());
+                _criticPickTcs = null;
+                _criticPickBuffer = string.Empty;
+                _criticPickPrompt = string.Empty;
+                Paint(force: true);
+                return true;
+            }
+            if (key.Key == ConsoleKey.Escape)
+            {
+                _criticPickTcs.TrySetResult("all");
+                _criticPickTcs = null;
+                _criticPickBuffer = string.Empty;
+                _criticPickPrompt = string.Empty;
+                Paint(force: true);
+                return true;
+            }
+            if (key.Key == ConsoleKey.Backspace && _criticPickBuffer.Length > 0)
+            {
+                _criticPickBuffer = _criticPickBuffer[..^1];
+                SetActivity(_criticPickPrompt + _criticPickBuffer);
+                Paint(force: true);
+                return true;
+            }
+            if (!char.IsControl(key.KeyChar))
+            {
+                _criticPickBuffer += key.KeyChar;
+                SetActivity(_criticPickPrompt + _criticPickBuffer);
+                Paint(force: true);
+                return true;
+            }
+            return true; // modal is active -- swallow anything else too
+        }
+
+        return false;
     }
 
     private void TryAutoResumeLastSession()
@@ -1755,6 +1772,11 @@ internal sealed class ChatTui : IDisposable
             while (Console.KeyAvailable)
             {
                 ConsoleKeyInfo k = Console.ReadKey(intercept: true);
+                if (TryHandlePendingModalKey(k))
+                {
+                    Paint();
+                    continue;
+                }
                 MenuMode mode = GetMenuMode(_input, _cursor);
                 if (TryConsumeMouseWheel(k, out int wheelDelta))
                     ScrollBy(wheelDelta);

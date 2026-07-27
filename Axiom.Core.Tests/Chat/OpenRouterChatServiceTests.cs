@@ -38,6 +38,55 @@ namespace Axiom.Core.Tests.Chat
             Assert.Equal(32768, numCtx.GetInt32());
         }
 
+        // Regression guard: Ollama's own default (evict after 5 minutes idle) applies whenever a
+        // request omits keep_alive, so any real pause between chat turns risked a full model
+        // reload (disk read + VRAM reallocation) before the next reply could even start. Every
+        // custom-endpoint request must pin this explicitly instead of relying on the server's
+        // default; must never be sent for OpenRouter cloud models (not part of their schema).
+        [Fact]
+        public async Task BuildChatRequest_IncludesKeepAlive_ForCustomEndpoint()
+        {
+            var service = new OpenRouterChatService();
+            service.SetCustomEndpoint("https://ai.axiominference.work/v1", "test-key", "granite3.2:8b");
+
+            using var request = service.BuildChatRequest(
+                new List<OpenRouterMessage> { new("user", "hi") },
+                systemPrompt: "system",
+                modelId: OpenRouterChatService.CustomEndpointModelId,
+                thinkingEnabled: false,
+                temperature: 0.7,
+                topP: 0.9,
+                maxTokens: 512,
+                tools: null,
+                isCustomEndpoint: true);
+
+            string body = await request.Content!.ReadAsStringAsync();
+            using JsonDocument json = JsonDocument.Parse(body);
+            Assert.True(json.RootElement.TryGetProperty("keep_alive", out JsonElement keepAlive));
+            Assert.Equal(OpenRouterChatService.CustomEndpointKeepAlive, keepAlive.GetString());
+        }
+
+        [Fact]
+        public async Task BuildChatRequest_OmitsKeepAlive_ForCloudModels()
+        {
+            var service = new OpenRouterChatService();
+
+            using var request = service.BuildChatRequest(
+                new List<OpenRouterMessage> { new("user", "hi") },
+                systemPrompt: "system",
+                modelId: OpenRouterChatService.Eidos1ModelId,
+                thinkingEnabled: false,
+                temperature: 0.7,
+                topP: 0.9,
+                maxTokens: 512,
+                tools: null,
+                isCustomEndpoint: false);
+
+            string body = await request.Content!.ReadAsStringAsync();
+            using JsonDocument json = JsonDocument.Parse(body);
+            Assert.False(json.RootElement.TryGetProperty("keep_alive", out _));
+        }
+
         [Fact]
         public async Task BuildChatRequest_OmitsNumCtx_ForCloudModels()
         {

@@ -20,10 +20,6 @@ namespace Axiom.Core.Agent
         public string? StickyTask { get; set; }
         public int StickyTurnsRemaining { get; set; }
 
-        /// <summary>When true (or auto with large write), require approval for big mutations.</summary>
-        public int BigDiffLineThreshold { get; set; } = 120;
-        public int BigDiffFileThreshold { get; set; } = 5;
-
         /// <summary>Failed test filters/names observed this session (regression guard).</summary>
         private readonly List<string> _failedTests = new();
         private readonly object _failGate = new();
