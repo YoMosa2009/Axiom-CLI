@@ -289,15 +289,16 @@ namespace Axiom.Core.Chat
         // that can go stale.
         //
         // Chosen empirically against Kestral 1's real hardware (GTX 1080, 8GB VRAM) with full GPU
-        // residency (CustomEndpointNumGpuLayers) already forced: 45056/65536/98304 all measured
-        // identical generation speed (~25.8-28.8 tok/s) and 100% GPU-resident. 131072 was the one
-        // that broke down -- ~98MB free with a measured 5x prefill slowdown (30.7 vs ~120-146
-        // tok/s), almost certainly the driver's system-memory-fallback kicking in under near-zero
-        // headroom -- so that one was rejected. 98304 initially left only ~411MB free; closing
-        // Lively Wallpaper (a background live-wallpaper app that was continuously holding GPU
-        // memory) recovered another ~188MB, landing at a comfortable ~599MB free with zero
-        // measured speed cost. More than double the previous 45056 default's usable context.
-        public const int CustomEndpointContextWindowTokens = 98304;
+        // residency (CustomEndpointNumGpuLayers) already forced, and a duplicate lower-quality
+        // pull of the same model (carstenuhlig/omnicoder-2-9b:latest, Q4_K_M) removed from disk to
+        // remove any ambiguity about which model is actually loaded. 45056/65536/98304/114688 all
+        // measured identical generation speed (~26-29.8 tok/s) and 100% GPU-resident; 114688 held
+        // steady across three repeated runs at ~434MB free. 131072 technically fit (100%
+        // GPU-resident, ~211-434MB free depending on background load) but sits close enough to the
+        // edge that a background app spike previously measured a real 5x prefill slowdown there --
+        // 114688 is the highest value that stayed consistently fast with real margin. More than
+        // double the original 45056 default's usable context.
+        public const int CustomEndpointContextWindowTokens = 114688;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
         // llama.cpp/Ollama convention: any value >= the model's real layer count offloads every
@@ -1642,7 +1643,7 @@ namespace Axiom.Core.Chat
             bool stream,
             IReadOnlyList<string>? stopSequences)
         {
-            JsonArray messagePayload = BuildMessages(messages, systemPrompt);
+            JsonArray messagePayload = BuildMessages(messages, systemPrompt, nativeOllamaToolArguments: true);
             var options = new JsonObject
             {
                 ["num_ctx"] = _customEndpointContextWindowTokens,
@@ -1732,7 +1733,8 @@ namespace Axiom.Core.Chat
 
                 if (statusCode == HttpStatusCode.OK)
                     break;
-                if (IsServerTransientStatus(statusCode) && retryAttempt < TransientOpenRouterRetryLimit)
+                if ((IsServerTransientStatus(statusCode) || IsCustomEndpointTransientStartupGlitch(statusCode))
+                    && retryAttempt < TransientOpenRouterRetryLimit)
                 {
                     await Task.Delay(GetRetryDelay(response, responseBody, retryAttempt), cancellationToken);
                     continue;
@@ -1789,7 +1791,8 @@ namespace Axiom.Core.Chat
                     break;
 
                 string retryBody = await ReadBodyWithTimeoutAsync(response, cancellationToken);
-                if (IsServerTransientStatus(response.StatusCode) && retryAttempt < TransientOpenRouterRetryLimit)
+                if ((IsServerTransientStatus(response.StatusCode) || IsCustomEndpointTransientStartupGlitch(response.StatusCode))
+                    && retryAttempt < TransientOpenRouterRetryLimit)
                 {
                     await Task.Delay(GetRetryDelay(response, retryBody, retryAttempt), cancellationToken);
                     continue;
@@ -1934,7 +1937,8 @@ namespace Axiom.Core.Chat
             return payload;
         }
 
-        private static JsonArray BuildMessages(List<OpenRouterMessage> conversationMessages, string systemPrompt)
+        private static JsonArray BuildMessages(
+            List<OpenRouterMessage> conversationMessages, string systemPrompt, bool nativeOllamaToolArguments = false)
         {
             var messages = new JsonArray();
             if (!string.IsNullOrWhiteSpace(systemPrompt))
@@ -1958,7 +1962,7 @@ namespace Axiom.Core.Chat
                 };
 
                 if (message.ToolCalls?.Count > 0)
-                    messageObject["tool_calls"] = BuildToolCallPayload(message.ToolCalls);
+                    messageObject["tool_calls"] = BuildToolCallPayload(message.ToolCalls, nativeOllamaToolArguments);
 
                 if (!string.IsNullOrWhiteSpace(message.ToolCallId))
                     messageObject["tool_call_id"] = message.ToolCallId;
@@ -2024,13 +2028,27 @@ namespace Axiom.Core.Chat
             return payload;
         }
 
-        private static JsonArray BuildToolCallPayload(IReadOnlyList<OpenRouterToolCall> toolCalls)
+        // OpenAI's schema (and OpenRouter's cloud models) require function.arguments to be a
+        // JSON-encoded STRING (e.g. "arguments": "{\"path\":\"index.html\"}"). Ollama's native
+        // /api/chat instead expects a raw JSON OBJECT there (matching what it itself emits when
+        // returning a tool call), and rejects a string value with a parse error -- confirmed live:
+        // replaying a completed write_file call back into history (any multi-round tool turn,
+        // e.g. writing a file and then continuing) produced a 400
+        // {"error":"Value looks like object, but can't find closing '}' symbol"} from the server
+        // every time, because this always embedded ArgumentsJson (already-serialized JSON text) as
+        // a JSON string value regardless of which endpoint the request was actually going to.
+        private static JsonArray BuildToolCallPayload(IReadOnlyList<OpenRouterToolCall> toolCalls, bool nativeOllamaFormat)
         {
             var payload = new JsonArray();
             foreach (OpenRouterToolCall toolCall in toolCalls ?? [])
             {
                 if (toolCall == null || string.IsNullOrWhiteSpace(toolCall.Name))
                     continue;
+
+                string argumentsJson = string.IsNullOrWhiteSpace(toolCall.ArgumentsJson) ? "{}" : toolCall.ArgumentsJson;
+                JsonNode argumentsNode = nativeOllamaFormat
+                    ? ParseArgumentsAsNode(argumentsJson)
+                    : JsonValue.Create(argumentsJson)!;
 
                 payload.Add(new JsonObject
                 {
@@ -2039,12 +2057,26 @@ namespace Axiom.Core.Chat
                     ["function"] = new JsonObject
                     {
                         ["name"] = toolCall.Name,
-                        ["arguments"] = string.IsNullOrWhiteSpace(toolCall.ArgumentsJson) ? "{}" : toolCall.ArgumentsJson
+                        ["arguments"] = argumentsNode
                     }
                 });
             }
 
             return payload;
+        }
+
+        private static JsonNode ParseArgumentsAsNode(string argumentsJson)
+        {
+            try
+            {
+                return JsonNode.Parse(argumentsJson) ?? new JsonObject();
+            }
+            catch (JsonException)
+            {
+                // Malformed arguments text should surface as an empty object, not break the whole
+                // request the way re-embedding it as a raw (invalid) fragment would.
+                return new JsonObject();
+            }
         }
 
         // A real OpenRouter window is 131k+ tokens, so requesting an 8192-token completion still
@@ -3101,6 +3133,22 @@ namespace Axiom.Core.Chat
 
         private static bool IsServerTransientStatus(HttpStatusCode statusCode)
             => statusCode is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
+
+        // Scoped to the two custom-endpoint call sites only -- NOT folded into
+        // IsServerTransientStatus, which OpenRouter cloud requests also consult, where a 401
+        // legitimately means "this key is bad" and must fail immediately rather than retry.
+        // Confirmed live against the real self-hosted proxy (ai.axiominference.work): the exact
+        // same request, same key, 401'd with {"error":{"message":"Invalid or revoked API
+        // key.",...}} on the first attempt and then returned 200 on every retry seconds later with
+        // no other change -- a proxy-side cold-start/cache-miss race on its own key check, not an
+        // actually-bad key. A single retry clears it every time it was reproduced.
+        // Also covers 500: observed live immediately after a request landed mid-reload (the
+        // server was switching the loaded model to a different num_ctx at that exact moment) --
+        // same "transient state during a transition, clears on its own within seconds" signature
+        // as the 401 case above. A forced clean reload plus an immediate retry of the identical
+        // request succeeded every time this was reproduced.
+        private static bool IsCustomEndpointTransientStartupGlitch(HttpStatusCode statusCode)
+            => statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.InternalServerError;
 
         private static TimeSpan GetRetryDelay(HttpResponseMessage response, string responseBody, int retryAttempt)
         {

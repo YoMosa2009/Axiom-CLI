@@ -24,13 +24,26 @@ namespace Axiom.Core.Agent
         public static CompactResult Compact(
             IReadOnlyList<OpenRouterMessage> history,
             int estimatedTokens,
-            int contextWindowTokens)
+            int contextWindowTokens,
+            bool scaleThresholdsToWindow = false,
+            int? keepRecentMessagesOverride = null)
         {
             var list = history?.ToList() ?? new List<OpenRouterMessage>();
             string? warn = null;
 
-            int soft = Math.Min(SoftWarnTokens, Math.Max(4000, contextWindowTokens * 45 / 100));
-            int hard = Math.Min(HardCompactTokens, Math.Max(8000, contextWindowTokens * 70 / 100));
+            // SoftWarnTokens/HardCompactTokens (24k/48k) were calibrated back when Kestral 1's real
+            // window was ~45k -- close enough to the hard ceiling that it rarely mattered in
+            // practice. The window has since grown (114688 and climbing as more headroom gets
+            // validated), and holding the same fixed ceiling there means compaction fires earlier
+            // and earlier relative to what's actually available, directly cutting into how long a
+            // session stays usable before losing detail to summarization. Scale proportionally to
+            // the real window for custom-endpoint callers instead, with a generous sanity ceiling
+            // rather than the old fixed one; cloud model behavior (scaleThresholdsToWindow: false)
+            // is unchanged.
+            int softCeiling = scaleThresholdsToWindow ? 200_000 : SoftWarnTokens;
+            int hardCeiling = scaleThresholdsToWindow ? 260_000 : HardCompactTokens;
+            int soft = Math.Min(softCeiling, Math.Max(4000, contextWindowTokens * 45 / 100));
+            int hard = Math.Min(hardCeiling, Math.Max(8000, contextWindowTokens * 70 / 100));
 
             if (estimatedTokens >= soft)
             {
@@ -42,12 +55,13 @@ namespace Axiom.Core.Agent
             // Always strip oversized tool/assistant payloads from older messages.
             TrimToolSpam(list);
 
-            if (estimatedTokens < hard || list.Count <= KeepRecentMessages + 2)
+            int keep = keepRecentMessagesOverride is > 0 ? keepRecentMessagesOverride.Value : KeepRecentMessages;
+
+            if (estimatedTokens < hard || list.Count <= keep + 2)
             {
                 return new CompactResult(list, null, Compacted: false, warn);
             }
 
-            int keep = KeepRecentMessages;
             if (list.Count <= keep)
                 return new CompactResult(list, null, false, warn);
 

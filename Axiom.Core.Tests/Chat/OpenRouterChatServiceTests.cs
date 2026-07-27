@@ -125,6 +125,52 @@ namespace Axiom.Core.Tests.Chat
             Assert.Equal(OpenRouterChatService.CustomEndpointKeepAlive, keepAlive.GetString());
         }
 
+        // Root-cause regression guard for a live reproduction: asking Kestral to write a file and
+        // then continue (any multi-round tool turn -- the exact "make me a website" repro) made the
+        // *second* request always come back 400 {"error":"Value looks like object, but can't find
+        // closing '}' symbol"}. BuildMessages/BuildToolCallPayload always embedded a completed tool
+        // call's arguments as a JSON-encoded STRING when replaying it back into history -- correct
+        // for OpenAI's schema, but Ollama's native /api/chat requires function.arguments to be a
+        // raw JSON OBJECT there (matching what it itself emits) and rejects a string. Confirmed
+        // live against the real server: the string-encoded form 400s, the object form 200s.
+        [Fact]
+        public async Task BuildOllamaNativeChatRequest_ReplaysToolCallArgumentsAsRawObject()
+        {
+            var service = new OpenRouterChatService();
+            service.SetCustomEndpoint("https://ai.axiominference.work/v1", "test-key", "granite3.2:8b");
+
+            var history = new List<OpenRouterMessage>
+            {
+                new("user", "create index.html"),
+                new(
+                    "assistant",
+                    string.Empty,
+                    ToolCalls: [new OpenRouterToolCall("call_0", "write_file", "{\"path\":\"index.html\",\"content\":\"<html></html>\"}")],
+                    PreserveFullText: true),
+                new("tool", "Wrote index.html", ToolCallId: "call_0", PreserveFullText: true),
+                new("user", "now verify it")
+            };
+
+            using var request = service.BuildOllamaNativeChatRequest(
+                history,
+                systemPrompt: "system",
+                modelId: OpenRouterChatService.CustomEndpointModelId,
+                temperature: 0.7,
+                topP: 0.9,
+                maxTokens: 512,
+                tools: null,
+                stream: false,
+                stopSequences: null);
+
+            string body = await request.Content!.ReadAsStringAsync();
+            using JsonDocument json = JsonDocument.Parse(body);
+            JsonElement assistantMessage = json.RootElement.GetProperty("messages")[2];
+            JsonElement arguments = assistantMessage.GetProperty("tool_calls")[0].GetProperty("function").GetProperty("arguments");
+
+            Assert.Equal(JsonValueKind.Object, arguments.ValueKind);
+            Assert.Equal("index.html", arguments.GetProperty("path").GetString());
+        }
+
         [Fact]
         public async Task BuildChatRequest_OmitsKeepAliveAndThink_ForCloudModels()
         {

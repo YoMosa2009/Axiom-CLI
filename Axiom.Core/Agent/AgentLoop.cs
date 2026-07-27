@@ -121,10 +121,19 @@ namespace Axiom.Core.Agent
             string? regression = _tools.Workflow.RegressionGuardBlock();
             string specialtyBlock = IntelligenceHelpers.SpecialtyPromptBlock(specialty);
 
-            // Compact history for long sessions
+            // Compact history for long sessions. Custom-endpoint thresholds scale to Kestral's
+            // real (now much larger) window instead of the fixed ceiling tuned for cloud models --
+            // see ConversationCompactor.Compact -- and keep more recent messages verbatim (16 vs
+            // 8) since the bigger window affords it, preserving more usable detail before
+            // summarization kicks in.
             int contextWindow = _chat.GetApproximateContextWindowTokens(_modelId);
             int preTokens = _chat.EstimateConversationTokens(history, system);
-            var compact = ConversationCompactor.Compact(history, preTokens, contextWindow);
+            var compact = ConversationCompactor.Compact(
+                history,
+                preTokens,
+                contextWindow,
+                scaleThresholdsToWindow: isCustomEndpoint,
+                keepRecentMessagesOverride: isCustomEndpoint ? 16 : null);
             // Always apply trim; replace list when compacted or tool-spam was stripped.
             if (compact.Compacted || compact.Messages.Count != history.Count)
             {
