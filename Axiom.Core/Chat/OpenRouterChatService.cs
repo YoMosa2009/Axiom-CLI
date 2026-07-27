@@ -37,7 +37,9 @@ namespace Axiom.Core.Chat
         string Text,
         string Reasoning,
         IReadOnlyList<OpenRouterToolCall> ToolCalls,
-        OpenRouterTokenUsage? Usage = null);
+        OpenRouterTokenUsage? Usage = null,
+        bool StreamInterrupted = false,
+        string? StreamInterruptionReason = null);
 
     public sealed record OpenRouterTokenUsage(
         int PromptTokens,
@@ -242,6 +244,11 @@ namespace Axiom.Core.Chat
         // the connection is dead.
         private static readonly TimeSpan StreamFirstLineIdleTimeout = TimeSpan.FromSeconds(90);
         private static readonly TimeSpan StreamLineIdleTimeout = TimeSpan.FromSeconds(60);
+        // Native Ollama does not emit SSE keep-alive lines. A remote self-hosted endpoint can
+        // therefore be legitimately quiet while its host is scheduling a tool call or recovering
+        // GPU work, even though the HTTP connection remains usable. Keep its liveness guard
+        // bounded, but do not apply the cloud-provider 60-second SSE expectation to it.
+        private static readonly TimeSpan CustomEndpointStreamLineIdleTimeout = TimeSpan.FromMinutes(3);
         // Wall-clock deadline for the first meaningful delta (content/reasoning/tool call).
         // Keep-alive comments reset the line-idle timer, so a zombie provider queue that never
         // starts generating needs its own bound.
@@ -1795,6 +1802,14 @@ namespace Axiom.Core.Chat
             var textBuilder = new StringBuilder();
             IReadOnlyList<OpenRouterToolCall> toolCalls = Array.Empty<OpenRouterToolCall>();
             OpenRouterTokenUsage? usage = null;
+            bool streamCompleted = false;
+            string? interruptionReason = null;
+
+            // Native Ollama reports authoritative usage only on its final done:true line. Publish
+            // the bounded request estimate as soon as the server has accepted streaming so the
+            // context chrome reflects the in-flight request and still advances if the connection
+            // is interrupted before that final line arrives.
+            RecordTokenUsage(null, estimatedPromptTokens);
 
             using (response)
             {
@@ -1812,16 +1827,25 @@ namespace Axiom.Core.Chat
                     string? line;
                     try
                     {
-                        idleCts.CancelAfter(firstLineReceived ? StreamLineIdleTimeout : StreamFirstLineIdleTimeout);
+                        idleCts.CancelAfter(firstLineReceived
+                            ? CustomEndpointStreamLineIdleTimeout
+                            : StreamFirstLineIdleTimeout);
                         line = await reader.ReadLineAsync(idleCts.Token);
                     }
                     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                     {
-                        throw new InvalidOperationException("Custom endpoint stopped responding mid-stream. Try again shortly.");
+                        interruptionReason = firstLineReceived
+                            ? "No native Ollama stream data arrived for three minutes."
+                            : "The native Ollama stream did not start in time.";
+                        break;
                     }
 
                     if (line == null)
+                    {
+                        if (!streamCompleted)
+                            interruptionReason = "The native Ollama connection closed before its completion record.";
                         break;
+                    }
                     firstLineReceived = true;
                     if (string.IsNullOrWhiteSpace(line))
                         continue;
@@ -1829,40 +1853,53 @@ namespace Axiom.Core.Chat
                     // Ollama's native /api/chat streams NDJSON -- one complete JSON object per line,
                     // no "data: " SSE prefix and no "[DONE]" sentinel; the final line carries "done":
                     // true plus the usage counters.
-                    using JsonDocument chunkDocument = JsonDocument.Parse(line);
-                    JsonElement root = chunkDocument.RootElement;
-
-                    if (root.TryGetProperty("message", out JsonElement messageElement))
+                    JsonDocument chunkDocument;
+                    try
                     {
-                        if (messageElement.TryGetProperty("content", out JsonElement contentElement)
-                            && contentElement.ValueKind == JsonValueKind.String)
+                        chunkDocument = JsonDocument.Parse(line);
+                    }
+                    catch (JsonException)
+                    {
+                        interruptionReason = "The native Ollama stream returned an incomplete data record.";
+                        break;
+                    }
+                    using (chunkDocument)
+                    {
+                        JsonElement root = chunkDocument.RootElement;
+
+                        if (root.TryGetProperty("message", out JsonElement messageElement))
                         {
-                            string delta = contentElement.GetString() ?? string.Empty;
-                            if (delta.Length > 0)
+                            if (messageElement.TryGetProperty("content", out JsonElement contentElement)
+                                && contentElement.ValueKind == JsonValueKind.String)
                             {
-                                textBuilder.Append(delta);
-                                onToken?.Invoke(delta);
+                                string delta = contentElement.GetString() ?? string.Empty;
+                                if (delta.Length > 0)
+                                {
+                                    textBuilder.Append(delta);
+                                    onToken?.Invoke(delta);
+                                }
+                            }
+
+                            // Tool calls arrive whole on a single line rather than accumulated in
+                            // pieces across the stream (verified live), so no delta-accumulator is
+                            // needed here unlike the OpenRouter SSE path below.
+                            if (messageElement.TryGetProperty("tool_calls", out JsonElement toolCallsElement)
+                                && toolCallsElement.ValueKind == JsonValueKind.Array
+                                && toolCallsElement.GetArrayLength() > 0)
+                            {
+                                toolCalls = ParseOllamaNativeToolCalls(toolCallsElement);
                             }
                         }
 
-                        // Tool calls arrive whole on a single line rather than accumulated in
-                        // pieces across the stream (verified live), so no delta-accumulator is
-                        // needed here unlike the OpenRouter SSE path below.
-                        if (messageElement.TryGetProperty("tool_calls", out JsonElement toolCallsElement)
-                            && toolCallsElement.ValueKind == JsonValueKind.Array
-                            && toolCallsElement.GetArrayLength() > 0)
+                        if (root.TryGetProperty("done", out JsonElement doneElement) && doneElement.ValueKind == JsonValueKind.True)
                         {
-                            toolCalls = ParseOllamaNativeToolCalls(toolCallsElement);
+                            int promptTokens = root.TryGetProperty("prompt_eval_count", out JsonElement peEl) && peEl.TryGetInt32(out int pe) ? pe : 0;
+                            int completionTokens = root.TryGetProperty("eval_count", out JsonElement ecEl) && ecEl.TryGetInt32(out int ec) ? ec : 0;
+                            if (promptTokens > 0 || completionTokens > 0)
+                                usage = new OpenRouterTokenUsage(promptTokens, completionTokens, promptTokens + completionTokens);
+                            streamCompleted = true;
+                            break;
                         }
-                    }
-
-                    if (root.TryGetProperty("done", out JsonElement doneElement) && doneElement.ValueKind == JsonValueKind.True)
-                    {
-                        int promptTokens = root.TryGetProperty("prompt_eval_count", out JsonElement peEl) && peEl.TryGetInt32(out int pe) ? pe : 0;
-                        int completionTokens = root.TryGetProperty("eval_count", out JsonElement ecEl) && ecEl.TryGetInt32(out int ec) ? ec : 0;
-                        if (promptTokens > 0 || completionTokens > 0)
-                            usage = new OpenRouterTokenUsage(promptTokens, completionTokens, promptTokens + completionTokens);
-                        break;
                     }
                 }
             }
@@ -1870,7 +1907,13 @@ namespace Axiom.Core.Chat
             RecordTokenUsage(usage, estimatedPromptTokens);
             SetDetectedModel(CustomEndpointModelId, CustomEndpointModelLabel);
             (string finalContent, IReadOnlyList<OpenRouterToolCall> finalCalls) = ApplyFallbackTextToolCalls(textBuilder.ToString(), toolCalls, tools);
-            return new OpenRouterChatResponse(finalContent, string.Empty, finalCalls, usage);
+            return new OpenRouterChatResponse(
+                finalContent,
+                string.Empty,
+                finalCalls,
+                usage,
+                StreamInterrupted: !streamCompleted,
+                StreamInterruptionReason: interruptionReason);
         }
 
         private static JsonArray BuildStopPayload(IReadOnlyList<string>? stopSequences)

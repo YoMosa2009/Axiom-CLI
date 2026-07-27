@@ -214,6 +214,7 @@ namespace Axiom.Core.Agent
                 finalText = result.FinalText;
                 toolCalls = result.ToolCallCount;
                 cancelled = result.Cancelled;
+                failed |= result.StreamInterrupted;
 
                 // Regression guard reminder in final answer if failures remain
                 string? regAfter = _tools.Workflow.RegressionGuardBlock();
@@ -251,7 +252,7 @@ namespace Axiom.Core.Agent
                 }
                 bool hasBlockingArtifactFailure = completionQuality != null
                     && ArtifactQualityInspector.HasBlockingFindings(completionQuality.Findings);
-                if (isCustomEndpoint && requiresWrittenArtifacts && !cancelled
+                if (isCustomEndpoint && requiresWrittenArtifacts && !cancelled && !failed
                     && ((_tools.WrittenPaths.Count == 0 && (toolCalls == 0 || result.LooksLikeObservationEcho))
                         || hasBlockingArtifactFailure
                         || unfinishedSteps.Count > 0))
@@ -286,6 +287,7 @@ namespace Axiom.Core.Agent
                     finalText = retryResult.FinalText;
                     toolCalls += retryResult.ToolCallCount;
                     cancelled = retryResult.Cancelled;
+                    failed |= retryResult.StreamInterrupted;
 
                     bool stillUnfinished = planBoardAvailable && _tools.Workflow.Plan.Steps
                         .Any(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing);
@@ -317,7 +319,7 @@ namespace Axiom.Core.Agent
                 }
 
                 string diagnostics = string.Empty;
-                if (!cancelled
+                if (!cancelled && !failed
                     && _tools.Workflow.AutoDiagnosticsAfterWrite
                     && _tools.WrittenPaths.Count > 0
                     && _tools.ApprovalMode != ApprovalMode.Plan)
@@ -328,7 +330,7 @@ namespace Axiom.Core.Agent
                 // A compact model benefits from a separate evidence-backed verification pass.
                 // This is shared across every implementation type: exact literals, structural
                 // validation, file-type checks, diagnostics, and the full task contract.
-                if (isCustomEndpoint && requiresWrittenArtifacts && !cancelled
+                if (isCustomEndpoint && requiresWrittenArtifacts && !cancelled && !failed
                     && _tools.WrittenPaths.Count > 0
                     && _tools.ApprovalMode != ApprovalMode.Plan)
                 {
@@ -359,6 +361,7 @@ namespace Axiom.Core.Agent
                         finalText = reviewResult.FinalText;
                     toolCalls += reviewResult.ToolCallCount;
                     cancelled = reviewResult.Cancelled;
+                    failed |= reviewResult.StreamInterrupted;
 
                     if (!cancelled)
                     {

@@ -41,5 +41,23 @@ namespace Axiom.Core.Tests.Agent
         {
             Assert.False(ToolCallingLoop.LooksLikeCapabilityDenial(text!));
         }
+
+        [Fact]
+        public void BuildInterruptedStreamResponse_PreservesPartialAssistantText()
+        {
+            string response = ToolCallingLoop.BuildInterruptedStreamResponse("I created the project folder.");
+
+            Assert.Contains("I created the project folder.", response);
+            Assert.Contains("partial response preserved", response);
+            Assert.Contains("no further tools were run", response);
+        }
+
+        [Fact]
+        public void BuildInterruptedStreamResponse_ExplainsWhenNoTextArrived()
+        {
+            string response = ToolCallingLoop.BuildInterruptedStreamResponse(null);
+
+            Assert.Equal("[Kestral connection interrupted before it produced a response.]", response);
+        }
     }
 }

@@ -339,7 +339,7 @@ namespace Axiom.Core.Council
             Report(progress, CouncilEventKind.Status,
                 agentic ? "Builder is implementing with tools..." : "Builder is implementing...");
             _agentTools?.ClearWrittenPaths();
-            (builderOutput, int builderTools) = await CallBuilderAsync(
+            (builderOutput, int builderTools, bool builderStreamInterrupted) = await CallBuilderAsync(
                 builderSystem,
                 builderInput,
                 agentic,
@@ -350,6 +350,13 @@ namespace Axiom.Core.Council
             builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
             totalToolCalls += builderTools;
             CollectWrittenFiles(changedFiles);
+            if (builderStreamInterrupted)
+            {
+                Report(progress, CouncilEventKind.Warning,
+                    "Builder connection interrupted; preserving its partial output and stopping the Council run.");
+                return CreateStreamInterruptedResult(
+                    builderOutput, totalToolCalls, changedFiles, applySummary, exploreSummary);
+            }
 
             // A small model can narrate "I've made the change" without ever emitting a real tool
             // call, and -- distinctly -- can also do REAL work for the first step or two of a
@@ -396,7 +403,7 @@ namespace Axiom.Core.Council
                         ? $"Builder left {unfinishedSteps.Count} plan step(s) unfinished — retrying with an explicit instruction."
                         : "Builder produced no tool calls or patch for an edit request — retrying with an explicit tool-use instruction.");
                 string nudgedInput = builderInput + "\n\n[INCOMPLETE] " + nudgeDetail;
-                (builderOutput, int retryTools) = await CallBuilderAsync(
+                (builderOutput, int retryTools, bool retryStreamInterrupted) = await CallBuilderAsync(
                     builderSystem,
                     nudgedInput,
                     agentic,
@@ -407,6 +414,13 @@ namespace Axiom.Core.Council
                 builderOutput = CouncilRolePrompts.StripRoleMarkers(builderOutput);
                 totalToolCalls += retryTools;
                 CollectWrittenFiles(changedFiles);
+                if (retryStreamInterrupted)
+                {
+                    Report(progress, CouncilEventKind.Warning,
+                        "Builder connection interrupted during the completion retry; preserving partial output.");
+                    return CreateStreamInterruptedResult(
+                        builderOutput, totalToolCalls, changedFiles, applySummary, exploreSummary);
+                }
 
                 unfinishedSteps = planBoardAvailable
                     ? activeTools.Workflow.Plan.Steps
@@ -496,11 +510,18 @@ namespace Axiom.Core.Council
                 bool criticInspect = agentic && workspaceConnected;
                 string criticSystem = FoundationSystemPrompt.Apply(
                     CouncilRolePrompts.Critic(taskKind, workspaceConnected, criticInspect, IsCustomEndpointModel, isArtifactTask));
-                (string criticOutput, int criticTools) = await CallCriticAsync(
+                (string criticOutput, int criticTools, bool criticStreamInterrupted) = await CallCriticAsync(
                     criticSystem, criticInput, criticInspect, progress, cancellationToken);
                 criticOutput = CouncilRolePrompts.StripRoleMarkers(criticOutput);
                 totalToolCalls += criticTools;
                 Report(progress, CouncilEventKind.CriticOutput, criticOutput);
+                if (criticStreamInterrupted)
+                {
+                    Report(progress, CouncilEventKind.Warning,
+                        "Critic connection interrupted; preserving Builder output and stopping the Council run.");
+                    return CreateStreamInterruptedResult(
+                        builderOutput, totalToolCalls, changedFiles, applySummary, exploreSummary);
+                }
                 report = CriticContractParser.Parse(criticOutput);
 
                 // Deterministic findings force an issues status even if the LLM clean-passes.
@@ -632,7 +653,7 @@ namespace Axiom.Core.Council
                 string revisionInput = BuildRevisionInput(
                     request.UserPrompt, architectPlan, workspaceContext, builderOutput, focusedCritic, fullRevision, evidence);
 
-                (builderOutput, int revisionTools) = await CallBuilderAsync(
+                (builderOutput, int revisionTools, bool revisionStreamInterrupted) = await CallBuilderAsync(
                     revisionSystem,
                     revisionInput,
                     agentic,
@@ -644,6 +665,13 @@ namespace Axiom.Core.Council
                 totalToolCalls += revisionTools;
                 CollectWrittenFiles(changedFiles);
                 Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
+                if (revisionStreamInterrupted)
+                {
+                    Report(progress, CouncilEventKind.Warning,
+                        "Builder connection interrupted during revision; preserving partial output.");
+                    return CreateStreamInterruptedResult(
+                        builderOutput, totalToolCalls, changedFiles, applySummary, exploreSummary, report);
+                }
 
                 if (expectPatch || ContainsPatchEnvelope(builderOutput))
                 {
@@ -718,10 +746,17 @@ namespace Axiom.Core.Council
                                  "Flag regressions only.";
                     string postSystem = FoundationSystemPrompt.Apply(
                         CouncilRolePrompts.Critic(taskKind, true, agentic, IsCustomEndpointModel, isArtifactTask));
-                    (string postCritic, int postTools) = await CallCriticAsync(
+                    (string postCritic, int postTools, bool postCriticStreamInterrupted) = await CallCriticAsync(
                         postSystem, postInput, agentic, progress, cancellationToken);
                     totalToolCalls += postTools;
                     Report(progress, CouncilEventKind.CriticOutput, postCritic);
+                    if (postCriticStreamInterrupted)
+                    {
+                        Report(progress, CouncilEventKind.Warning,
+                            "Post-merge Critic connection interrupted; changes were kept but the run was not verified.");
+                        return CreateStreamInterruptedResult(
+                            builderOutput, totalToolCalls, changedFiles, applySummary, exploreSummary, report);
+                    }
                     var postReport = MergeDeterministicFindings(CriticContractParser.Parse(postCritic), postEv);
                     var postBlocking = CriticSeverity.FilterBlocking(postReport.Issues, tools.SeverityPolicy);
                     if (postBlocking.Count > 0)
@@ -1005,14 +1040,14 @@ namespace Axiom.Core.Council
                     (agentic
                         ? "\nEither emit a corrected patch envelope OR use write_file tools to apply the edits on disk, then summarize."
                         : "\nOutput ONLY a corrected, valid patch envelope now.");
-                (builderOutput, _) = await CallBuilderAsync(builderSystem, retryInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
+                (builderOutput, _, _) = await CallBuilderAsync(builderSystem, retryInput, agentic, progress, cancellationToken, gatingMessage: request.UserPrompt);
                 Report(progress, CouncilEventKind.BuilderOutput, builderOutput);
             }
 
             return null;
         }
 
-        private async Task<(string Text, int ToolCalls)> CallBuilderAsync(
+        private async Task<(string Text, int ToolCalls, bool StreamInterrupted)> CallBuilderAsync(
             string systemPrompt,
             string userInput,
             bool agentic,
@@ -1030,7 +1065,7 @@ namespace Axiom.Core.Council
                     cancellationToken,
                     streamTokens: true,
                     conversationHistory: conversationHistory);
-                return (text, 0);
+                return (text, 0, false);
             }
 
             // Dozens of rounds on a small local model reads as "endless looping" -- cap tighter
@@ -1054,10 +1089,10 @@ namespace Axiom.Core.Council
                     $"Builder · {result.ToolCallCount} tool call(s) completed.");
             }
 
-            return (result.FinalText, result.ToolCallCount);
+            return (result.FinalText, result.ToolCallCount, result.StreamInterrupted);
         }
 
-        private async Task<(string Text, int ToolCalls)> CallCriticAsync(
+        private async Task<(string Text, int ToolCalls, bool StreamInterrupted)> CallCriticAsync(
             string systemPrompt,
             string userInput,
             bool inspectTools,
@@ -1067,7 +1102,7 @@ namespace Axiom.Core.Council
             if (!inspectTools || _chat == null || _agentTools == null)
             {
                 string text = await CallRoleAsync(systemPrompt, userInput, progress, cancellationToken, streamTokens: true);
-                return (text, 0);
+                return (text, 0, false);
             }
 
             var loop = new ToolCallingLoop(_chat, _agentTools, _modelId);
@@ -1086,8 +1121,26 @@ namespace Axiom.Core.Council
                     $"Critic · {result.ToolCallCount} inspect tool call(s).");
             }
 
-            return (result.FinalText, result.ToolCallCount);
+            return (result.FinalText, result.ToolCallCount, result.StreamInterrupted);
         }
+
+        private static CouncilResult CreateStreamInterruptedResult(
+            string builderOutput,
+            int totalToolCalls,
+            IReadOnlyList<string> changedFiles,
+            string? applySummary,
+            string? exploreSummary,
+            CriticReport? report = null)
+            => new(
+                Success: false,
+                FinalText: builderOutput,
+                Patch: null,
+                FinalCriticReport: report ?? new CriticReport { Status = "issues" },
+                ToolCallCount: totalToolCalls,
+                ChangedFiles: changedFiles.Count > 0 ? changedFiles : null,
+                ApplySummary: applySummary,
+                Cancelled: false,
+                ExploreSummary: exploreSummary);
 
         private void NoteSessionTestOutcomes(string output)
         {

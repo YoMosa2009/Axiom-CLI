@@ -16,7 +16,8 @@ namespace Axiom.Core.Agent
         int ToolCallCount,
         IReadOnlyList<string> ToolLog,
         bool Cancelled = false,
-        bool LooksLikeObservationEcho = false);
+        bool LooksLikeObservationEcho = false,
+        bool StreamInterrupted = false);
 
     // Bounded multi-round tool loop shared by AgentLoop, council Builder/Critic, and subagents.
     public sealed class ToolCallingLoop
@@ -113,6 +114,22 @@ namespace Axiom.Core.Agent
 
                 IReadOnlyList<OpenRouterToolCall> calls = response.ToolCalls ?? Array.Empty<OpenRouterToolCall>();
                 finalText = !string.IsNullOrEmpty(response.Text) ? response.Text : collected.ToString();
+
+                if (response.StreamInterrupted)
+                {
+                    string reason = string.IsNullOrWhiteSpace(response.StreamInterruptionReason)
+                        ? "The self-hosted model connection ended before it sent its completion record."
+                        : response.StreamInterruptionReason;
+                    finalText = BuildInterruptedStreamResponse(finalText);
+                    toolLog.Add("Kestral stream interrupted: " + reason);
+                    onStatus?.Invoke("Kestral stream interrupted — partial response preserved");
+                    return new ToolCallingResult(
+                        finalText,
+                        toolCalls,
+                        toolLog,
+                        LooksLikeObservationEcho: false,
+                        StreamInterrupted: true);
+                }
 
                 if (calls.Count == 0)
                 {
@@ -221,6 +238,21 @@ namespace Axiom.Core.Agent
                         finalText = !string.IsNullOrEmpty(finalResponse.Text)
                             ? finalResponse.Text
                             : finalCollected.ToString();
+                        if (finalResponse.StreamInterrupted)
+                        {
+                            string reason = string.IsNullOrWhiteSpace(finalResponse.StreamInterruptionReason)
+                                ? "The self-hosted model connection ended before it sent its completion record."
+                                : finalResponse.StreamInterruptionReason;
+                            finalText = BuildInterruptedStreamResponse(finalText);
+                            toolLog.Add("Kestral stream interrupted: " + reason);
+                            onStatus?.Invoke("Kestral stream interrupted — partial response preserved");
+                            return new ToolCallingResult(
+                                finalText,
+                                toolCalls,
+                                toolLog,
+                                LooksLikeObservationEcho: false,
+                                StreamInterrupted: true);
+                        }
                         break;
                     }
 
@@ -439,6 +471,14 @@ namespace Axiom.Core.Agent
                 || text.Contains("<|tool_call|>", StringComparison.OrdinalIgnoreCase)
                 || text.Contains("<function=", StringComparison.OrdinalIgnoreCase);
         }
+
+        // Public for direct regression testing. A dropped native-Ollama response must not discard
+        // text that already reached the user, nor should it be treated as permission to run an
+        // incomplete tool call.
+        public static string BuildInterruptedStreamResponse(string? partialText)
+            => string.IsNullOrWhiteSpace(partialText)
+                ? "[Kestral connection interrupted before it produced a response.]"
+                : partialText.TrimEnd() + "\n\n[Kestral connection interrupted — partial response preserved; no further tools were run.]";
 
         // Matches the base-model "I'm just a text-based AI" refusal persona bleeding through
         // despite real tool definitions being on the wire this turn -- confirmed live against
