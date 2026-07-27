@@ -49,6 +49,21 @@ namespace Axiom.Core.Tests.Agent
         }
 
         [Fact]
+        public void Filter_ExcludesWriteToolsForAGreetingEvenWithWorkspaceAttached()
+        {
+            // A plain "hello" has no plausible tool need. A locked workspace alone must not pull
+            // in the full write/edit belt for it -- that was the reproduction for "even hello
+            // takes forever" against a self-hosted model.
+            var result = ToolGatingHeuristics.Filter(FullCatalog, "hello", workspaceAttached: true);
+            var names = result.Select(t => t.Name).ToHashSet();
+
+            Assert.DoesNotContain("write_file", names);
+            Assert.DoesNotContain("str_replace", names);
+            Assert.DoesNotContain("run_shell", names);
+            Assert.Contains("read_file", names);
+        }
+
+        [Fact]
         public void Filter_IncludesWriteToolsWhenWorkspaceIsAttached()
         {
             // The user pointing the agent at a folder is itself signal, even without explicit

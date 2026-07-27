@@ -67,6 +67,21 @@ namespace Axiom.Core.Agent
             "spawn_subagent"
         };
 
+        // Deliberately narrow (exact match after trimming trailing punctuation): only messages
+        // that are plausibly nothing but a greeting/ack. A short message alone isn't enough
+        // signal -- "fix main.cs" is three words and a real task -- so this must never fuzzy-match
+        // a prefix of a longer request.
+        private static readonly HashSet<string> SmallTalkPhrases = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "hi", "hey", "hello", "hiya", "yo", "sup", "howdy",
+            "hi there", "hey there", "hello there",
+            "thanks", "thank you", "thx", "ty",
+            "ok", "okay", "cool", "nice", "great", "got it", "sounds good",
+            "bye", "goodbye", "see you", "good morning", "good afternoon", "good evening",
+            "how are you", "how's it going", "hows it going", "what's up", "whats up",
+            "who are you", "what can you do"
+        };
+
         // Small self-hosted models have substantially better call accuracy when they see a
         // focused coding surface instead of every possible Git/network/worktree/package
         // operation. Keep core inspection, every normal file-edit primitive, and verification
@@ -83,6 +98,12 @@ namespace Axiom.Core.Agent
         public static bool LooksLikeGitTask(string message) => ContainsAny(message, GitSignalWords);
         public static bool LooksLikeNetworkTask(string message) => ContainsAny(message, NetworkSignalWords);
         public static bool LooksLikeSubagentTask(string message) => ContainsAny(message, SubagentSignalWords);
+
+        public static bool LooksLikeSmallTalk(string? message)
+        {
+            string trimmed = (message ?? string.Empty).Trim().TrimEnd('!', '.', '?', ',');
+            return trimmed.Length > 0 && SmallTalkPhrases.Contains(trimmed);
+        }
 
         private static bool ContainsAny(string message, string[] signals)
         {
@@ -105,6 +126,17 @@ namespace Axiom.Core.Agent
             bool workspaceAttached)
         {
             string message = userMessage ?? string.Empty;
+
+            // A bare greeting/ack has no plausible tool need. Previously an attached workspace
+            // alone was enough to pull in the full write/edit tool belt (10+ JSON schemas) for
+            // *any* message, including "hello" -- on a self-hosted small model that is pure added
+            // prompt size plus pressure (from the system prompt's "always act, never disclaim"
+            // instruction) toward a spurious tool-call attempt for a turn that needs none. Checked
+            // before the workspace-attached broadening below so it still wins even with a folder
+            // locked.
+            if (LooksLikeSmallTalk(message))
+                return tools.Where(t => ShouldKeep(t.Name, false, false, false, false, false)).ToList();
+
             bool looksLikeEdit = CouncilOrchestrator.LooksLikeCodeEditRequest(message) || workspaceAttached;
             bool looksLikeBuildOrRun = LooksLikeBuildOrRunTask(message);
             bool looksLikeGit = LooksLikeGitTask(message);

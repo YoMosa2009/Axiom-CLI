@@ -26,10 +26,23 @@ namespace Axiom.Core.Persistence
         public bool WorkspaceExclusive { get; set; }
         public bool OnboardingComplete { get; set; }
         public HashSet<string> OnboardingStepsDone { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // Absent (0) on every profile saved before this field existed. Used only to run the
+        // one-time CouncilEnabled/WebSearchEnabled migration below exactly once per profile.
+        public int ProfileSchemaVersion { get; set; }
     }
 
     public sealed class UserProfileStore
     {
+        // v1: CouncilEnabled/WebSearchEnabled flipped from true to false as the compiled-in
+        // default (see git history "Council/web-search off by default"). That change only takes
+        // effect for brand-new profiles -- a profile.json saved by any earlier build already has
+        // the literal "CouncilEnabled": true written to disk, and JSON deserialization overwrites
+        // the new C# default with that stored value on every load. Every pre-existing user was
+        // therefore silently stuck running the full Architect/Builder/Critic council (multiple
+        // chained full model generations) for every single message, including a plain "hello" --
+        // on a self-hosted local model this is the dominant cause of "even hello takes forever".
+        private const int CurrentProfileSchemaVersion = 1;
+
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             WriteIndented = true,
@@ -74,7 +87,7 @@ namespace Axiom.Core.Persistence
             string path = Path.Combine(_dir, n + ".json");
             if (!File.Exists(path))
             {
-                var fresh = new UserProfile { Name = n };
+                var fresh = new UserProfile { Name = n, ProfileSchemaVersion = CurrentProfileSchemaVersion };
                 Save(fresh);
                 return fresh;
             }
@@ -85,11 +98,24 @@ namespace Axiom.Core.Persistence
                     ?? new UserProfile { Name = n };
                 p.Name = n;
                 p.OnboardingStepsDone ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                if (p.ProfileSchemaVersion < 1)
+                {
+                    // One-time migration to the new off-by-default behavior -- see
+                    // CurrentProfileSchemaVersion above. Runs once per profile, then persists the
+                    // version marker so a user who deliberately re-enables council/web-search
+                    // afterwards (via /tools or /council) is never overwritten again.
+                    p.CouncilEnabled = false;
+                    p.WebSearchEnabled = false;
+                    p.ProfileSchemaVersion = CurrentProfileSchemaVersion;
+                    Save(p);
+                }
+
                 return p;
             }
             catch
             {
-                return new UserProfile { Name = n };
+                return new UserProfile { Name = n, ProfileSchemaVersion = CurrentProfileSchemaVersion };
             }
         }
 
