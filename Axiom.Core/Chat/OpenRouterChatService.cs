@@ -281,15 +281,16 @@ namespace Axiom.Core.Chat
         // -- it is purely auto-detected or this validated default, never a manually-typed number
         // that can go stale.
         //
-        // 65536 was chosen empirically against Kestral 1's real hardware (GTX 1080, 8GB VRAM) with
-        // full GPU residency (CustomEndpointNumGpuLayers) already forced: 45056/65536/98304 all
-        // measured identical generation speed (~25.8 tok/s) and 100% GPU-resident, but 98304 left
-        // only ~411MB VRAM free and 131072 left ~98MB free with a measured 5x prefill slowdown
-        // (30.7 vs 146 tok/s) -- almost certainly the driver's system-memory-fallback kicking in
-        // under near-zero headroom. 65536 leaves a comfortable ~839MB free under real desktop
-        // conditions (other GPU-using apps included) with zero measured cost, a meaningful increase
-        // over the previous 45056 default with no downside.
-        public const int CustomEndpointContextWindowTokens = 65536;
+        // Chosen empirically against Kestral 1's real hardware (GTX 1080, 8GB VRAM) with full GPU
+        // residency (CustomEndpointNumGpuLayers) already forced: 45056/65536/98304 all measured
+        // identical generation speed (~25.8-28.8 tok/s) and 100% GPU-resident. 131072 was the one
+        // that broke down -- ~98MB free with a measured 5x prefill slowdown (30.7 vs ~120-146
+        // tok/s), almost certainly the driver's system-memory-fallback kicking in under near-zero
+        // headroom -- so that one was rejected. 98304 initially left only ~411MB free; closing
+        // Lively Wallpaper (a background live-wallpaper app that was continuously holding GPU
+        // memory) recovered another ~188MB, landing at a comfortable ~599MB free with zero
+        // measured speed cost. More than double the previous 45056 default's usable context.
+        public const int CustomEndpointContextWindowTokens = 98304;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
         // llama.cpp/Ollama convention: any value >= the model's real layer count offloads every
