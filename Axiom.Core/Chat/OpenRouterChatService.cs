@@ -313,24 +313,23 @@ namespace Axiom.Core.Chat
         public const string CustomEndpointModelId = "custom-endpoint";
         public const string CustomEndpointModelLabel = "Kestral 1";
         // Sent to the server as num_ctx on every request (see BuildChatRequest's isCustomEndpoint
-        // branch) -- this is now the authoritative context window, not just a client-side budgeting
-        // guess. Used
-        // before TryDetectCustomEndpointContextLengthAsync completes, and as its fallback if
-        // detection ever fails. `axiom config` no longer asks for this at all (see RunConfigAsync)
-        // -- it is purely auto-detected or this validated default, never a manually-typed number
-        // that can go stale.
+        // branch) -- this is now the authoritative context window, not just a client-side
+        // budgeting guess. Used before TryDetectCustomEndpointContextLengthAsync completes, and as
+        // its fallback if detection ever fails. `axiom config` no longer asks for this at all (see
+        // RunConfigAsync) -- it is purely auto-detected or this validated default, never a
+        // manually-typed number that can go stale.
         //
         // Chosen empirically against Kestral 1's real hardware (GTX 1080, 8GB VRAM) with full GPU
-        // residency (CustomEndpointNumGpuLayers) already forced, and a duplicate lower-quality
-        // pull of the same model (carstenuhlig/omnicoder-2-9b:latest, Q4_K_M) removed from disk to
-        // remove any ambiguity about which model is actually loaded. 45056/65536/98304/114688 all
-        // measured identical generation speed (~26-29.8 tok/s) and 100% GPU-resident; 114688 held
-        // steady across three repeated runs at ~434MB free. 131072 technically fit (100%
-        // GPU-resident, ~211-434MB free depending on background load) but sits close enough to the
-        // edge that a background app spike previously measured a real 5x prefill slowdown there --
-        // 114688 is the highest value that stayed consistently fast with real margin. More than
-        // double the original 45056 default's usable context.
-        public const int CustomEndpointContextWindowTokens = 114688;
+        // residency (CustomEndpointNumGpuLayers) already forced. From a clean (nothing loaded)
+        // baseline: 122880 measured 100% GPU-resident with ~337-338MB free, holding steady across
+        // three repeated runs with no speed change (~26-29.7 tok/s gen, ~198 tok/s prefill).
+        // 131072 also technically loads but drops to ~227MB free -- tight enough that it
+        // previously measured a real 5x prefill slowdown under background load. 163840 and above
+        // hard-crash the server outright (cudaMalloc failed: out of memory -- llama-server
+        // terminates and the model has to reload from scratch on the next request). 122880 is the
+        // highest value with real, repeatable safety margin -- comfortably more than double the
+        // original 45056 default's usable context.
+        public const int CustomEndpointContextWindowTokens = 122880;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
         // llama.cpp/Ollama convention: any value >= the model's real layer count offloads every
