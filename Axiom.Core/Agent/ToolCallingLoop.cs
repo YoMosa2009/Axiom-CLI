@@ -81,18 +81,23 @@ namespace Axiom.Core.Agent
             int maxRounds = scope == AgentToolExecutor.ToolScope.Inspect
                 ? Math.Min(_maxRounds, 6)
                 : _maxRounds;
-            // The 2,560 ceiling (was 3,072) is deliberately conservative, not scaled up alongside
-            // the recent context-window increases: measured live, a completion that actually used
-            // the full 3,072-token budget took ~120s of real generation time on Kestral's
-            // hardware -- already past the ~100s origin-response window a Cloudflare Tunnel
-            // enforces by default, which is how this self-hosted endpoint is exposed. Going higher
-            // makes a single large tool call (e.g. one big write_file) more likely to blow that
-            // window and fail outright rather than land. [INCREMENTAL WRITES] in
-            // BuildAgentSystemPrompt is the actual fix for large deliverables -- several smaller
-            // calls each comfortably inside the window instead of one call racing the clock.
+            // Was clamped to 2,560 (originally 3,072) specifically to stay under the ~100s
+            // origin-response window a Cloudflare Tunnel enforces on this self-hosted endpoint --
+            // that ceiling directly caused a real failure: a write_file call whose content needed
+            // more tokens than the budget got cut off mid-generation, and llama-server correctly
+            // rejected the resulting truncated JSON ("unexpected end of JSON input"). That's a
+            // deterministic budget failure, not a transient one -- retrying the identical request
+            // hits the identical wall every time. The premise for keeping this low is gone now:
+            // custom-endpoint requests go through the proxy's real /v1/chat/completions, which
+            // sends a heartbeat every 15s while a tool call assembles silently server-side,
+            // confirmed live to keep a 100+ second generation alive without incident. 8,192 gives
+            // real headroom for a substantial single file (was cutting off content that needed as
+            // little as ~2,600 tokens) while still leaving the vast majority of a 114688+-token
+            // context window for prompt/history. [INCREMENTAL WRITES] in BuildAgentSystemPrompt
+            // remains the guidance for anything larger than even this comfortably covers.
             int? maxTokensOverride = gateForCustomEndpoint
                 ? scope == AgentToolExecutor.ToolScope.Full
-                    ? Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 4, 1_024, 2_560)
+                    ? Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 4, 1_024, 8_192)
                     : Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 6, 768, 1_536)
                 : null;
 
