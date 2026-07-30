@@ -828,6 +828,7 @@ internal static class ChatInput
             new("map", "map", "Show repo map", false, null, "slash"),
             new("council", "council", "Council depth/severity/roles settings", false, null, "slash"),
             new("mode", "mode", "Set approval: auto | ask | plan", false, null, "slash"),
+            new("effort", "effort", "Kestral 1 effort: low | medium | high | max", false, null, "slash"),
             new("continue", "continue", "Resume last task after stop/error", false, null, "slash"),
             new("rename", "rename", "Name this session", false, null, "slash"),
             new("export", "export", "Export transcript as markdown", false, null, "slash"),

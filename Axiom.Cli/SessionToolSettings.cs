@@ -15,6 +15,10 @@ internal sealed class SessionToolSettings
     /// <summary>Auto | Ask | Plan — how freely tools may mutate the workspace.</summary>
     public ApprovalMode ApprovalMode { get; set; } = ApprovalMode.Auto;
 
+    /// <summary>Low | Medium | High | Max — Kestral 1's per-turn reasoning/round/token budget.
+    /// Has no effect on Eidos 1 / Hepha 1; see EffortLevel.cs.</summary>
+    public EffortLevel EffortLevel { get; set; } = EffortLevel.Medium;
+
     public CriticSeverityPolicy CriticSeverity { get; set; } = CriticSeverityPolicy.Strict;
     public bool ParallelExplore { get; set; } = true;
     public bool UserInLoopCritic { get; set; }
@@ -35,6 +39,16 @@ internal sealed class SessionToolSettings
         ApprovalMode.Plan => "plan",
         _ => "auto"
     };
+
+    public string EffortLabel => EffortPolicy.Label(EffortLevel);
+
+    public bool TrySetEffort(string name)
+    {
+        if (!EffortPolicy.TryParse(name, out EffortLevel level))
+            return false;
+        EffortLevel = level;
+        return true;
+    }
 
     public string CouncilLabel
     {

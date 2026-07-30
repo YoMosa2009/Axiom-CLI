@@ -485,6 +485,8 @@ internal static class Program
         session.Tools.SandboxEnabled = profile.SandboxEnabled;
         session.Tools.CalculatorEnabled = profile.CalculatorEnabled;
         session.Tools.ApprovalMode = UserProfileStore.ParseApproval(profile.ApprovalMode);
+        EffortPolicy.TryParse(profile.EffortLevel, out EffortLevel effortLevel);
+        session.Tools.EffortLevel = effortLevel;
         session.KestralMemoryDir = profile.KestralMemoryDir;
         session.KestralMemoryByteBudget = profile.KestralMemoryByteBudget;
         session.ApplyToolSettings();
@@ -1001,6 +1003,23 @@ internal static class Program
                     Say("  ask  — confirm each write/shell/download");
                     Say("  plan — no mutations; tools return Plan-only previews");
                     Say("Set: /mode ask   ·   Cycle: Ctrl+Shift+M");
+                }
+                return true;
+            }
+
+            case "/effort":
+            {
+                if (parts.Length >= 2 && session.Tools.TrySetEffort(parts[1]))
+                {
+                    Say($"Kestral 1 effort → {session.Tools.EffortLabel}  ({EffortPolicy.Description(session.Tools.EffortLevel)})");
+                }
+                else if (parts.Length >= 2)
+                {
+                    Say($"Unknown effort level: {parts[1]}  ·  use low | medium | high | max");
+                }
+                else
+                {
+                    tui.OpenEffortPicker();
                 }
                 return true;
             }

@@ -14,6 +14,9 @@ namespace Axiom.Core.Persistence
         public string? DefaultModelId { get; set; }
         public string? DefaultModelLabel { get; set; }
         public string ApprovalMode { get; set; } = "auto";
+        // Kestral 1's effort tier (low | medium | high | max) -- see EffortLevel.cs. No effect on
+        // Eidos 1 / Hepha 1.
+        public string EffortLevel { get; set; } = "medium";
         public bool CouncilEnabled { get; set; }
         public bool WebSearchEnabled { get; set; }
         public bool SandboxEnabled { get; set; }

@@ -28,19 +28,22 @@ namespace Axiom.Core.Agent
         private readonly WorkspaceSession _workspace;
         private readonly string _modelId;
         private readonly KestralMemoryStore? _kestralMemory;
+        private readonly EffortLevel _effort;
 
         public AgentLoop(
             OpenRouterChatService chat,
             AgentToolExecutor tools,
             WorkspaceSession workspace,
             string modelId,
-            KestralMemoryStore? kestralMemory = null)
+            KestralMemoryStore? kestralMemory = null,
+            EffortLevel effort = EffortLevel.Medium)
         {
             _chat = chat;
             _tools = tools;
             _workspace = workspace;
             _modelId = modelId;
             _kestralMemory = kestralMemory;
+            _effort = effort;
         }
 
         public async Task<AgentTurnResult> RunAsync(
@@ -123,9 +126,11 @@ namespace Axiom.Core.Agent
 
             // Compact history for long sessions. Custom-endpoint thresholds scale to Kestral's
             // real (now much larger) window instead of the fixed ceiling tuned for cloud models --
-            // see ConversationCompactor.Compact -- and keep more recent messages verbatim (16 vs
-            // 8) since the bigger window affords it, preserving more usable detail before
-            // summarization kicks in.
+            // see ConversationCompactor.Compact -- and keep more recent messages verbatim since the
+            // bigger window affords it, preserving more usable detail before summarization kicks
+            // in. How many is now effort-tiered (EffortPolicy.KeepRecentMessages): Low compacts
+            // sooner to keep turns fast, Max keeps the most detail in view at the cost of a larger
+            // prompt.
             int contextWindow = _chat.GetApproximateContextWindowTokens(_modelId);
             int preTokens = _chat.EstimateConversationTokens(history, system);
             var compact = ConversationCompactor.Compact(
@@ -133,7 +138,7 @@ namespace Axiom.Core.Agent
                 preTokens,
                 contextWindow,
                 scaleThresholdsToWindow: isCustomEndpoint,
-                keepRecentMessagesOverride: isCustomEndpoint ? 16 : null);
+                keepRecentMessagesOverride: isCustomEndpoint ? EffortPolicy.KeepRecentMessages(_effort) : null);
             // Always apply trim; replace list when compacted or tool-spam was stripped.
             if (compact.Compacted || compact.Messages.Count != history.Count)
             {
@@ -218,7 +223,8 @@ namespace Axiom.Core.Agent
                     onToken: onToken,
                     gateForCustomEndpoint: isCustomEndpoint,
                     gatingMessage: userMessage,
-                    conversationHistory: history);
+                    conversationHistory: history,
+                    effort: _effort);
 
                 finalText = result.FinalText;
                 toolCalls = result.ToolCallCount;

@@ -70,6 +70,8 @@ internal sealed class ChatTui : IDisposable
     private int _paletteIndex;
     private bool _sessionPickerOpen;
     private int _sessionPickerIndex;
+    private bool _effortPickerOpen;
+    private int _effortPickerIndex;
     private string? _sessionTitle; // custom name from /rename
     private string? _lastUserTask; // for /continue
     private string _profileName = "default";
@@ -213,6 +215,7 @@ internal sealed class ChatTui : IDisposable
         _sessionPickerOpen = true;
         _sessionPickerIndex = 0;
         _paletteOpen = false;
+        _effortPickerOpen = false;
     }
 
     public void OpenCommandPalette()
@@ -220,6 +223,17 @@ internal sealed class ChatTui : IDisposable
         _paletteOpen = true;
         _paletteQuery = string.Empty;
         _paletteIndex = 0;
+        _sessionPickerOpen = false;
+        _effortPickerOpen = false;
+    }
+
+    public void OpenEffortPicker()
+    {
+        if (_session == null)
+            return;
+        _effortPickerOpen = true;
+        _effortPickerIndex = (int)_session.Tools.EffortLevel;
+        _paletteOpen = false;
         _sessionPickerOpen = false;
     }
 
@@ -558,6 +572,9 @@ internal sealed class ChatTui : IDisposable
 
         if (_sessionPickerOpen)
             return await HandleSessionPickerKeyAsync(key);
+
+        if (_effortPickerOpen)
+            return await HandleEffortPickerKeyAsync(key);
 
         // Mouse wheel / incomplete ESC sequences (SGR mouse) when mouse tracking is on.
         if (TryConsumeMouseWheel(key, out int wheelDelta))
@@ -1854,6 +1871,7 @@ internal sealed class ChatTui : IDisposable
             _profile.DefaultModelId = _session.ModelId;
             _profile.DefaultModelLabel = _session.ModelLabel;
             _profile.ApprovalMode = UserProfileStore.FormatApproval(_session.Tools.ApprovalMode);
+            _profile.EffortLevel = EffortPolicy.Label(_session.Tools.EffortLevel);
             _profile.CouncilEnabled = _session.Tools.CouncilEnabled;
             _profile.WebSearchEnabled = _session.Tools.WebSearchEnabled;
             _profile.SandboxEnabled = _session.Tools.SandboxEnabled;
@@ -1964,6 +1982,11 @@ internal sealed class ChatTui : IDisposable
             OpenSessionPicker();
             return;
         }
+        if (action == "__effort_picker__")
+        {
+            OpenEffortPicker();
+            return;
+        }
         if (action == "/exit" || action.Equals("exit", StringComparison.OrdinalIgnoreCase))
         {
             _running = false;
@@ -1980,6 +2003,7 @@ internal sealed class ChatTui : IDisposable
             }
             await _handleSlash(action.Trim(), _session);
             if (action.StartsWith("/mode", StringComparison.OrdinalIgnoreCase)
+                || action.StartsWith("/effort", StringComparison.OrdinalIgnoreCase)
                 || action.StartsWith("/tools", StringComparison.OrdinalIgnoreCase)
                 || action.StartsWith("/model", StringComparison.OrdinalIgnoreCase))
                 PersistProfileFromSession();
@@ -2037,6 +2061,44 @@ internal sealed class ChatTui : IDisposable
         return true;
     }
 
+    private static readonly EffortLevel[] EffortPickerLevels =
+        [EffortLevel.Low, EffortLevel.Medium, EffortLevel.High, EffortLevel.Max];
+
+    private async Task<bool> HandleEffortPickerKeyAsync(ConsoleKeyInfo key)
+    {
+        if (_session == null)
+        {
+            _effortPickerOpen = false;
+            return true;
+        }
+        if (key.Key == ConsoleKey.Escape)
+        {
+            _effortPickerOpen = false;
+            return true;
+        }
+        if (key.Key == ConsoleKey.UpArrow)
+        {
+            _effortPickerIndex = (_effortPickerIndex - 1 + EffortPickerLevels.Length) % EffortPickerLevels.Length;
+            return true;
+        }
+        if (key.Key == ConsoleKey.DownArrow)
+        {
+            _effortPickerIndex = (_effortPickerIndex + 1) % EffortPickerLevels.Length;
+            return true;
+        }
+        if (key.Key == ConsoleKey.Enter)
+        {
+            EffortLevel chosen = EffortPickerLevels[Math.Clamp(_effortPickerIndex, 0, EffortPickerLevels.Length - 1)];
+            _effortPickerOpen = false;
+            _session.Tools.EffortLevel = chosen;
+            PersistProfileFromSession();
+            PushSystem($"Kestral 1 effort → {EffortPolicy.Label(chosen)}  ({EffortPolicy.Description(chosen)})");
+            return true;
+        }
+        await Task.CompletedTask;
+        return true;
+    }
+
     private void PaintCommandPalette(string[] rows, int top, int height, int w)
     {
         var items = CommandPalette.Filter(CommandPalette.BuildCore(), _paletteQuery);
@@ -2085,6 +2147,28 @@ internal sealed class ChatTui : IDisposable
             bool active = from + i == sel;
             bool cur = string.Equals(item.Id, _sessionId, StringComparison.OrdinalIgnoreCase);
             string line = $" {(active ? "❯" : " ")} {from + i + 1,2}. {item.Title}  ·  {item.UpdatedAt.ToLocalTime():g}"
+                + (cur ? "  ← current" : "");
+            rows[row] = (active ? Ansi.Fg(AxiomTheme.Gold) : Ansi.Fg(AxiomTheme.TextSecondary))
+                + Ansi.ClipPad(line, w) + Ansi.Reset;
+        }
+    }
+
+    private void PaintEffortPicker(string[] rows, int top, int height, int w)
+    {
+        rows[top] = Ansi.Fg(AxiomTheme.Gold) + Ansi.Bold
+            + Ansi.ClipPad(" ⚡ Kestral 1 effort  ·  Enter set  ·  Esc cancel", w) + Ansi.Reset;
+        if (_session == null)
+            return;
+        int sel = Math.Clamp(_effortPickerIndex, 0, EffortPickerLevels.Length - 1);
+        for (int i = 0; i < EffortPickerLevels.Length; i++)
+        {
+            int row = top + 1 + i;
+            if (row >= rows.Length)
+                break;
+            EffortLevel level = EffortPickerLevels[i];
+            bool active = i == sel;
+            bool cur = level == _session.Tools.EffortLevel;
+            string line = $" {(active ? "❯" : " ")} {EffortPolicy.Label(level),-6}  {EffortPolicy.Description(level)}"
                 + (cur ? "  ← current" : "");
             rows[row] = (active ? Ansi.Fg(AxiomTheme.Gold) : Ansi.Fg(AxiomTheme.TextSecondary))
                 + Ansi.ClipPad(line, w) + Ansi.Reset;
@@ -2217,6 +2301,17 @@ internal sealed class ChatTui : IDisposable
                 + Ansi.ClipPad(" Sessions · ↑↓ · Enter load · d delete · Esc close ", w) + Ansi.Reset;
             int boxTopS = h - inputH;
             PaintInputBox(rows, boxTopS, w, model, ctx);
+            _screen.Paint(rows);
+            return;
+        }
+        if (_effortPickerOpen)
+        {
+            PaintEffortPicker(rows, headerH, viewportH, w);
+            int activityRowE = headerH + viewportH;
+            rows[activityRowE] = Ansi.Fg(AxiomTheme.SystemMuted)
+                + Ansi.ClipPad(" Kestral 1 effort · ↑↓ · Enter set · Esc close ", w) + Ansi.Reset;
+            int boxTopE = h - inputH;
+            PaintInputBox(rows, boxTopE, w, model, ctx);
             _screen.Paint(rows);
             return;
         }
@@ -2585,9 +2680,9 @@ internal sealed class ChatTui : IDisposable
         }
 
         // Commands that should run immediately (this was the /help bug: it only filled the buffer).
-        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse" or "delete" or "undo" or "mode"
+        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse" or "delete" or "undo" or "mode" or "effort"
             or "continue" or "export" or "pick")
-            return pick.Id == "mode" ? "/mode" : pick.Id == "rename" ? "/rename " : "/" + pick.Id;
+            return pick.Id == "mode" ? "/mode" : pick.Id == "effort" ? "/effort" : pick.Id == "rename" ? "/rename " : "/" + pick.Id;
         if (pick.Id == "rename")
             return "/rename ";
 

@@ -38,7 +38,9 @@ namespace Axiom.Core.Agent
             _chat = chat ?? throw new ArgumentNullException(nameof(chat));
             _tools = tools ?? throw new ArgumentNullException(nameof(tools));
             _modelId = modelId;
-            _maxRounds = Math.Clamp(maxRounds, 1, 24);
+            // Raised from 24 to fit EffortPolicy.MaxRounds's Max tier (30) -- callers that don't
+            // pass an effort-driven value still get their own explicit maxRounds unchanged.
+            _maxRounds = Math.Clamp(maxRounds, 1, 40);
         }
 
         public async Task<ToolCallingResult> RunAsync(
@@ -51,7 +53,8 @@ namespace Axiom.Core.Agent
             Action<string>? onToken = null,
             bool gateForCustomEndpoint = false,
             string? gatingMessage = null,
-            IReadOnlyList<OpenRouterMessage>? conversationHistory = null)
+            IReadOnlyList<OpenRouterMessage>? conversationHistory = null,
+            EffortLevel effort = EffortLevel.Medium)
         {
             // Keep the active conversation in the actual model message list. Previously callers
             // compacted history, but ToolCallingLoop discarded it and sent only the latest assembled
@@ -78,9 +81,17 @@ namespace Axiom.Core.Agent
             int malformedToolCallRecoveries = 0;
             int capabilityDenialRecoveries = 0;
             int consecutiveBlockedRounds = 0;
-            int maxRounds = scope == AgentToolExecutor.ToolScope.Inspect
-                ? Math.Min(_maxRounds, 6)
+            // EffortPolicy only overrides the round budget for Kestral's own primary Full-scope
+            // turn (gateForCustomEndpoint is only set true there) -- Council/subagent contexts keep
+            // whatever explicit maxRounds their own call site already passed to the constructor.
+            // Medium's value equals the pre-effort DefaultMaxRounds exactly, so a caller that never
+            // passes an effort argument (everything except AgentLoop's main path) is unaffected.
+            int effectiveMaxRounds = gateForCustomEndpoint && scope == AgentToolExecutor.ToolScope.Full
+                ? EffortPolicy.MaxRounds(effort)
                 : _maxRounds;
+            int maxRounds = scope == AgentToolExecutor.ToolScope.Inspect
+                ? Math.Min(effectiveMaxRounds, 6)
+                : effectiveMaxRounds;
             // Was clamped to 2,560 (originally 3,072) specifically to stay under the ~100s
             // origin-response window a Cloudflare Tunnel enforces on this self-hosted endpoint --
             // that ceiling directly caused a real failure: a write_file call whose content needed
@@ -90,16 +101,17 @@ namespace Axiom.Core.Agent
             // hits the identical wall every time. The premise for keeping this low is gone now:
             // custom-endpoint requests go through the proxy's real /v1/chat/completions, which
             // sends a heartbeat every 15s while a tool call assembles silently server-side,
-            // confirmed live to keep a 100+ second generation alive without incident. 8,192 gives
-            // real headroom for a substantial single file (was cutting off content that needed as
-            // little as ~2,600 tokens) while still leaving the vast majority of a 131072-token
-            // context window for prompt/history. [INCREMENTAL WRITES] in BuildAgentSystemPrompt
-            // remains the guidance for anything larger than even this comfortably covers.
+            // confirmed live to keep a 100+ second generation alive without incident. EffortPolicy's
+            // Medium tier (8,192) matches this comfortably-validated default; higher tiers scale up
+            // from there but deliberately stay well short of the 131,072-token context ceiling --
+            // see EffortLevel.cs for why. [INCREMENTAL WRITES] in BuildAgentSystemPrompt remains the
+            // guidance for anything larger than even the Max tier comfortably covers.
             int? maxTokensOverride = gateForCustomEndpoint
                 ? scope == AgentToolExecutor.ToolScope.Full
-                    ? Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 4, 1_024, 8_192)
+                    ? Math.Clamp(EffortPolicy.MaxTokens(effort), 1_024, EffortPolicy.MaxTokens(EffortLevel.Max))
                     : Math.Clamp(_chat.GetApproximateContextWindowTokens(_modelId) / 6, 768, 1_536)
                 : null;
+            bool thinkingEnabledForTurn = gateForCustomEndpoint && EffortPolicy.ThinkEnabled(effort);
 
             for (int round = 0; round < maxRounds; round++)
             {
@@ -115,7 +127,7 @@ namespace Axiom.Core.Agent
                 OpenRouterChatResponse response = await _chat.SendConversationStreamAsync(
                     turnMessages,
                     systemPrompt,
-                    thinkingEnabled: false,
+                    thinkingEnabled: thinkingEnabledForTurn,
                     modelId: _modelId,
                     tools: toolDefs,
                     onToken: token =>
@@ -239,7 +251,7 @@ namespace Axiom.Core.Agent
                         OpenRouterChatResponse finalResponse = await _chat.SendConversationStreamAsync(
                             turnMessages,
                             systemPrompt,
-                            thinkingEnabled: false,
+                            thinkingEnabled: thinkingEnabledForTurn,
                             modelId: _modelId,
                             tools: null,
                             onToken: token =>

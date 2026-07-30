@@ -50,7 +50,7 @@ internal sealed class ChatSession
     public AgentLoop CreateAgent()
     {
         ApplyToolSettings();
-        return new AgentLoop(ChatService, ToolExecutor, Workspace, ModelId, ResolveKestralMemory());
+        return new AgentLoop(ChatService, ToolExecutor, Workspace, ModelId, ResolveKestralMemory(), Tools.EffortLevel);
     }
 
     public CouncilOrchestrator CreateCouncil()

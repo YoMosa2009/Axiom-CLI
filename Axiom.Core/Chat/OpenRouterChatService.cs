@@ -1002,7 +1002,7 @@ namespace Axiom.Core.Chat
             if (requestedModelProfile.IsCustomEndpoint)
             {
                 return await SendCustomEndpointChatAsync(
-                    messages, systemPrompt, effectiveModelId, temperature, topP, maxCompletionTokens,
+                    messages, systemPrompt, effectiveModelId, thinkingEnabled, temperature, topP, maxCompletionTokens,
                     tools, cancellationToken, estimatedPromptTokens);
             }
 
@@ -1180,7 +1180,7 @@ namespace Axiom.Core.Chat
             if (requestedModelProfile.IsCustomEndpoint)
             {
                 return await SendCustomEndpointChatStreamAsync(
-                    messages, systemPrompt, effectiveModelId, temperature, topP, maxCompletionTokens,
+                    messages, systemPrompt, effectiveModelId, thinkingEnabled, temperature, topP, maxCompletionTokens,
                     tools, onToken, cancellationToken, stopSequences, estimatedPromptTokens);
             }
 
@@ -1606,16 +1606,15 @@ namespace Axiom.Core.Chat
             };
 
             // Custom-endpoint requests go through our own proxy's /v1/chat/completions (not raw
-            // Ollama's OpenAI-compatibility shim) -- see the proxy's own app.py for why: it already
-            // translates think:false and the tool-call argument shape server-side, and its
-            // /v1/chat/completions route has a heartbeat that raw Ollama's endpoint does not,
-            // which is what actually keeps a long silent tool-call generation from tripping
-            // Cloudflare's origin-response timeout (a native /api/chat request bypassed that
-            // route entirely and hit the proxy's dumb passthrough instead -- confirmed live as the
-            // real cause of repeated "[Kestral connection interrupted]"/524s). These extra fields
-            // are read by the proxy's _native_options_from_openai/native_payload and forwarded
-            // into Ollama's native request options so the client-side VRAM/context tuning still
-            // takes effect despite going through the OpenAI-shaped route.
+            // Ollama's OpenAI-compatibility shim) -- see the proxy's own app.py for why: its
+            // /v1/chat/completions route has a heartbeat that raw Ollama's endpoint does not, which
+            // is what actually keeps a long silent tool-call generation from tripping Cloudflare's
+            // origin-response timeout (a native /api/chat request bypassed that route entirely and
+            // hit the proxy's dumb passthrough instead -- confirmed live as the real cause of
+            // repeated "[Kestral connection interrupted]"/524s). These extra fields are read by the
+            // proxy's _native_options_from_openai/native_payload and forwarded into Ollama's native
+            // request options so the client-side VRAM/context/reasoning tuning still takes effect
+            // despite going through the OpenAI-shaped route.
             if (isCustomEndpoint)
             {
                 if (_customEndpointContextWindowTokens > 0)
@@ -1623,6 +1622,12 @@ namespace Axiom.Core.Chat
                 payload["top_k"] = CustomEndpointTopK;
                 payload["num_gpu"] = CustomEndpointNumGpuLayers;
                 payload["keep_alive"] = CustomEndpointKeepAlive;
+                // Effort mode's reasoning toggle (EffortPolicy.ThinkEnabled). The proxy used to
+                // hardcode think:false unconditionally as a workaround for Ollama's OpenAI-compat
+                // shim silently ignoring the field -- it now reads this instead and forwards
+                // whatever value we send into Ollama's native `think` option, so it's under real
+                // per-turn control instead of being permanently off.
+                payload["think"] = thinkingEnabled;
             }
 
             if (SupportsParameter(modelId, "temperature"))
@@ -1639,7 +1644,8 @@ namespace Axiom.Core.Chat
             // Sending reasoning:{effort:"low"} on every request causes providers that don't
             // support the field to reject the request with an immediate "Provider returned error".
             // SupportsParameter already returns false for "reasoning" on the custom-endpoint model
-            // id (the proxy hardcodes think:false itself instead), so this block is naturally a
+            // id (Kestral's own reasoning toggle is the separate `think` field set above instead,
+            // which the proxy translates into Ollama's native option), so this block is naturally a
             // no-op there without needing its own isCustomEndpoint check.
             if (thinkingEnabled && SupportsParameter(modelId, "reasoning"))
             {
@@ -1676,11 +1682,13 @@ namespace Axiom.Core.Chat
 
         // NOTE: an earlier version of this class talked directly to Ollama's native /api/chat for
         // the custom endpoint (BuildOllamaNativeChatRequest, now removed), because Ollama's OWN
-        // OpenAI-compatibility shim silently ignores every way to disable "thinking" mode. That
-        // requirement is now handled server-side instead: the user's own proxy in front of Ollama
-        // (not raw Ollama itself) exposes a real /v1/chat/completions that hardcodes think:false
-        // and translates tool-call argument shapes both ways before forwarding to Ollama's native
-        // endpoint. Talking to /api/chat directly bypassed that proxy's route entirely and landed
+        // OpenAI-compatibility shim silently ignores every way to control "thinking" mode (a
+        // known, still-open Ollama bug as of 2026 -- ollama/ollama#14820/#14821). That requirement
+        // is handled server-side instead: the user's own proxy in front of Ollama (not raw Ollama
+        // itself) exposes a real /v1/chat/completions that reads the `think` field from this
+        // request and forwards it into Ollama's native option, plus translates tool-call argument
+        // shapes both ways before forwarding to Ollama's native endpoint. Talking to /api/chat
+        // directly bypassed that proxy's route entirely and landed
         // on its dumb catch-all passthrough instead, which has no heartbeat -- confirmed live as
         // the actual cause of repeated stream interruptions/524s on long tool-call generations
         // (the proxy's /v1/chat/completions route sends periodic SSE keep-alive comments while a
@@ -1692,6 +1700,7 @@ namespace Axiom.Core.Chat
             List<OpenRouterMessage> messages,
             string systemPrompt,
             string modelId,
+            bool thinkingEnabled,
             double temperature,
             double topP,
             int maxTokens,
@@ -1704,7 +1713,7 @@ namespace Axiom.Core.Chat
             for (int retryAttempt = 0; ; retryAttempt++)
             {
                 using var request = BuildChatRequest(
-                    messages, systemPrompt, modelId, thinkingEnabled: false, temperature, topP, maxTokens, tools,
+                    messages, systemPrompt, modelId, thinkingEnabled, temperature, topP, maxTokens, tools,
                     stream: false, stopSequences: null, isCustomEndpoint: true);
                 using HttpResponseMessage response = await CustomEndpointHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 statusCode = response.StatusCode;
@@ -1748,6 +1757,7 @@ namespace Axiom.Core.Chat
             List<OpenRouterMessage> messages,
             string systemPrompt,
             string modelId,
+            bool thinkingEnabled,
             double temperature,
             double topP,
             int maxTokens,
@@ -1760,7 +1770,7 @@ namespace Axiom.Core.Chat
             for (int streamRetryAttempt = 0; ; streamRetryAttempt++)
             {
                 OpenRouterChatResponse attempt = await SendCustomEndpointChatStreamOnceAsync(
-                    messages, systemPrompt, modelId, temperature, topP, maxTokens, tools, onToken,
+                    messages, systemPrompt, modelId, thinkingEnabled, temperature, topP, maxTokens, tools, onToken,
                     cancellationToken, stopSequences, estimatedPromptTokens);
 
                 if (!attempt.StreamInterrupted || streamRetryAttempt >= CustomEndpointStreamInterruptionRetryLimit)
@@ -1774,6 +1784,7 @@ namespace Axiom.Core.Chat
             List<OpenRouterMessage> messages,
             string systemPrompt,
             string modelId,
+            bool thinkingEnabled,
             double temperature,
             double topP,
             int maxTokens,
@@ -1788,7 +1799,7 @@ namespace Axiom.Core.Chat
             {
                 response?.Dispose();
                 using var request = BuildChatRequest(
-                    messages, systemPrompt, modelId, thinkingEnabled: false, temperature, topP, maxTokens, tools,
+                    messages, systemPrompt, modelId, thinkingEnabled, temperature, topP, maxTokens, tools,
                     stream: true, stopSequences, isCustomEndpoint: true);
                 response = await CustomEndpointHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.OK)
