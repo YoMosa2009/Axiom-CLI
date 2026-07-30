@@ -44,7 +44,7 @@ when a newer version is available.
 | Command | What it does |
 |---|---|
 | `axiom [--model <id>]` | Full-window TUI chat (default). `/` tools · `@` lock folder · `/help` |
-| `axiom config` | Store your OpenRouter API key and/or a self-hosted endpoint (encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
+| `axiom config` | Store your OpenRouter API key, a self-hosted endpoint, and/or a [Tavily](https://tavily.com) API key for reliable `web_search` (all encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
 | `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
 | `axiom update` | Download and install the latest release for your platform |
 

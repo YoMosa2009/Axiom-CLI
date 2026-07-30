@@ -12,6 +12,7 @@ namespace Axiom.Core.Persistence
     {
         private const string OpenRouterApiKeySettingKey = "openrouter_api_key";
         private const string CustomEndpointApiKeySettingKey = "custom_endpoint_api_key";
+        private const string TavilyApiKeySettingKey = "tavily_api_key";
         public const string CustomEndpointBaseUrlSettingKey = "custom_endpoint_base_url";
         public const string CustomEndpointModelIdSettingKey = "custom_endpoint_model_id";
         private readonly SqliteConnection _connection;
@@ -354,6 +355,45 @@ namespace Axiom.Core.Persistence
                 Debug.WriteLine($"LoadCustomEndpointApiKey error: {ex.Message}");
                 _ = BackendLogService.LogErrorAsync("DatabaseService.LoadCustomEndpointApiKey", ex);
                 return TryLoadBackupSecret(CustomEndpointApiKeySettingKey);
+            }
+        }
+
+        public void SaveTavilyApiKey(string apiKey)
+        {
+            try
+            {
+                string normalized = (apiKey ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(normalized))
+                {
+                    SaveSetting(TavilyApiKeySettingKey, string.Empty);
+                    return;
+                }
+
+                SaveSetting(TavilyApiKeySettingKey, _secretStore.Protect(normalized));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"SaveTavilyApiKey error: {ex.Message}");
+                _ = BackendLogService.LogErrorAsync("DatabaseService.SaveTavilyApiKey", ex);
+            }
+        }
+
+        public string? LoadTavilyApiKey()
+        {
+            try
+            {
+                string stored = GetSetting(TavilyApiKeySettingKey);
+                if (string.IsNullOrWhiteSpace(stored))
+                    return null;
+
+                string decryptedKey = _secretStore.Unprotect(stored).Trim();
+                return string.IsNullOrWhiteSpace(decryptedKey) ? null : decryptedKey;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"LoadTavilyApiKey error: {ex.Message}");
+                _ = BackendLogService.LogErrorAsync("DatabaseService.LoadTavilyApiKey", ex);
+                return TryLoadBackupSecret(TavilyApiKeySettingKey);
             }
         }
 

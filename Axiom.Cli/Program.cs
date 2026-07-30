@@ -241,6 +241,19 @@ internal static class Program
         }
 
         AnsiConsole.WriteLine();
+        string? existingTavilyKey = db.LoadTavilyApiKey();
+        if (!string.IsNullOrWhiteSpace(existingTavilyKey))
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]A Tavily search key is already configured (ending in ...{Last4(existingTavilyKey)}).[/]");
+
+        AnsiConsole.Markup($"Enter your [{AxiomTheme.Hex(AxiomTheme.Gold)}]Tavily API key[/] (from tavily.com — makes web_search reliable instead of scraping; optional, leave blank to skip): ");
+        string tavilyKeyInput = ReadLineSecret() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(tavilyKeyInput))
+        {
+            db.SaveTavilyApiKey(tavilyKeyInput);
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Tavily key saved — web_search will use it from your next session.[/]");
+        }
+
+        AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"[bold]Self-hosted endpoint[/] [{AxiomTheme.Hex(AxiomTheme.SystemMuted)}](optional — leave any field blank to skip)[/]");
 
         string existingBaseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
@@ -352,6 +365,8 @@ internal static class Program
 
         bool savedAnything = !string.IsNullOrWhiteSpace(apiKey)
             || !string.IsNullOrWhiteSpace(existingOpenRouterKey)
+            || !string.IsNullOrWhiteSpace(tavilyKeyInput)
+            || !string.IsNullOrWhiteSpace(existingTavilyKey)
             || configuredCustomEndpoint
             || !string.IsNullOrWhiteSpace(existingBaseUrl);
         if (!savedAnything)

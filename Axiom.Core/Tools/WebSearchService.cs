@@ -4,11 +4,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using Axiom.Core.Persistence;
 using HtmlAgilityPack;
 
 namespace Axiom.Core.Tools
@@ -35,6 +39,25 @@ namespace Axiom.Core.Tools
         private static readonly Regex WhitespaceRegex = new(@"\s+", RegexOptions.Compiled);
         private static readonly HttpClient Http = CreateHttpClient();
         private static readonly ConcurrentDictionary<string, (string Data, DateTimeOffset SavedAt)> SearchCache = new(StringComparer.OrdinalIgnoreCase);
+
+        // Loaded once per process from the encrypted setting axiom config writes (see
+        // DatabaseService.SaveTavilyApiKey/RunConfigAsync) -- same "requires a fresh session to
+        // pick up a newly-saved key" tradeoff as the OpenRouter/custom-endpoint credentials already
+        // have, so this doesn't need its own re-read-on-every-search plumbing.
+        private static readonly Lazy<string?> TavilyApiKeyLazy = new(LoadTavilyApiKeyFromStore);
+
+        private static string? LoadTavilyApiKeyFromStore()
+        {
+            try
+            {
+                using var db = new DatabaseService();
+                return db.IsReady ? db.LoadTavilyApiKey() : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
         private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
         {
             "a","an","and","are","as","at","be","but","by","can","could","do","does","for","from","had","has","have","help","how",
@@ -418,6 +441,15 @@ namespace Axiom.Core.Tools
             var providers = new List<Func<string, CancellationToken, Task<List<SearchResult>>>>();
             if (intent.News)
                 providers.Add(SearchGoogleNewsRssAsync);
+
+            // Tavily is a real, official, key-authenticated search API purpose-built for AI
+            // agents -- when configured, it's the most reliable source here by far (the others are
+            // free scraped/RSS endpoints subject to markup changes and, on this network specifically,
+            // DuckDuckGo being entirely unreachable). It doesn't replace the others: it runs
+            // alongside them so a Tavily outage or rate limit still leaves working fallbacks.
+            bool news = intent.News;
+            if (!string.IsNullOrWhiteSpace(TavilyApiKeyLazy.Value))
+                providers.Add((q, tok) => SearchTavilyAsync(q, news, tok));
 
             providers.Add(SearchDuckDuckGoAsync);
             providers.Add(SearchBingRssAsync);
@@ -1300,6 +1332,73 @@ namespace Axiom.Core.Tools
             ];
 
             return markers.Any(lower.Contains);
+        }
+
+        // https://docs.tavily.com/documentation/api-reference/endpoint/search -- a real,
+        // key-authenticated REST API built for AI-agent search, as opposed to the other providers
+        // here, which are all free scraped HTML/RSS endpoints with no support contract or uptime
+        // guarantee. "content" in the response is already a cleaned, human-readable summary (not raw
+        // HTML), so it slots directly into SearchResult.Snippet without needing HTML extraction.
+        private static async Task<List<SearchResult>> SearchTavilyAsync(string query, bool news, CancellationToken token)
+        {
+            string? apiKey = TavilyApiKeyLazy.Value;
+            if (string.IsNullOrWhiteSpace(apiKey))
+                return new List<SearchResult>();
+
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.tavily.com/search");
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                request.Content = JsonContent.Create(new
+                {
+                    query,
+                    search_depth = "basic",
+                    max_results = MaxResultsPerQuery,
+                    topic = news ? "news" : "general"
+                });
+
+                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                    return new List<SearchResult>();
+
+                string json = await ReadContentAsStringBoundedAsync(response.Content, MaxSearchPayloadChars, token).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(json))
+                    return new List<SearchResult>();
+
+                using JsonDocument doc = JsonDocument.Parse(json);
+                if (!doc.RootElement.TryGetProperty("results", out JsonElement resultsElement)
+                    || resultsElement.ValueKind != JsonValueKind.Array)
+                {
+                    return new List<SearchResult>();
+                }
+
+                var list = new List<SearchResult>();
+                int index = 0;
+                foreach (JsonElement item in resultsElement.EnumerateArray())
+                {
+                    string title = CleanText(item.TryGetProperty("title", out JsonElement t) ? t.GetString() : null);
+                    string url = item.TryGetProperty("url", out JsonElement u) ? (u.GetString() ?? string.Empty) : string.Empty;
+                    string content = TruncateSnippet(CleanText(item.TryGetProperty("content", out JsonElement c) ? c.GetString() : null));
+                    if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(content))
+                        continue;
+
+                    DateTimeOffset? publishedAt = item.TryGetProperty("published_date", out JsonElement pd)
+                        ? TryParseDate(pd.GetString())
+                        : null;
+
+                    list.Add(new SearchResult(title, content, url, index++, publishedAt));
+                }
+
+                return list.Take(MaxResultsPerQuery).ToList();
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return new List<SearchResult>();
+            }
         }
 
         private static async Task<List<SearchResult>> SearchDuckDuckGoAsync(string query, CancellationToken token)
