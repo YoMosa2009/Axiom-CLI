@@ -38,6 +38,34 @@ namespace Axiom.Core.Tests.Council
             Assert.Contains(findings, f => f.Contains("Mixed indentation", StringComparison.OrdinalIgnoreCase));
         }
 
+        [Theory]
+        [InlineData("ValueError")]
+        [InlineData("TypeError")]
+        [InlineData("KeyError")]
+        [InlineData("RuntimeError")]
+        [InlineData("Exception")]
+        public void Run_RaisingAStandardExceptionType_DoesNotFlagUndefinedFunction(string exceptionType)
+        {
+            // Reproduction: a live agent turn correctly fixed a reported bug by adding input
+            // validation ("raise ValueError(...)" on bad input), and this check flagged it as
+            // "Function 'ValueError()' is called but not defined in the output" -- a false positive
+            // for every standard-library exception/error type, none of which are ever "defined" in
+            // user code despite being legitimately raised/thrown constantly.
+            string code = $"def add(a, b):\n    if not isinstance(a, (int, float)):\n        raise {exceptionType}(\"bad input\")\n    return a + b\n";
+            var findings = StaticValidation.Run(code);
+            Assert.DoesNotContain(findings, f => f.Contains($"'{exceptionType}()' is called but not defined", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public void Run_CallingAGenuinelyUndefinedFunction_StillFlagsIt()
+        {
+            // The exception-type allowlist addition must not blunt the check entirely -- a real
+            // undefined-function call should still be caught.
+            string code = "def add(a, b):\n    return totally_undefined_helper(a, b)\n";
+            var findings = StaticValidation.Run(code);
+            Assert.Contains(findings, f => f.Contains("totally_undefined_helper", StringComparison.OrdinalIgnoreCase));
+        }
+
         [Fact]
         public void DetectSandboxErrors_Traceback_Critical()
         {

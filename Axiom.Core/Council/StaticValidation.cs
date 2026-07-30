@@ -530,7 +530,19 @@ namespace Axiom.Core.Council
                 "Console", "Math", "String", "System", "File", "Path", "Directory",
                 "if", "for", "while", "return", "class", "new", "var", "await", "async",
                 "main", "Main", "__init__", "__name__", "WriteLine", "Write", "ReadLine",
-                "println", "printf", "sprintf", "require", "module", "exports"
+                "println", "printf", "sprintf", "require", "module", "exports",
+                // Standard-library exception/error types: legitimately raised/thrown without ever
+                // being "defined" in user code -- false-positive reproduction: `raise ValueError(...)`
+                // for input validation (a request literally asking for this) was flagged as calling
+                // an undefined function, an incidental red herring after a real fix already landed.
+                "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError", "RuntimeError",
+                "StopIteration", "NotImplementedError", "ZeroDivisionError", "FileNotFoundError",
+                "OSError", "IOError", "ImportError", "NameError", "Exception", "ArithmeticError",
+                "OverflowError", "PermissionError", "TimeoutError", "AssertionError", "UnicodeError",
+                "Error", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError",
+                "ArgumentException", "ArgumentNullException", "InvalidOperationException",
+                "NotImplementedException", "NullReferenceException", "IndexOutOfRangeException",
+                "FormatException", "OverflowException", "KeyNotFoundException"
             };
 
             // Only flag undefined calls when we saw at least one definition (avoids noise on prose).

@@ -240,14 +240,23 @@ namespace Axiom.Core.Agent
                 }
 
                 // A small model can narrate "I've made the change" without ever emitting a real
-                // tool call (calls.Count stays 0, or it just echoes the last tool observation back)
-                // -- give it exactly one explicit nudge before accepting nothing happened as done.
+                // tool call, or it can echo the last tool observation back instead of answering --
+                // give it exactly one explicit nudge before accepting nothing happened as done.
                 // Distinctly, it can also do REAL work for the first step or two of a multi-step
                 // plan and then narrate a false "done" claim for the rest instead of continuing to
                 // call tools (observed directly: asked to create two files, it wrote the first for
                 // real, then claimed the second was done without ever calling write_file again) --
-                // WrittenPaths.Count==0 alone only catches the first failure mode; the plan board
-                // (steps still Pending/Doing) catches the second.
+                // the plan board (steps still Pending/Doing) catches that case.
+                //
+                // A fourth failure mode, live-reproduced with reasoning enabled (effort Medium+):
+                // the model calls a read-only tool to investigate (e.g. read_file on a follow-up
+                // like "I found a bug, please fix it"), then stops with zero further tool calls and
+                // empty final text -- it never writes anything, but toolCalls is nonzero (the read
+                // counted), so a toolCalls==0 check alone misses it entirely. The actual signal that
+                // matters is simply "did requiresWrittenArtifacts end this turn with WrittenPaths
+                // still empty" -- how many read-only tool calls happened along the way is beside the
+                // point, so that's now the whole condition instead of an additional toolCalls==0 (or
+                // echo) requirement layered on top of it.
                 // The compact Kestrel tool menu intentionally omits plan_board. In that mode the
                 // Builder cannot update plan state, so pending plan items are advisory rather than
                 // proof of incomplete work. Disk artifacts and their validation remain the source
@@ -268,7 +277,7 @@ namespace Axiom.Core.Agent
                 bool hasBlockingArtifactFailure = completionQuality != null
                     && ArtifactQualityInspector.HasBlockingFindings(completionQuality.Findings);
                 if (isCustomEndpoint && requiresWrittenArtifacts && !cancelled && !failed
-                    && ((_tools.WrittenPaths.Count == 0 && (toolCalls == 0 || result.LooksLikeObservationEcho))
+                    && (_tools.WrittenPaths.Count == 0
                         || hasBlockingArtifactFailure
                         || unfinishedSteps.Count > 0))
                 {
@@ -285,7 +294,7 @@ namespace Axiom.Core.Agent
                         ? "Written artifacts are incomplete — retrying with concrete validation findings"
                         : unfinishedSteps.Count > 0
                         ? $"{unfinishedSteps.Count} plan step(s) unfinished — retrying with explicit instruction"
-                        : "No tool calls detected — retrying with explicit instruction");
+                        : "No file changes made yet — retrying with explicit instruction");
                     string nudgedInput = effectiveUser + "\n\n[INCOMPLETE] " + nudgeDetail;
                     ToolCallingResult retryResult = await loop.RunAsync(
                         system,
@@ -316,10 +325,10 @@ namespace Axiom.Core.Agent
                     }
                     bool stillHasBlockingArtifactFailure = postCompletionQuality != null
                         && ArtifactQualityInspector.HasBlockingFindings(postCompletionQuality.Findings);
-                    if (!cancelled && _tools.WrittenPaths.Count == 0 && retryResult.ToolCallCount == 0)
+                    if (!cancelled && _tools.WrittenPaths.Count == 0)
                     {
                         finalText = (finalText ?? string.Empty).TrimEnd()
-                            + "\n\n⚠ No files were changed for this request — the model did not call any tools.";
+                            + "\n\n⚠ No files were changed for this request — the model did not write to disk.";
                     }
                     else if (!cancelled && stillHasBlockingArtifactFailure)
                     {
