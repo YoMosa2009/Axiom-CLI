@@ -92,7 +92,7 @@ namespace Axiom.Core.Agent
             // sends a heartbeat every 15s while a tool call assembles silently server-side,
             // confirmed live to keep a 100+ second generation alive without incident. 8,192 gives
             // real headroom for a substantial single file (was cutting off content that needed as
-            // little as ~2,600 tokens) while still leaving the vast majority of a 114688+-token
+            // little as ~2,600 tokens) while still leaving the vast majority of a 131072-token
             // context window for prompt/history. [INCREMENTAL WRITES] in BuildAgentSystemPrompt
             // remains the guidance for anything larger than even this comfortably covers.
             int? maxTokensOverride = gateForCustomEndpoint

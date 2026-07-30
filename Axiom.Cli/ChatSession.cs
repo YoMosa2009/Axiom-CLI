@@ -18,6 +18,7 @@ internal sealed class ChatSession
     private readonly object _contextGate = new();
     private OpenRouterChatService? _trackedUsageService;
     private int _peakPromptTokensThisTurn;
+    private int _inFlightCompletionTokensEstimate;
     private KestralMemoryStore? _kestralMemoryStore;
     private bool _kestralMemoryAttempted;
 
@@ -115,7 +116,10 @@ internal sealed class ChatSession
     public void ResetContextUsage()
     {
         lock (_contextGate)
+        {
             _peakPromptTokensThisTurn = 0;
+            _inFlightCompletionTokensEstimate = 0;
+        }
     }
 
     public void BeginContextTurn()
@@ -124,7 +128,32 @@ internal sealed class ChatSession
         string system = FoundationSystemPrompt.Apply("You are Axiom.");
         int historyTokens = ChatService.EstimateConversationTokensForBudget(History, system);
         lock (_contextGate)
+        {
             _peakPromptTokensThisTurn = historyTokens;
+            // Fresh turn, fresh generation -- whatever was streamed in a prior turn is already
+            // folded into history/observed prompt tokens by now, so start the live counter at 0.
+            _inFlightCompletionTokensEstimate = 0;
+        }
+    }
+
+    /// <summary>
+    /// Called for every streamed token/delta as the model generates a reply, so the context gauge
+    /// visibly climbs during a long single request instead of sitting frozen until the round
+    /// completes and a real usage figure comes back. Approximate by design (reuses the same
+    /// char-based estimator as prompt-token budgeting) -- it only needs to track well enough for a
+    /// live status readout, not to be exact.
+    /// </summary>
+    public void NotifyStreamingDelta(string? delta)
+    {
+        if (string.IsNullOrEmpty(delta))
+            return;
+
+        int deltaTokens = ChatService.EstimateTokenCountForBudget(delta);
+        if (deltaTokens <= 0)
+            return;
+
+        lock (_contextGate)
+            _inFlightCompletionTokensEstimate += deltaTokens;
     }
 
     public (int Used, int Max) EstimateContext()
@@ -134,13 +163,19 @@ internal sealed class ChatSession
         string system = FoundationSystemPrompt.Apply("You are Axiom.");
         int historyTokens = ChatService.EstimateConversationTokensForBudget(History, system);
         int observedPromptTokens;
+        int inFlightCompletionTokens;
         lock (_contextGate)
+        {
             observedPromptTokens = _peakPromptTokensThisTurn;
+            inFlightCompletionTokens = _inFlightCompletionTokensEstimate;
+        }
 
         // Council calls carry plans, workspace retrieval, tool schemas, and Critic evidence that
         // do not live in chat history. During a turn, show the largest real (or service-estimated)
-        // prompt for that turn; between turns, history is the source of truth.
-        int used = Math.Max(historyTokens, observedPromptTokens);
+        // prompt for that turn; between turns, history is the source of truth. Tokens streamed so
+        // far this turn are added on top since they're already occupying the model's live KV
+        // cache/context window even though they won't land in History until the turn finishes.
+        int used = Math.Max(historyTokens, observedPromptTokens) + inFlightCompletionTokens;
         return (used, max);
     }
 

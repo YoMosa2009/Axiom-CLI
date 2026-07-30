@@ -633,7 +633,14 @@ namespace Axiom.Core.Agent
                       "call generating a very large amount of content in a single response can exceed this " +
                       "connection's response window and fail outright — smaller calls of REAL content each " +
                       "complete safely and the file ends up just as complete either way, without ever passing " +
-                      "through an empty or broken intermediate state.\n"
+                      "through an empty or broken intermediate state.\n" +
+                      "[SELF-SUFFICIENT SETUP] When a task needs a dependency, package, runtime, or tool that " +
+                      "isn't present yet (a library the code imports, a CLI the build needs, a language runtime), " +
+                      "install it yourself with package_install, docker_run, or run_shell (npm/pip/dotnet add, " +
+                      "or the OS package manager for system-level software) rather than telling the user to " +
+                      "install it or writing code that assumes it exists. This applies even when the request " +
+                      "never used the word \"install\" — a broad task like \"build me a website\" that turns out " +
+                      "to need a package is still your job to make actually runnable, not just scaffolded.\n"
                     : "Prefer tools over guessing. Be concise in final answers.\n") +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +
                 "When done, answer clearly with what changed and how to run/test it.";

@@ -38,7 +38,8 @@ namespace Axiom.Core.Agent
 
         private static readonly HashSet<string> AlwaysKeep = new(StringComparer.OrdinalIgnoreCase)
         {
-            "read_file", "list_dir", "search_files", "find_symbol", "read_csv", "read_notebook", "calculator"
+            "read_file", "list_dir", "search_files", "find_symbol", "read_csv", "read_notebook", "calculator",
+            "device_info", "list_serial_ports"
         };
 
         private static readonly HashSet<string> EditGatedTools = new(StringComparer.OrdinalIgnoreCase)
@@ -48,7 +49,7 @@ namespace Axiom.Core.Agent
 
         private static readonly HashSet<string> BuildRunGatedTools = new(StringComparer.OrdinalIgnoreCase)
         {
-            "run_shell", "diagnostics", "run_tests", "package_install", "docker_run", "run_background"
+            "run_shell", "diagnostics", "run_tests", "package_install", "docker_run", "run_background", "ide_open"
         };
 
         private static readonly HashSet<string> GitGatedTools = new(StringComparer.OrdinalIgnoreCase)
@@ -149,8 +150,18 @@ namespace Axiom.Core.Agent
                 // capabilities explicitly requested by the user (for example, build/test/shell).
                 // The old early return made "build this app and run the tests" lose run_shell
                 // merely because it was also an edit request.
+                //
+                // BuildRunGatedTools is unconditional here (not gated behind looksLikeBuildOrRun
+                // like Git/Network/Subagent below): a coding task needing a dependency install or
+                // a build/run step frequently doesn't say so up front ("make me a website" never
+                // says "install" even when the result needs npm install to run), and a self-hosted
+                // model that can't reach run_shell/package_install/docker_run for a broad task like
+                // that has no way to notice and self-correct mid-turn -- it can only silently ship
+                // something broken. Keyword-gating still applies to Git/Network/Subagent since those
+                // are less universally needed by a generic build/edit task and carry more risk
+                // (pushing, downloading, spawning) to expose by default.
                 var allowed = new HashSet<string>(CompactEditTools, StringComparer.OrdinalIgnoreCase);
-                AddIf(allowed, BuildRunGatedTools, looksLikeBuildOrRun);
+                allowed.UnionWith(BuildRunGatedTools);
                 AddIf(allowed, GitGatedTools, looksLikeGit);
                 AddIf(allowed, NetworkGatedTools, looksLikeNetwork);
                 AddIf(allowed, SubagentGatedTools, looksLikeSubagent);

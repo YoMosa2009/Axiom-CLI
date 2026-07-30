@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Ports;
 using System.Linq;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -322,6 +324,29 @@ namespace Axiom.Core.Agent
                     }, required: ["command"])));
 
                 tools.Add(new(
+                    "ide_open",
+                    "Open a file or folder in the user's IDE (VS Code by default), optionally at a " +
+                    "specific line or as a diff between two files, so the user can see/continue the work there.",
+                    Schema(new JsonObject
+                    {
+                        ["path"] = Prop("string", "File or folder path (relative to the workspace or absolute)"),
+                        ["ide"] = Prop("string", "vscode | jetbrains (default vscode)"),
+                        ["line"] = Prop("integer", "Optional line number to jump to (vscode only)"),
+                        ["diff_path"] = Prop("string", "Optional second file path to open as a diff against path"),
+                        ["new_window"] = Prop("boolean", "Open in a new IDE window instead of reusing one")
+                    }, required: ["path"])));
+
+                tools.Add(new(
+                    "device_info",
+                    "Report the host machine's OS, CPU, memory, disk, and .NET runtime info.",
+                    Schema(new JsonObject(), required: [])));
+
+                tools.Add(new(
+                    "list_serial_ports",
+                    "List serial/COM ports currently available on the host (e.g. connected Arduino/USB-UART devices).",
+                    Schema(new JsonObject(), required: [])));
+
+                tools.Add(new(
                     "git_commit",
                     "Stage all changes and create a git commit with the given message.",
                     Schema(new JsonObject
@@ -417,7 +442,7 @@ namespace Axiom.Core.Agent
                     or "download_file" or "fetch_url" or "web_search"
                     or "git_commit" or "git_checkout" or "worktree_create" or "worktree_remove"
                     or "spawn_subagent" or "run_background" or "open_pr"
-                    or "package_install" or "docker_run")
+                    or "package_install" or "docker_run" or "ide_open")
             {
                 return $"Error: tool '{toolName}' is not available in Critic inspect mode.";
             }
@@ -511,6 +536,9 @@ namespace Axiom.Core.Agent
                     "read_notebook" => ReadNotebookTool(root),
                     "package_install" => await PackageInstallAsync(root, token),
                     "docker_run" => await DockerRunAsync(root, token),
+                    "ide_open" => await IdeOpenAsync(root, token),
+                    "device_info" => GetDeviceInfo(),
+                    "list_serial_ports" => ListSerialPorts(),
                     "worktree_create" => await GitWorktreeService.CreateAsync(
                         _workspace.PrimaryRoot, GetString(root, "branch"), token),
                     "worktree_list" => await GitWorktreeService.ListAsync(_workspace.PrimaryRoot, token),
@@ -543,13 +571,14 @@ namespace Axiom.Core.Agent
             "write_file" or "str_replace" or "apply_patch" or "write_files"
             or "run_shell" or "download_file" or "git_commit" or "git_checkout"
             or "worktree_create" or "worktree_remove" or "spawn_subagent" or "run_background" or "open_pr"
-            or "package_install" or "docker_run";
+            or "package_install" or "docker_run" or "ide_open";
 
         /// <summary>Tools that are safe to run concurrently when the model batches them.</summary>
         public static bool IsParallelSafeTool(string name) => name is
             "read_file" or "list_dir" or "search_files" or "find_symbol"
             or "git_status" or "git_diff" or "git_log" or "git_branch"
-            or "read_csv" or "read_notebook" or "web_search" or "fetch_url" or "calculator";
+            or "read_csv" or "read_notebook" or "web_search" or "fetch_url" or "calculator"
+            or "device_info" or "list_serial_ports";
 
         private string PlanBoardAction(JsonElement root)
         {
@@ -594,6 +623,7 @@ namespace Axiom.Core.Agent
             "fetch_url" => "fetch " + GetString(root, "url"),
             "package_install" => GetString(root, "ecosystem") + " " + GetString(root, "package"),
             "docker_run" => "docker: " + Truncate(GetString(root, "command"), 50),
+            "ide_open" => "open in " + (string.IsNullOrWhiteSpace(GetString(root, "ide")) ? "vscode" : GetString(root, "ide")) + ": " + GetString(root, "path"),
             "git_commit" => "commit: " + GetString(root, "message"),
             "git_checkout" => "checkout " + GetString(root, "branch"),
             "spawn_subagent" => GetString(root, "kind") + ": " + Truncate(GetString(root, "task"), 60),
@@ -1340,6 +1370,162 @@ namespace Axiom.Core.Agent
             return "[[DOCKER_RUN]]\n" + await RunShellAsync(fake.RootElement, token);
         }
 
+        private async Task<string> IdeOpenAsync(JsonElement root, CancellationToken token)
+        {
+            string path = GetString(root, "path").Trim();
+            if (string.IsNullOrWhiteSpace(path))
+                return "Error: path is required.";
+
+            string ide = GetString(root, "ide").Trim().ToLowerInvariant();
+            if (string.IsNullOrEmpty(ide))
+                ide = "vscode";
+
+            string resolvedPath = _workspace.ResolvePath(path);
+            string diffPathRaw = GetString(root, "diff_path").Trim();
+            bool newWindow = root.TryGetProperty("new_window", out JsonElement nw) && nw.ValueKind == JsonValueKind.True;
+            int line = root.TryGetProperty("line", out JsonElement ln) && ln.TryGetInt32(out int l) ? l : 0;
+
+            string launcher;
+            string args;
+            switch (ide)
+            {
+                case "vscode" or "code" or "vs code":
+                    if (!CommandExistsOnPath("code"))
+                        return "Error: VS Code CLI ('code') not found on PATH. In VS Code, run \"Shell Command: Install 'code' command in PATH\" from the command palette.";
+                    launcher = "code";
+                    if (!string.IsNullOrWhiteSpace(diffPathRaw))
+                    {
+                        string diffResolved = _workspace.ResolvePath(diffPathRaw);
+                        args = $"--diff {QuoteSh(resolvedPath)} {QuoteSh(diffResolved)}";
+                    }
+                    else if (line > 0)
+                    {
+                        args = $"--goto {QuoteSh($"{resolvedPath}:{line}")}";
+                    }
+                    else
+                    {
+                        args = QuoteSh(resolvedPath);
+                    }
+                    if (newWindow)
+                        args = "--new-window " + args;
+                    else
+                        args = "--reuse-window " + args;
+                    break;
+
+                case "jetbrains" or "idea" or "rider" or "pycharm" or "webstorm" or "clion":
+                    launcher = ResolveJetBrainsLauncher(ide);
+                    if (launcher.Length == 0)
+                        return "Error: no JetBrains IDE launcher (idea/rider/pycharm/webstorm/clion) found on PATH.";
+                    args = QuoteSh(resolvedPath);
+                    break;
+
+                default:
+                    return "Error: ide must be vscode | jetbrains.";
+            }
+
+            var fake = JsonDocument.Parse($"{{\"command\":\"{EscapeJson(launcher + " " + args)}\",\"timeout_seconds\":30}}");
+            string output = await RunShellAsync(fake.RootElement, token);
+            return $"[[IDE_OPEN]] {ide}: {resolvedPath}\n{output}".TrimEnd();
+        }
+
+        private static string ResolveJetBrainsLauncher(string requested)
+        {
+            string[] candidates = requested switch
+            {
+                "rider" => ["rider", "rider64"],
+                "pycharm" => ["pycharm", "pycharm64"],
+                "webstorm" => ["webstorm", "webstorm64"],
+                "clion" => ["clion", "clion64"],
+                _ => ["idea", "idea64"]
+            };
+            foreach (string candidate in candidates)
+            {
+                if (CommandExistsOnPath(candidate))
+                    return candidate;
+            }
+            return string.Empty;
+        }
+
+        private static string GetDeviceInfo()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"OS: {RuntimeInformation.OSDescription} ({RuntimeInformation.OSArchitecture})");
+            sb.AppendLine($"Platform: {(OperatingSystem.IsWindows() ? "Windows" : OperatingSystem.IsLinux() ? "Linux" : OperatingSystem.IsMacOS() ? "macOS" : "Unknown")}");
+            sb.AppendLine($"Machine name: {Environment.MachineName}");
+            sb.AppendLine($"User: {Environment.UserName}");
+            sb.AppendLine($".NET runtime: {RuntimeInformation.FrameworkDescription} ({RuntimeInformation.ProcessArchitecture})");
+            sb.AppendLine($"Logical processors: {Environment.ProcessorCount}");
+            sb.AppendLine($"64-bit process: {Environment.Is64BitProcess}, 64-bit OS: {Environment.Is64BitOperatingSystem}");
+
+            try
+            {
+                GCMemoryInfo gcInfo = GC.GetGCMemoryInfo();
+                long totalRamBytes = gcInfo.TotalAvailableMemoryBytes;
+                if (totalRamBytes > 0)
+                    sb.AppendLine($"Total system memory: {FormatBytes(totalRamBytes)}");
+            }
+            catch
+            {
+                // Best-effort only -- omit the line rather than fail the whole tool.
+            }
+
+            sb.AppendLine($"Process working set: {FormatBytes(Environment.WorkingSet)}");
+            sb.AppendLine($"Uptime (this process): {(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()):hh\\:mm\\:ss}");
+            sb.AppendLine($"System uptime: {TimeSpan.FromMilliseconds(Environment.TickCount64):d\\d\\ hh\\:mm\\:ss}");
+
+            sb.AppendLine("Disks:");
+            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            {
+                if (!drive.IsReady)
+                    continue;
+                try
+                {
+                    sb.AppendLine($"  {drive.Name} ({drive.DriveType}, {drive.DriveFormat}) — {FormatBytes(drive.AvailableFreeSpace)} free of {FormatBytes(drive.TotalSize)}");
+                }
+                catch
+                {
+                    // Some drives (network shares, removable media) can throw on property access.
+                }
+            }
+
+            return Trim(sb.ToString());
+        }
+
+        private static string ListSerialPorts()
+        {
+            string[] ports;
+            try
+            {
+                ports = SerialPort.GetPortNames();
+            }
+            catch (Exception ex)
+            {
+                return $"Error enumerating serial ports: {ex.Message}";
+            }
+
+            if (ports.Length == 0)
+                return "No serial/COM ports detected.";
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"{ports.Length} serial port(s) detected:");
+            foreach (string port in ports.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+                sb.AppendLine($"  {port}");
+            return Trim(sb.ToString());
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            string[] units = ["B", "KB", "MB", "GB", "TB"];
+            double value = bytes;
+            int unit = 0;
+            while (value >= 1024 && unit < units.Length - 1)
+            {
+                value /= 1024;
+                unit++;
+            }
+            return $"{value:0.##} {units[unit]}";
+        }
+
         private static string EscapeJson(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
         private static string QuoteSh(string s) => "\"" + s.Replace("\"", "\\\"") + "\"";
 
@@ -1424,6 +1610,8 @@ namespace Axiom.Core.Agent
             return "/bin/sh";
         }
 
+        private static readonly string[] WindowsExecutableExtensions = [".exe", ".cmd", ".bat"];
+
         private static bool CommandExistsOnPath(string name)
         {
             try
@@ -1440,10 +1628,16 @@ namespace Axiom.Core.Agent
                         string full = Path.Combine(dir.Trim(), name);
                         if (File.Exists(full))
                             return true;
-                        if (OperatingSystem.IsWindows() && !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                        if (OperatingSystem.IsWindows() && !Path.HasExtension(name))
                         {
-                            if (File.Exists(full + ".exe"))
-                                return true;
+                            // VS Code's CLI shim (and various other dev tool launchers) ship as
+                            // .cmd, not .exe -- checking only .exe silently reports "not found"
+                            // for perfectly runnable commands.
+                            foreach (string ext in WindowsExecutableExtensions)
+                            {
+                                if (File.Exists(full + ext))
+                                    return true;
+                            }
                         }
                     }
                     catch { /* ignore bad PATH entries */ }

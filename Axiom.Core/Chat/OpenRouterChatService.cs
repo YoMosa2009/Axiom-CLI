@@ -320,16 +320,17 @@ namespace Axiom.Core.Chat
         // manually-typed number that can go stale.
         //
         // Chosen empirically against Kestral 1's real hardware (GTX 1080, 8GB VRAM) with full GPU
-        // residency (CustomEndpointNumGpuLayers) already forced. From a clean (nothing loaded)
-        // baseline: 122880 measured 100% GPU-resident with ~337-338MB free, holding steady across
-        // three repeated runs with no speed change (~26-29.7 tok/s gen, ~198 tok/s prefill).
-        // 131072 also technically loads but drops to ~227MB free -- tight enough that it
-        // previously measured a real 5x prefill slowdown under background load. 163840 and above
-        // hard-crash the server outright (cudaMalloc failed: out of memory -- llama-server
-        // terminates and the model has to reload from scratch on the next request). 122880 is the
-        // highest value with real, repeatable safety margin -- comfortably more than double the
-        // original 45056 default's usable context.
-        public const int CustomEndpointContextWindowTokens = 122880;
+        // residency (CustomEndpointNumGpuLayers) already forced. 131072 measures 100% GPU-resident
+        // with ~235MB free and was validated under *heavy* load specifically (not just a short
+        // test reply): three consecutive ~2,000-token generations (close to the real 8,192
+        // max-tokens ceiling) all measured the same ~26 tok/s with zero degradation and zero
+        // crashes. An earlier, more conservative pass had rejected 131072 for a measured slowdown
+        // under background load, but that was before the Lively Wallpaper VRAM hog and the
+        // duplicate model pull were cleaned up -- with those gone, 131072 now holds up reliably.
+        // 163840 and above hard-crash the server outright (cudaMalloc failed: out of memory --
+        // llama-server terminates and the model has to fully reload on the next request), so
+        // 131072 is the real ceiling on this card, not merely the current comfort setting.
+        public const int CustomEndpointContextWindowTokens = 131072;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
         // llama.cpp/Ollama convention: any value >= the model's real layer count offloads every

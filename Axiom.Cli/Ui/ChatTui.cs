@@ -879,6 +879,7 @@ internal sealed class ChatTui : IDisposable
                     onToken: token =>
                     {
                         collected.Append(token);
+                        _session.NotifyStreamingDelta(token);
                         lock (_gate)
                         {
                             if (assistantIndex < 0)
@@ -1729,6 +1730,7 @@ internal sealed class ChatTui : IDisposable
                     break;
                 case CouncilEventKind.Token:
                     AppendStreamToken(evt.Message);
+                    _session?.NotifyStreamingDelta(evt.Message);
                     break;
                 case CouncilEventKind.ArchitectOutput:
                     SetActivity("Council · Architect done");
@@ -2096,7 +2098,29 @@ internal sealed class ChatTui : IDisposable
             return ["✕  ", " ✕ ", "  ✕", " ✕ "];
         if (l.Contains("complete") || l.Contains("finished"))
             return ["✓  ", " ✓ ", "  ✓", " ✓ "];
-        if (l.Contains("download"))
+        if (l.Contains("version control") || l.Contains("git"))
+            return ["▒░░░", "░▒░░", "░░▒░", "░░░▒", "░░▒░", "░▒░░"];
+        if (l.Contains("container"))
+            return ["[ ]  ", "[▪]  ", "[▪▪] ", "[▪▪▪]", "[▪▪] ", "[▪]  "];
+        if (l.Contains("install"))
+            return ["[    ]", "[=   ]", "[==  ]", "[=== ]", "[====]", "[ ===]", "[  ==]", "[   =]"];
+        if (l.Contains("test"))
+            return [">    ", ">>   ", ">>>  ", " >>> ", "  >>>", "   >>", "    >"];
+        if (l.Contains("diagnos"))
+            return ["◜", "◠", "◝", "◞", "◡", "◟"];
+        if (l.Contains("inspect"))
+            return ["◎     ", " ◎    ", "  ◎   ", "   ◎  ", "    ◎ ", "     ◎"];
+        if (l.Contains("delegat"))
+            return ["•  ◦  ◦", "◦  •  ◦", "◦  ◦  •", "◦  •  ◦"];
+        if (l.Contains("opening"))
+            return ["[■]", "[□]"];
+        if (l.Contains("calculat"))
+            return ["+", "−", "×", "÷", "="];
+        if (l.Contains("background"))
+            return ["||    ", " ||   ", "  ||  ", "   || ", "    ||", "   || ", "  ||  ", " ||   "];
+        if (l.Contains("plan"))
+            return ["◇", "◆", "◇", "◆"];
+        if (l.Contains("download") || l.Contains("fetch"))
             return ["→   ", " →  ", "  → ", "   →", "  → ", " →  "];
         if (l.Contains("search"))
             return ["·   ", "··  ", "··· ", "····", " ···", "  ··", "   ·"];
@@ -2106,6 +2130,16 @@ internal sealed class ChatTui : IDisposable
             return ["▓░░░", "░▓░░", "░░▓░", "░░░▓", "░░▓░", "░▓░░"];
         if (l.Contains("generat") || l.Contains("stream"))
             return ["◐", "◓", "◑", "◒"];
+        if (l.Contains("think"))
+            return ["○", "◎", "●", "◎"];
+        if (l.Contains("connect"))
+            return ["•     ", " •    ", "  •   ", "   •  ", "    • ", "     •"];
+        if (l.Contains("retry"))
+            return ["↻", "↺"];
+        if (l.Contains("review"))
+            return ["░░░░", "█░░░", "██░░", "███░", "████", "░███", "░░██", "░░░█"];
+        if (l.Contains("wait"))
+            return ["◯     ", " ◯    ", "  ◯   ", "   ◯  ", "    ◯ ", "     ◯"];
         if (l.Contains("work") || l.Contains("step"))
             return ["✧", "✦", "✶", "✦"];
         return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

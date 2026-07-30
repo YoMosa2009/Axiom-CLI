@@ -33,6 +33,14 @@ internal static class ActivityStatus
     public const string Compiling = "Compiling";
     public const string Testing = "Testing";
     public const string Installing = "Installing";
+    public const string Git = "Version control";
+    public const string Containerizing = "Containerizing";
+    public const string Delegating = "Delegating";
+    public const string Inspecting = "Inspecting device";
+    public const string Diagnosing = "Diagnosing";
+    public const string OpeningIde = "Opening in IDE";
+    public const string Calculating = "Calculating";
+    public const string Backgrounding = "Background task";
 
     public static string FromToolName(string toolName, bool completed = false)
     {
@@ -40,10 +48,23 @@ internal static class ActivityStatus
         {
             "run_shell" => Running,
             "read_file" => Reading,
-            "write_file" => Writing,
+            "write_file" or "str_replace" or "apply_patch" or "write_files" => Writing,
             "list_dir" => Listing,
             "download_file" => Downloading,
-            "search_files" => Searching,
+            "fetch_url" => Downloading,
+            "search_files" or "web_search" => Searching,
+            "package_install" => Installing,
+            "docker_run" => Containerizing,
+            "run_tests" => Testing,
+            "diagnostics" => Diagnosing,
+            "spawn_subagent" => Delegating,
+            "device_info" or "list_serial_ports" => Inspecting,
+            "ide_open" => OpeningIde,
+            "calculator" => Calculating,
+            "run_background" => Backgrounding,
+            "plan_board" => Planning,
+            "git_status" or "git_diff" or "git_log" or "git_branch" or "git_commit" or "git_checkout"
+                or "worktree_create" or "worktree_list" or "worktree_remove" or "open_pr" => Git,
             _ => Working
         };
 

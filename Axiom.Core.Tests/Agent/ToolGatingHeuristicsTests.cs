@@ -102,6 +102,21 @@ namespace Axiom.Core.Tests.Agent
         }
 
         [Fact]
+        public void Filter_IncludesInstallAndRunToolsForABroadTaskWithNoExplicitBuildWording()
+        {
+            // "make me a website" never says "install", "run", or "build" -- but delivering it may
+            // still require npm install / a shell command. A workspace-attached broad task must not
+            // need to guess the right keyword to unlock package_install/run_shell/docker_run.
+            var result = ToolGatingHeuristics.Filter(FullCatalog, "make me a website", workspaceAttached: true);
+            var names = result.Select(t => t.Name).ToHashSet();
+
+            Assert.Contains("run_shell", names);
+            Assert.Contains("package_install", names);
+            Assert.Contains("docker_run", names);
+            Assert.Contains("run_background", names);
+        }
+
+        [Fact]
         public void Filter_KeepsExplicitBuildToolsForAnEditTask()
         {
             var result = ToolGatingHeuristics.Filter(
