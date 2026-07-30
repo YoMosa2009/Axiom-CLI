@@ -47,9 +47,25 @@ namespace Axiom.Core.Agent
             "write_file", "str_replace", "apply_patch", "write_files", "plan_board"
         };
 
-        private static readonly HashSet<string> BuildRunGatedTools = new(StringComparer.OrdinalIgnoreCase)
+        // Near-universally useful for any real coding task -- verifying/executing/testing code is
+        // something almost every edit-shaped request eventually needs, regardless of whether the
+        // message said "run". Kept unconditional for edit-shaped tasks below.
+        private static readonly HashSet<string> CoreExecutionTools = new(StringComparer.OrdinalIgnoreCase)
         {
-            "run_shell", "diagnostics", "run_tests", "package_install", "docker_run", "run_background", "ide_open"
+            "run_shell", "diagnostics", "run_tests", "run_background", "ide_open"
+        };
+
+        // Tools that install/pull software or otherwise add new things to the machine, as opposed
+        // to running/verifying what's already there. Unlike CoreExecutionTools these stay behind an
+        // explicit build/run/install signal even for edit-shaped tasks: a small model reaches for a
+        // purpose-built "package_install" tool sitting right there in the menu far more readily than
+        // it would type the equivalent `npm install` into run_shell, so surfacing it unconditionally
+        // made Kestral install things nobody asked for. A task that genuinely needs a dependency
+        // without saying so explicitly is still covered -- run_shell (always available above) plus
+        // the [SELF-SUFFICIENT SETUP] system-prompt instruction handle that case.
+        private static readonly HashSet<string> EnvironmentMutatingTools = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "package_install", "docker_run"
         };
 
         private static readonly HashSet<string> GitGatedTools = new(StringComparer.OrdinalIgnoreCase)
@@ -151,17 +167,13 @@ namespace Axiom.Core.Agent
                 // The old early return made "build this app and run the tests" lose run_shell
                 // merely because it was also an edit request.
                 //
-                // BuildRunGatedTools is unconditional here (not gated behind looksLikeBuildOrRun
-                // like Git/Network/Subagent below): a coding task needing a dependency install or
-                // a build/run step frequently doesn't say so up front ("make me a website" never
-                // says "install" even when the result needs npm install to run), and a self-hosted
-                // model that can't reach run_shell/package_install/docker_run for a broad task like
-                // that has no way to notice and self-correct mid-turn -- it can only silently ship
-                // something broken. Keyword-gating still applies to Git/Network/Subagent since those
-                // are less universally needed by a generic build/edit task and carry more risk
-                // (pushing, downloading, spawning) to expose by default.
+                // CoreExecutionTools is unconditional here (run/verify is near-universal for any
+                // real coding task), but EnvironmentMutatingTools (package_install/docker_run)
+                // still requires an explicit build/run/install signal -- see its own comment for
+                // why installs specifically need a real trigger, not just "a workspace is attached".
                 var allowed = new HashSet<string>(CompactEditTools, StringComparer.OrdinalIgnoreCase);
-                allowed.UnionWith(BuildRunGatedTools);
+                allowed.UnionWith(CoreExecutionTools);
+                AddIf(allowed, EnvironmentMutatingTools, looksLikeBuildOrRun);
                 AddIf(allowed, GitGatedTools, looksLikeGit);
                 AddIf(allowed, NetworkGatedTools, looksLikeNetwork);
                 AddIf(allowed, SubagentGatedTools, looksLikeSubagent);
@@ -181,7 +193,8 @@ namespace Axiom.Core.Agent
         {
             if (AlwaysKeep.Contains(name)) return true;
             if (EditGatedTools.Contains(name)) return looksLikeEdit || looksLikeBuildOrRun;
-            if (BuildRunGatedTools.Contains(name)) return looksLikeBuildOrRun || looksLikeEdit;
+            if (CoreExecutionTools.Contains(name)) return looksLikeBuildOrRun || looksLikeEdit;
+            if (EnvironmentMutatingTools.Contains(name)) return looksLikeBuildOrRun;
             if (GitGatedTools.Contains(name)) return looksLikeGit;
             if (NetworkGatedTools.Contains(name)) return looksLikeNetwork;
             if (SubagentGatedTools.Contains(name)) return looksLikeSubagent;

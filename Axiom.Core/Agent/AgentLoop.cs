@@ -636,11 +636,17 @@ namespace Axiom.Core.Agent
                       "through an empty or broken intermediate state.\n" +
                       "[SELF-SUFFICIENT SETUP] When a task needs a dependency, package, runtime, or tool that " +
                       "isn't present yet (a library the code imports, a CLI the build needs, a language runtime), " +
-                      "install it yourself with package_install, docker_run, or run_shell (npm/pip/dotnet add, " +
-                      "or the OS package manager for system-level software) rather than telling the user to " +
-                      "install it or writing code that assumes it exists. This applies even when the request " +
-                      "never used the word \"install\" — a broad task like \"build me a website\" that turns out " +
-                      "to need a package is still your job to make actually runnable, not just scaffolded.\n"
+                      "install it yourself with run_shell (npm/pip/dotnet add, or the OS package manager for " +
+                      "system-level software; use package_install/docker_run instead when they're offered this " +
+                      "turn) rather than telling the user to install it or writing code that assumes it exists. " +
+                      "This applies even when the request never used the word \"install\" — a broad task like " +
+                      "\"build me a website\" that turns out to need a package is still your job to make actually " +
+                      "runnable, not just scaffolded. The reverse matters just as much: only install what the " +
+                      "task actually needs right now. Don't install a package, pull a container, or add a " +
+                      "dependency speculatively because it might be useful later, and never reach for an install " +
+                      "step as a first move before you've confirmed (by reading the code/config) that what you " +
+                      "need is actually missing — an unnecessary install wastes the user's time and bandwidth " +
+                      "and is not itself progress on the task.\n"
                     : "Prefer tools over guessing. Be concise in final answers.\n") +
                 "For dangerous/destructive actions (rm -rf of large trees, force-push, dropping DBs), warn first.\n" +
                 "When done, answer clearly with what changed and how to run/test it.";

@@ -102,18 +102,25 @@ namespace Axiom.Core.Tests.Agent
         }
 
         [Fact]
-        public void Filter_IncludesInstallAndRunToolsForABroadTaskWithNoExplicitBuildWording()
+        public void Filter_IncludesRunToolsButNotInstallToolsForABroadTaskWithNoExplicitSignal()
         {
             // "make me a website" never says "install", "run", or "build" -- but delivering it may
-            // still require npm install / a shell command. A workspace-attached broad task must not
-            // need to guess the right keyword to unlock package_install/run_shell/docker_run.
+            // still require a shell command, so run_shell/diagnostics/run_tests must not need the
+            // exact right keyword. package_install/docker_run are a different story: those actively
+            // add software to the machine, and a small model reaches for a purpose-built install
+            // tool far more readily just because it's in the menu -- so they stay opt-in behind an
+            // explicit signal even for a real, workspace-attached coding task. run_shell still
+            // covers the genuine-need case (and the agent system prompt tells it to use run_shell
+            // for this when package_install isn't offered).
             var result = ToolGatingHeuristics.Filter(FullCatalog, "make me a website", workspaceAttached: true);
             var names = result.Select(t => t.Name).ToHashSet();
 
             Assert.Contains("run_shell", names);
-            Assert.Contains("package_install", names);
-            Assert.Contains("docker_run", names);
+            Assert.Contains("diagnostics", names);
+            Assert.Contains("run_tests", names);
             Assert.Contains("run_background", names);
+            Assert.DoesNotContain("package_install", names);
+            Assert.DoesNotContain("docker_run", names);
         }
 
         [Fact]
@@ -129,6 +136,17 @@ namespace Axiom.Core.Tests.Agent
             Assert.Contains("run_shell", names);
             Assert.Contains("diagnostics", names);
             Assert.Contains("run_tests", names);
+        }
+
+        [Fact]
+        public void Filter_IncludesInstallAndDockerToolsOnlyWithExplicitSignal()
+        {
+            var withoutSignal = ToolGatingHeuristics.Filter(FullCatalog, "add a login page", workspaceAttached: true);
+            var withSignal = ToolGatingHeuristics.Filter(FullCatalog, "install the axios package and use it here", workspaceAttached: true);
+
+            Assert.DoesNotContain(withoutSignal, t => t.Name == "package_install");
+            Assert.DoesNotContain(withoutSignal, t => t.Name == "docker_run");
+            Assert.Contains(withSignal, t => t.Name == "package_install");
         }
 
         [Fact]
