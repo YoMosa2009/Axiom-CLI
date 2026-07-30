@@ -51,7 +51,11 @@ namespace Axiom.Core.Tools
             "your","they","them","their","there","here","then","than","explain","describe",
             "definition","meaning","mean","means","effect","effects","affect","affects",
             "latest","current","recent","new","newest","information","info","details","update","updates","news","article","articles",
-            "expand","expanded","expanding","elaborate","elaborated","elaborating"
+            "expand","expanded","expanding","elaborate","elaborated","elaborating",
+            // Missing WH-words used to leak straight into the literal search query text (e.g. "who"
+            // surviving into "CEO OpenAI who latest current 2026 article") because this set -- unlike
+            // StopWords/QuestionFillerWords, which already had them -- never filtered them out.
+            "who","why","where","when","which","whom","whose"
         };
         private static readonly HashSet<string> QuestionFillerWords = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -166,7 +170,14 @@ namespace Axiom.Core.Tools
         ];
 
         private sealed record SearchResult(string Title, string Snippet, string Url, int Position, DateTimeOffset? PublishedAt = null);
-        private sealed record SearchIntent(string Query, string BasePrompt, bool CurrentInfo, bool Docs, bool Release, bool News, IReadOnlyList<string> QueryTerms);
+        // CoreTerms are the terms extracted directly from the prompt (proper nouns, quoted phrases,
+        // ranked keywords) before ExpandIntentTerms glues on freshness/format embellishment words
+        // like "latest"/"current"/"article"/the current year. QueryTerms (which include those
+        // embellishments) are what gets sent to search providers; CoreTerms are what should actually
+        // decide relevance -- a result that never mentions the one distinctive entity in the prompt
+        // (e.g. "OpenAI") but happens to repeat generic embellishment words like "current" should not
+        // outscore one that does, which is exactly what happened before this distinction existed.
+        private sealed record SearchIntent(string Query, string BasePrompt, bool CurrentInfo, bool Docs, bool Release, bool News, IReadOnlyList<string> QueryTerms, IReadOnlyList<string> CoreTerms);
         private sealed record PageEvidence(string Text, string Title, DateTimeOffset? PublishedAt, bool HighSignal);
 
         public string BuildStrategicSearchQuery(string prompt)
@@ -398,15 +409,17 @@ namespace Axiom.Core.Tools
 
         private static async Task<List<SearchResult>> SearchAcrossProvidersAsync(string query, SearchIntent intent, CancellationToken token)
         {
+            // Bing's plain HTML search (www.bing.com/search) used to be scraped here too, but Bing
+            // now serves a JS proof-of-work bot challenge page to non-browser requests instead of
+            // real results (confirmed live: 200 OK, ~73KB response, zero "b_algo" result nodes,
+            // a "PoWConfig" challenge payload instead) -- every call was silently burning its full
+            // ProviderDeadline for nothing. Bing's RSS search format is unaffected and still returns
+            // real results, so it stays as the only Bing-backed source.
             var providers = new List<Func<string, CancellationToken, Task<List<SearchResult>>>>();
             if (intent.News)
                 providers.Add(SearchGoogleNewsRssAsync);
 
             providers.Add(SearchDuckDuckGoAsync);
-
-            if (intent.CurrentInfo || intent.News || intent.Docs || intent.Release)
-                providers.Add(SearchBingHtmlAsync);
-
             providers.Add(SearchBingRssAsync);
 
             Task<List<SearchResult>>[] tasks = providers
@@ -674,7 +687,7 @@ namespace Axiom.Core.Tools
         {
             string normalizedPrompt = NormalizeQuery(prompt);
             if (string.IsNullOrWhiteSpace(normalizedPrompt))
-                return new SearchIntent(string.Empty, string.Empty, false, false, false, false, Array.Empty<string>());
+                return new SearchIntent(string.Empty, string.Empty, false, false, false, false, Array.Empty<string>(), Array.Empty<string>());
 
             bool currentInfo = LooksLikeCurrentInfoQuery(normalizedPrompt);
             bool docs = LooksLikeDocsQuery(normalizedPrompt);
@@ -682,8 +695,9 @@ namespace Axiom.Core.Tools
             bool news = LooksLikeNewsQuery(normalizedPrompt);
 
             string selectedSentence = SelectMostSearchableSentence(normalizedPrompt, currentInfo, docs, release, news);
+            List<string> coreTerms = ExtractStrategicTerms(selectedSentence, normalizedPrompt);
             IReadOnlyList<string> queryTerms = ExpandIntentTerms(
-                ExtractStrategicTerms(selectedSentence, normalizedPrompt),
+                coreTerms,
                 normalizedPrompt,
                 currentInfo,
                 docs,
@@ -693,7 +707,7 @@ namespace Axiom.Core.Tools
             if (string.IsNullOrWhiteSpace(query))
                 query = normalizedPrompt;
 
-            return new SearchIntent(query, normalizedPrompt, currentInfo, docs, release, news, queryTerms);
+            return new SearchIntent(query, normalizedPrompt, currentInfo, docs, release, news, queryTerms, coreTerms);
         }
 
         private static List<string> BuildDeterministicSubQueries(SearchIntent intent)
@@ -1073,7 +1087,11 @@ namespace Axiom.Core.Tools
             void Add(string? value)
             {
                 string candidate = value?.Trim() ?? string.Empty;
-                if (candidate.Length < 3)
+                // A third independent copy of the same "shorter than 3 chars is noise" filter as
+                // ExtractRankedKeywords/ExtractLooseKeywords -- it was re-dropping "10" (and other
+                // short version numbers) even after ExtractStrategicTerms had already let it through,
+                // since baseTerms is fed straight into this same length gate below.
+                if (candidate.Length < 3 && !IsShortVersionNumberToken(candidate))
                     return;
 
                 if (seen.Add(candidate))
@@ -1127,11 +1145,19 @@ namespace Axiom.Core.Tools
         {
             return TokenRegex.Matches(text ?? string.Empty)
                 .Select(m => m.Value.Trim().ToLowerInvariant())
-                .Where(token => token.Length >= 3)
+                .Where(token => token.Length >= 3 || IsShortVersionNumberToken(token))
                 .Where(token => !TopicShiftStopWords.Contains(token))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
+
+        // A blanket "shorter than 3 chars is noise" filter silently dropped version numbers like the
+        // "10" in ".NET 10" or the "9" in "iOS 9" (they tokenize as standalone 1-2 digit tokens,
+        // separate from the preceding word, so the "word immediately followed by digits" pattern
+        // elsewhere in this file never catches them either) -- collapsing a specific, high-signal
+        // query down to a generic one ("dotnet release notes" instead of "dotnet 10 release notes").
+        private static bool IsShortVersionNumberToken(string token)
+            => token.Length is >= 1 and <= 4 && token.All(char.IsDigit);
 
         private static string BuildQueryText(IReadOnlyList<string> queryTerms, string selectedSentence, bool currentInfo, bool docs, bool release, bool news)
         {
@@ -1204,7 +1230,7 @@ namespace Axiom.Core.Tools
             foreach (Match match in TokenRegex.Matches(text ?? string.Empty))
             {
                 string token = match.Value.Trim();
-                if (token.Length < 3 || StopWords.Contains(token))
+                if ((token.Length < 3 && !IsShortVersionNumberToken(token)) || StopWords.Contains(token))
                     continue;
 
                 if (counts.TryGetValue(token, out var entry))
@@ -1278,37 +1304,62 @@ namespace Axiom.Core.Tools
 
         private static async Task<List<SearchResult>> SearchDuckDuckGoAsync(string query, CancellationToken token)
         {
-            var aggregated = new List<SearchResult>();
             string[] endpoints =
             [
                 "https://html.duckduckgo.com/html/?q=",
                 "https://lite.duckduckgo.com/lite/?q="
             ];
 
-            foreach (string endpoint in endpoints)
+            // Run both endpoints concurrently rather than sequentially: trying them one after the
+            // other inside a single shared ProviderDeadline meant a slow or unreachable first
+            // endpoint (e.g. a connection-level timeout, which takes the full socket-connect timeout
+            // to fail) starved the second one of any real time budget, so one bad endpoint could
+            // silently zero out this entire provider instead of falling back cleanly.
+            Task<List<SearchResult>>[] tasks = endpoints
+                .Select(endpoint => FetchDuckDuckGoEndpointAsync(endpoint, query, token))
+                .ToArray();
+            List<SearchResult>[] perEndpoint = await Task.WhenAll(tasks).ConfigureAwait(false);
+
+            var aggregated = new List<SearchResult>();
+            foreach (List<SearchResult> results in perEndpoint)
+                aggregated.AddRange(results);
+
+            return aggregated.Take(MaxResultsPerQuery).ToList();
+        }
+
+        private static async Task<List<SearchResult>> FetchDuckDuckGoEndpointAsync(string endpoint, string query, CancellationToken token)
+        {
+            try
             {
                 string url = endpoint + Uri.EscapeDataString(query);
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
                 using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
-                    continue;
+                    return new List<SearchResult>();
 
                 string html = await ReadContentAsStringBoundedAsync(response.Content, MaxSearchPayloadChars, token).ConfigureAwait(false);
                 if (string.IsNullOrWhiteSpace(html))
-                    continue;
+                    return new List<SearchResult>();
 
                 if (html.Contains("anomaly-modal", StringComparison.OrdinalIgnoreCase)
                     || html.Contains("Unfortunately, bots use DuckDuckGo too", StringComparison.OrdinalIgnoreCase))
                 {
-                    continue;
+                    return new List<SearchResult>();
                 }
 
-                aggregated.AddRange(ParseResults(html));
-                if (aggregated.Count >= MaxResultsPerQuery)
-                    break;
+                return ParseResults(html);
             }
-
-            return aggregated.Take(MaxResultsPerQuery).ToList();
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                // A connection-level failure on one endpoint (e.g. unreachable host) must not sink
+                // the sibling endpoint's Task.WhenAll batch above -- return empty and let whichever
+                // endpoint actually responded carry the result.
+                return new List<SearchResult>();
+            }
         }
 
         private static async Task<List<SearchResult>> SearchBingRssAsync(string query, CancellationToken token)
@@ -1343,21 +1394,6 @@ namespace Axiom.Core.Tools
             {
                 return new List<SearchResult>();
             }
-        }
-
-        private static async Task<List<SearchResult>> SearchBingHtmlAsync(string query, CancellationToken token)
-        {
-            string url = "https://www.bing.com/search?q=" + Uri.EscapeDataString(query) + "&setlang=en-US&cc=us";
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-                return new List<SearchResult>();
-
-            string html = await ReadContentAsStringBoundedAsync(response.Content, MaxSearchPayloadChars, token).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(html))
-                return new List<SearchResult>();
-
-            return ParseBingHtmlResults(html);
         }
 
         private static async Task<List<SearchResult>> SearchGoogleNewsRssAsync(string query, CancellationToken token)
@@ -1747,8 +1783,34 @@ namespace Axiom.Core.Tools
             score += ComputeTermCoverage(result, intent);
             score += ComputeQuestionRelationScore(result, intent);
             score += ComputeSourceQualityScore(result, intent);
+            score += ComputeCoreEntityScore(result, intent);
 
             return score;
+        }
+
+        // Query-embellishment words added for freshness/format biasing ("latest", "current",
+        // "article", the year) count as full query-term matches in the generic coverage loop above,
+        // same as the actual subject of the query -- which let a generic page that merely repeats
+        // "current" outscore/compete with a page that is genuinely about the named subject but
+        // doesn't happen to repeat those filler words. Distinctive terms (capitalized in the
+        // original prompt -- proper nouns, product/company names, acronyms) carry the real
+        // relevance signal, so a result mentioning none of them at all is a strong off-topic signal
+        // even when it scores fine on generic term/host/freshness heuristics. This was the direct
+        // cause of a live reproduction: "who is the current CEO of OpenAI" surfaced a generic
+        // Wikipedia "Chief executive officer" definition page and other results that never mention
+        // OpenAI at all.
+        private static int ComputeCoreEntityScore(SearchResult result, SearchIntent intent)
+        {
+            List<string> distinctiveTerms = intent.CoreTerms
+                .Where(term => term.Length > 0 && char.IsUpper(term[0]))
+                .ToList();
+            if (distinctiveTerms.Count == 0)
+                return 0;
+
+            string haystack = ((result.Title ?? string.Empty) + " " + (result.Snippet ?? string.Empty) + " " + (result.Url ?? string.Empty)).ToLowerInvariant();
+            int matched = distinctiveTerms.Count(term => haystack.Contains(term.ToLowerInvariant(), StringComparison.Ordinal));
+
+            return matched == 0 ? -10 : matched * 5;
         }
 
         private static int ComputeQuestionRelationScore(SearchResult result, SearchIntent intent)
@@ -2054,48 +2116,6 @@ namespace Axiom.Core.Tools
             return list;
         }
 
-        private static List<SearchResult> ParseBingHtmlResults(string html)
-        {
-            var doc = new HtmlDocument();
-            doc.LoadHtml(html);
-
-            var list = new List<SearchResult>();
-            var seenUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var resultNodes = doc.DocumentNode.SelectNodes("//li[contains(@class,'b_algo')]");
-            if (resultNodes == null)
-                return list;
-
-            foreach (HtmlNode node in resultNodes)
-            {
-                if (list.Count >= MaxResultsPerQuery)
-                    break;
-
-                HtmlNode? titleNode = node.SelectSingleNode(".//h2//a")
-                    ?? node.SelectSingleNode(".//a");
-                HtmlNode? snippetNode = node.SelectSingleNode(".//div[contains(@class,'b_caption')]//p")
-                    ?? node.SelectSingleNode(".//p");
-
-                string title = CleanText(titleNode?.InnerText);
-                string snippet = TruncateSnippet(CleanText(snippetNode?.InnerText));
-                string link = ExtractBingResultUrl(titleNode);
-
-                if (string.IsNullOrWhiteSpace(title)
-                    || string.IsNullOrWhiteSpace(snippet)
-                    || string.IsNullOrWhiteSpace(link))
-                {
-                    continue;
-                }
-
-                string normalizedUrl = NormalizeUrl(link);
-                if (!seenUrls.Add(normalizedUrl))
-                    continue;
-
-                list.Add(new SearchResult(title, snippet, link, int.MaxValue));
-            }
-
-            return list;
-        }
-
         private static string ExtractResultUrl(HtmlNode? titleNode)
         {
             string href = titleNode?.GetAttributeValue("href", string.Empty) ?? string.Empty;
@@ -2184,21 +2204,6 @@ namespace Axiom.Core.Tools
             }
 
             return cleanedDescription;
-        }
-
-        private static string ExtractBingResultUrl(HtmlNode? titleNode)
-        {
-            string href = titleNode?.GetAttributeValue("href", string.Empty) ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(href))
-                return string.Empty;
-
-            if (Uri.TryCreate(href, UriKind.Absolute, out Uri? absoluteUri))
-                return absoluteUri.ToString();
-
-            if (href.StartsWith("//", StringComparison.Ordinal))
-                return "https:" + href;
-
-            return string.Empty;
         }
 
         private static string TruncateSnippet(string text)
@@ -2528,7 +2533,7 @@ namespace Axiom.Core.Tools
 
         private static bool IsBroadNewsPrompt(string selectedSentence, IReadOnlyList<string> queryTerms)
         {
-            var intent = new SearchIntent(string.Empty, selectedSentence ?? string.Empty, false, false, false, true, queryTerms);
+            var intent = new SearchIntent(string.Empty, selectedSentence ?? string.Empty, false, false, false, true, queryTerms, queryTerms);
             return IsBroadNewsIntent(intent);
         }
 
