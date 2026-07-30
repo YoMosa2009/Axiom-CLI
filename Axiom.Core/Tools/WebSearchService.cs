@@ -2940,8 +2940,33 @@ namespace Axiom.Core.Tools
                 return false;
 
             int freshCount = results.Count(r => IsFreshEnough(r.PublishedAt, intent));
-            int highSignalCount = results.Count(r => ComputeWordOverlap((r.Title ?? string.Empty) + " " + (r.Snippet ?? string.Empty), intent.BasePrompt) >= 0.12);
-            return freshCount < Math.Min(2, results.Count) || highSignalCount == 0;
+
+            // ComputeWordOverlap is a Jaccard ratio (intersection/union): it penalizes long,
+            // information-rich result text even when every meaningful query term is present, because
+            // the union grows with the result's own length while the intersection stays capped at
+            // the query's term count. A live reproduction hit this directly -- a short 4-term query
+            // ("current", "ceo", "openai", ...) against Wikipedia's dense multi-sentence Sam Altman
+            // bio scored near zero overlap despite covering the topic perfectly, which made this
+            // function think the results were low-signal and force an expensive second full search
+            // round, consuming enough extra time to blow past the overall search deadline entirely.
+            // ComputeTermCoverage checks containment (how many query terms actually appear in the
+            // result) instead, which has no such length bias.
+            int highSignalCount = results.Count(r => ComputeTermCoverage(r, intent) >= 1);
+
+            if (highSignalCount == 0)
+                return true;
+
+            // Reproduction: "who is the current CEO of OpenAI" (CurrentInfo, not News) returned
+            // excellent, clearly on-topic results (Wikipedia's Sam Altman page, a Forbes profile) that
+            // all lack a PublishedAt -- reference/bio pages don't carry a "published" date the way a
+            // news article does. freshCount alone used to force this expensive extra search round
+            // (a second full multi-subquery fan-out across every provider) even though the results
+            // were already correct, which is what pushed a 22s CurrentSearchDeadline query into
+            // timing out. For genuine news/headline queries a strongly on-topic but stale article is
+            // still worth re-searching for (an old story about a since-superseded event), so
+            // freshness alone still matters there -- it just shouldn't for non-news "current state
+            // of X" queries whose results are already clearly on-topic.
+            return intent.News && freshCount < Math.Min(2, results.Count);
         }
 
         private static bool IsFreshEnough(DateTimeOffset? publishedAt, SearchIntent intent)
