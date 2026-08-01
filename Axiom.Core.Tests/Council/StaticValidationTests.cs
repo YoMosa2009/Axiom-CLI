@@ -67,6 +67,30 @@ namespace Axiom.Core.Tests.Council
         }
 
         [Fact]
+        public void Run_InstantiatingAUserDefinedClass_DoesNotFlagUndefinedFunction()
+        {
+            // Reproduction: a live Max-effort agent turn wrote a small inventory module with
+            // "class Item:" and later instantiated it as "Item(...)" -- the heuristic only ever
+            // recognized "def name(" as a defined name, so the class constructor call read as
+            // calling something undefined.
+            string code = "class Item:\n    def __init__(self, name):\n        self.name = name\n\nitem = Item(\"widget\")\n";
+            var findings = StaticValidation.Run(code);
+            Assert.DoesNotContain(findings, f => f.Contains("'Item()' is called but not defined", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public void Run_CallingABuiltinMethodOnAnObject_DoesNotFlagUndefinedFunction()
+        {
+            // Same repro as above: built-in dict/list method calls like "self.items.values()" and
+            // "data.get(...)" were flagged as calling an undefined bare function named "values" or
+            // "get" because the heuristic didn't distinguish obj.method() from a bare call.
+            string code = "def total(data):\n    return sum(v.get(\"price\") for v in data.values())\n";
+            var findings = StaticValidation.Run(code);
+            Assert.DoesNotContain(findings, f => f.Contains("'values()' is called but not defined", StringComparison.OrdinalIgnoreCase));
+            Assert.DoesNotContain(findings, f => f.Contains("'get()' is called but not defined", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
         public void DetectSandboxErrors_Traceback_Critical()
         {
             string output = "Traceback (most recent call last):\n  File \"x.py\", line 1\nNameError: name 'foo' is not defined\n";

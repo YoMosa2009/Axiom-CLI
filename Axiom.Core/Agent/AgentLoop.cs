@@ -424,7 +424,8 @@ namespace Axiom.Core.Agent
                         onToolEvent: onToolEvent,
                         onToken: null,
                         gateForCustomEndpoint: true,
-                        gatingMessage: userMessage);
+                        gatingMessage: userMessage,
+                        effort: _effort);
 
                     if (!string.IsNullOrWhiteSpace(reviewResult.FinalText))
                         finalText = reviewResult.FinalText;
@@ -448,6 +449,18 @@ namespace Axiom.Core.Agent
                             finalText,
                             postQuality.Findings,
                             postDiagnostics);
+
+                        // Same gap as the completion-retry loop had before v1.13.16: this branch
+                        // could append a real "unresolved issues" warning listing genuine blocking
+                        // problems, but never actually marked the turn failed -- so the turn-summary
+                        // status line kept reading as an unambiguous "Task completed" regardless.
+                        // Only high/critical findings trip this (matching HasBlockingFindings'
+                        // existing bar elsewhere), not every minor advisory note.
+                        if (ArtifactQualityInspector.HasBlockingFindings(postQuality.Findings)
+                            || DiagnosticsFailed(postDiagnostics))
+                        {
+                            failed = true;
+                        }
                     }
                 }
                 else if (DiagnosticsFailed(diagnostics))
@@ -455,6 +468,31 @@ namespace Axiom.Core.Agent
                     finalText = (finalText ?? string.Empty).TrimEnd()
                         + "\n\n--- auto diagnostics ---\n"
                         + (diagnostics.Length > 2500 ? diagnostics[..2500] + "\n..." : diagnostics);
+                }
+
+                // A tool-heavy turn can legitimately end with the model never emitting any closing
+                // chat text (it just calls write_file/read_file/etc. and stops). When that happens on
+                // an otherwise-successful turn, finalText stays "" and ChatTui has nothing to show --
+                // no bubble, no warning, no error, just silence after the tool trail. That reads to a
+                // user as "nothing happened" / "it couldn't produce a response" even though the work
+                // actually completed. Synthesize a minimal confirmation instead of leaving it blank.
+                if (!cancelled && !failed && string.IsNullOrWhiteSpace(finalText) && toolCalls > 0)
+                {
+                    if (_tools.WrittenPaths.Count > 0)
+                    {
+                        var names = _tools.WrittenPaths
+                            .Select(p => System.IO.Path.GetFileName(p))
+                            .Distinct()
+                            .Take(8)
+                            .ToList();
+                        finalText = "Done — updated " + string.Join(", ", names)
+                            + (_tools.WrittenPaths.Count > names.Count ? ", and more." : ".");
+                    }
+                    else
+                    {
+                        finalText = "Done — ran " + toolCalls + " tool call" + (toolCalls == 1 ? "" : "s")
+                            + " for this request.";
+                    }
                 }
             }
             catch (OperationCanceledException)

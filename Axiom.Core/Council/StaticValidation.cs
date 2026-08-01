@@ -486,6 +486,22 @@ namespace Axiom.Core.Council
                         definedNames.Add(trimmed[4..nameEnd].Trim());
                 }
 
+                // Python class definitions: `class Item:` or `class Item(Base):` -- without this,
+                // instantiating the class later (`Item("Widget", 10, 9.99)`) reads as a call to an
+                // undefined function, since only `def` was ever recognized as a "definition". Live
+                // reproduction: a class-based inventory system flagged every one of its own class
+                // constructors as "called but not defined".
+                if (trimmed.StartsWith("class "))
+                {
+                    string afterClass = trimmed[6..].TrimStart();
+                    int nameEnd = 0;
+                    while (nameEnd < afterClass.Length
+                        && (char.IsLetterOrDigit(afterClass[nameEnd]) || afterClass[nameEnd] == '_'))
+                        nameEnd++;
+                    if (nameEnd > 0)
+                        definedNames.Add(afterClass[..nameEnd]);
+                }
+
                 if ((trimmed.Contains("void ") || trimmed.Contains("int ") || trimmed.Contains("string ") ||
                      trimmed.Contains("bool ") || trimmed.Contains("float ") || trimmed.Contains("double ") ||
                      trimmed.Contains("static ") || trimmed.Contains("function ")) && trimmed.Contains('('))
@@ -511,7 +527,15 @@ namespace Axiom.Core.Council
                         nameStart--;
                     nameStart++;
 
-                    if (nameStart < callParen)
+                    // A call preceded by '.' is a method call (`self.items.values()`,
+                    // `my_dict.get(key)`) -- this scan has no way to know what type the receiver is,
+                    // so it can never reliably verify method calls are "defined" the way it can bare
+                    // function calls. Treating them the same produced constant false positives for
+                    // ordinary built-in dict/list/str methods (.values(), .get(), .append(), ...),
+                    // live-reproduced on a class-based inventory system. Skip method calls entirely
+                    // rather than guess.
+                    bool isMethodCall = nameStart > 0 && trimmed[nameStart - 1] == '.';
+                    if (nameStart < callParen && !isMethodCall)
                     {
                         string name = trimmed[nameStart..callParen];
                         if (name.Length > 1 && !char.IsDigit(name[0]))
