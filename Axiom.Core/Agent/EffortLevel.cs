@@ -39,6 +39,24 @@ namespace Axiom.Core.Agent
             _ => ToolCallingLoop.DefaultMaxRounds
         };
 
+        /// <summary>How many "you MUST write now" nudge-retry attempts AgentLoop will make within a
+        /// single turn before conceding a request genuinely couldn't be completed. This is the
+        /// direct lever for long-horizon persistence: Low/Medium keep the original one-retry
+        /// behavior (fail fast on a quick ask), High/Max keep attempting the SAME problem more times
+        /// before giving up -- each attempt is a fresh generation, so identical nudge wording can
+        /// still succeed on a later attempt after stalling on an earlier one (confirmed live: an
+        /// attempt that stalled on read-only investigation alone produced a real fix on the very
+        /// next attempt). This does not retry forever -- a genuinely infeasible or ambiguous request
+        /// still needs to fail eventually and say so, not loop indefinitely.</summary>
+        public static int MaxCompletionRetries(EffortLevel level) => level switch
+        {
+            EffortLevel.Low => 1,
+            EffortLevel.Medium => 1,
+            EffortLevel.High => 2,
+            EffortLevel.Max => 3,
+            _ => 1
+        };
+
         /// <summary>Per-turn completion token budget (covers both the reasoning pass and the final
         /// answer, since Ollama shares one token stream for both). Medium matches the existing 8,192
         /// default this codebase already validated empirically against real Cloudflare/heartbeat

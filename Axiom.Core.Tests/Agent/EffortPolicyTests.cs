@@ -16,6 +16,30 @@ namespace Axiom.Core.Tests.Agent
         }
 
         [Fact]
+        public void MaxCompletionRetries_MediumMatchesPreEffortDefault()
+        {
+            // Backward-compatibility guarantee, same reasoning as MaxRounds/MaxTokens: any caller
+            // that doesn't pass an effort argument sees identical behavior to before this existed
+            // (a single nudge-retry attempt).
+            Assert.Equal(1, EffortPolicy.MaxCompletionRetries(EffortLevel.Low));
+            Assert.Equal(1, EffortPolicy.MaxCompletionRetries(EffortLevel.Medium));
+        }
+
+        [Fact]
+        public void MaxCompletionRetries_HighAndMaxGetMorePersistence()
+        {
+            // Direct regression guard for the "long-horizon task" fix: High/Max must genuinely keep
+            // attempting a stuck completion for more rounds than Medium, not just report failure
+            // faster/more honestly.
+            int medium = EffortPolicy.MaxCompletionRetries(EffortLevel.Medium);
+            int high = EffortPolicy.MaxCompletionRetries(EffortLevel.High);
+            int max = EffortPolicy.MaxCompletionRetries(EffortLevel.Max);
+
+            Assert.True(high > medium, $"expected High ({high}) > Medium ({medium})");
+            Assert.True(max > high, $"expected Max ({max}) > High ({high})");
+        }
+
+        [Fact]
         public void MaxRounds_IncreaseMonotonicallyWithEffort()
         {
             int low = EffortPolicy.MaxRounds(EffortLevel.Low);

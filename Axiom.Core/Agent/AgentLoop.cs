@@ -292,11 +292,24 @@ namespace Axiom.Core.Agent
                 }
                 bool hasBlockingArtifactFailure = completionQuality != null
                     && ArtifactQualityInspector.HasBlockingFindings(completionQuality.Findings);
-                if (isCustomEndpoint && requiresWrittenArtifacts && !cancelled && !failed
+
+                // Effort scales genuine persistence on a stuck long-horizon task, not just how big a
+                // single attempt's own budget is: Low/Medium keep the original one-retry behavior
+                // (fail fast on a simple ask), High/Max keep attempting the SAME problem more times
+                // before conceding it's actually stuck. Each attempt is a fresh generation, so
+                // identical nudge wording can genuinely succeed on a later attempt after stalling on
+                // an earlier one (live-confirmed: an attempt that stalled on read-only investigation
+                // alone produced a real fix on the very next attempt) -- this isn't a loop that spins
+                // forever, though: once EffortPolicy.MaxCompletionRetries is exhausted, it still
+                // concedes and reports failure rather than retrying indefinitely.
+                int maxCompletionRetries = isCustomEndpoint ? EffortPolicy.MaxCompletionRetries(_effort) : 1;
+                int completionRetryAttempt = 0;
+                while (isCustomEndpoint && requiresWrittenArtifacts && !cancelled && !failed
                     && (_tools.WrittenPaths.Count == 0
                         || hasBlockingArtifactFailure
                         || unfinishedSteps.Count > 0))
                 {
+                    completionRetryAttempt++;
                     string nudgeDetail = hasBlockingArtifactFailure
                         ? "The written artifacts are not a complete usable deliverable yet: "
                           + string.Join("; ", completionQuality!.Findings.Take(6))
@@ -306,11 +319,12 @@ namespace Axiom.Core.Agent
                           ". Call the required tool(s) for each of these now -- do not just describe them as done."
                         : "You MUST call write_file or str_replace now to make the requested change on disk — " +
                           "describing the change is not sufficient. Call a tool before responding.";
-                    onStatus?.Invoke(hasBlockingArtifactFailure
+                    string attemptSuffix = maxCompletionRetries > 1 ? $" (attempt {completionRetryAttempt}/{maxCompletionRetries})" : string.Empty;
+                    onStatus?.Invoke((hasBlockingArtifactFailure
                         ? "Written artifacts are incomplete — retrying with concrete validation findings"
                         : unfinishedSteps.Count > 0
                         ? $"{unfinishedSteps.Count} plan step(s) unfinished — retrying with explicit instruction"
-                        : "No file changes made yet — retrying with explicit instruction");
+                        : "No file changes made yet — retrying with explicit instruction") + attemptSuffix);
                     string nudgedInput = effectiveUser + "\n\n[INCOMPLETE] " + nudgeDetail;
                     ToolCallingResult retryResult = await loop.RunAsync(
                         system,
@@ -322,52 +336,55 @@ namespace Axiom.Core.Agent
                         onToken: onToken,
                         gateForCustomEndpoint: isCustomEndpoint,
                         gatingMessage: userMessage,
-                        conversationHistory: history);
+                        conversationHistory: history,
+                        effort: _effort);
 
                     finalText = retryResult.FinalText;
                     toolCalls += retryResult.ToolCallCount;
                     cancelled = retryResult.Cancelled;
                     failed |= retryResult.StreamInterrupted;
 
-                    bool stillUnfinished = planBoardAvailable && _tools.Workflow.Plan.Steps
-                        .Any(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing);
-                    ArtifactQualitySnapshot? postCompletionQuality = null;
-                    if (requiresWrittenArtifacts && _tools.WrittenPaths.Count > 0)
-                    {
-                        postCompletionQuality = ArtifactQualityInspector.Inspect(
-                            _tools.WrittenPaths,
-                            goal,
-                            evidenceCharacterBudget: 2_000);
-                    }
-                    bool stillHasBlockingArtifactFailure = postCompletionQuality != null
-                        && ArtifactQualityInspector.HasBlockingFindings(postCompletionQuality.Findings);
-                    // These three cases mean the explicit "you MUST write now" nudge retry still
-                    // didn't produce a real fix -- the turn-level `failed` flag has to reflect that,
-                    // not just the appended warning text. Without this, ChatTui's turn-summary status
-                    // line (ActivityStatus.SummarizeTurn) only looks at toolCallCount and elapsed
-                    // time, so it kept showing "Task completed · Worked on N steps" even when nothing
-                    // was actually accomplished -- the warning text was easy to miss under a status
-                    // line that read as an unambiguous success. Live-reported: the model repeatedly
-                    // claimed completion on follow-up turns without making the requested change, and
-                    // the status line gave no visible signal anything had gone wrong.
-                    if (!cancelled && _tools.WrittenPaths.Count == 0)
-                    {
-                        finalText = (finalText ?? string.Empty).TrimEnd()
-                            + "\n\n⚠ No files were changed for this request — the model did not write to disk.";
-                        failed = true;
-                    }
-                    else if (!cancelled && stillHasBlockingArtifactFailure)
-                    {
-                        finalText = (finalText ?? string.Empty).TrimEnd()
-                            + "\n\n⚠ The written artifacts still fail completion checks — review the reported validation findings.";
-                        failed = true;
-                    }
-                    else if (!cancelled && stillUnfinished)
-                    {
-                        finalText = (finalText ?? string.Empty).TrimEnd()
-                            + "\n\n⚠ Some plan steps were still not completed after a retry — check the plan board.";
-                        failed = true;
-                    }
+                    unfinishedSteps = planBoardAvailable
+                        ? _tools.Workflow.Plan.Steps
+                            .Where(s => s.Status is PlanStepStatus.Pending or PlanStepStatus.Doing)
+                            .ToList()
+                        : new List<PlanStep>();
+                    completionQuality = requiresWrittenArtifacts && _tools.WrittenPaths.Count > 0
+                        ? ArtifactQualityInspector.Inspect(_tools.WrittenPaths, goal, evidenceCharacterBudget: 2_000)
+                        : null;
+                    hasBlockingArtifactFailure = completionQuality != null
+                        && ArtifactQualityInspector.HasBlockingFindings(completionQuality.Findings);
+
+                    if (completionRetryAttempt >= maxCompletionRetries)
+                        break;
+                }
+
+                // These three cases mean every nudge-retry attempt this turn's effort tier allowed
+                // still didn't produce a real fix -- the turn-level `failed` flag has to reflect
+                // that, not just the appended warning text. Without this, ChatTui's turn-summary
+                // status line (ActivityStatus.SummarizeTurn) only looks at toolCallCount and elapsed
+                // time, so it kept showing "Task completed · Worked on N steps" even when nothing was
+                // actually accomplished -- the warning text was easy to miss under a status line that
+                // read as an unambiguous success. Live-reported: the model repeatedly claimed
+                // completion on follow-up turns without making the requested change, and the status
+                // line gave no visible signal anything had gone wrong.
+                if (completionRetryAttempt > 0 && !cancelled && _tools.WrittenPaths.Count == 0)
+                {
+                    finalText = (finalText ?? string.Empty).TrimEnd()
+                        + "\n\n⚠ No files were changed for this request — the model did not write to disk.";
+                    failed = true;
+                }
+                else if (completionRetryAttempt > 0 && !cancelled && hasBlockingArtifactFailure)
+                {
+                    finalText = (finalText ?? string.Empty).TrimEnd()
+                        + "\n\n⚠ The written artifacts still fail completion checks — review the reported validation findings.";
+                    failed = true;
+                }
+                else if (completionRetryAttempt > 0 && !cancelled && unfinishedSteps.Count > 0)
+                {
+                    finalText = (finalText ?? string.Empty).TrimEnd()
+                        + "\n\n⚠ Some plan steps were still not completed after retrying — check the plan board.";
+                    failed = true;
                 }
 
                 string diagnostics = string.Empty;
