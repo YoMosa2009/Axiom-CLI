@@ -68,7 +68,23 @@ namespace Axiom.Core.Agent
 
             TaskSpecialty specialty = IntelligenceHelpers.DetectSpecialty(userMessage);
             GoalContract goal = GoalContract.FromPrompt(userMessage);
-            bool requiresWrittenArtifacts = goal.RequiresWrittenArtifacts;
+            // GoalContract.RequiresWrittenArtifacts only fires on explicit edit-shaped wording
+            // ("fix", "add", "update", ...) in THIS message alone. That misses a real, live-reported
+            // pattern: a short follow-up in the middle of an ongoing coding session ("that's still
+            // not right", "try again", "no, that's wrong") that never repeats an edit keyword but is
+            // unambiguously asking for more work on the same task. Without requiresWrittenArtifacts,
+            // the "nothing was written" retry-and-failure safety net a few lines below never engages
+            // for that turn at all, so a model that responds with just narration instead of a real
+            // fix sails straight through undetected -- which is exactly the "I keep telling it and it
+            // still doesn't fix it" complaint this was built to catch. Broadened to also cover any
+            // non-trivial follow-up mid-session, while still excluding small talk and genuine
+            // questions so a real "why did you do X?" doesn't get force-nudged into an unwanted edit.
+            bool looksLikeOngoingTaskFollowUp = isCustomEndpoint
+                && history.Count > 0
+                && _workspace.Roots.Count > 0
+                && !ToolGatingHeuristics.LooksLikeSmallTalk(userMessage)
+                && !LooksLikePureQuestion(userMessage);
+            bool requiresWrittenArtifacts = goal.RequiresWrittenArtifacts || looksLikeOngoingTaskFollowUp;
             string goalBlock = goal.ToPromptBlock();
             // Same tool list ToolCallingLoop.RunAsync will independently (but deterministically)
             // resolve below -- computed here too so the system prompt's tool enumeration matches
@@ -325,20 +341,32 @@ namespace Axiom.Core.Agent
                     }
                     bool stillHasBlockingArtifactFailure = postCompletionQuality != null
                         && ArtifactQualityInspector.HasBlockingFindings(postCompletionQuality.Findings);
+                    // These three cases mean the explicit "you MUST write now" nudge retry still
+                    // didn't produce a real fix -- the turn-level `failed` flag has to reflect that,
+                    // not just the appended warning text. Without this, ChatTui's turn-summary status
+                    // line (ActivityStatus.SummarizeTurn) only looks at toolCallCount and elapsed
+                    // time, so it kept showing "Task completed · Worked on N steps" even when nothing
+                    // was actually accomplished -- the warning text was easy to miss under a status
+                    // line that read as an unambiguous success. Live-reported: the model repeatedly
+                    // claimed completion on follow-up turns without making the requested change, and
+                    // the status line gave no visible signal anything had gone wrong.
                     if (!cancelled && _tools.WrittenPaths.Count == 0)
                     {
                         finalText = (finalText ?? string.Empty).TrimEnd()
                             + "\n\n⚠ No files were changed for this request — the model did not write to disk.";
+                        failed = true;
                     }
                     else if (!cancelled && stillHasBlockingArtifactFailure)
                     {
                         finalText = (finalText ?? string.Empty).TrimEnd()
                             + "\n\n⚠ The written artifacts still fail completion checks — review the reported validation findings.";
+                        failed = true;
                     }
                     else if (!cancelled && stillUnfinished)
                     {
                         finalText = (finalText ?? string.Empty).TrimEnd()
                             + "\n\n⚠ Some plan steps were still not completed after a retry — check the plan board.";
+                        failed = true;
                     }
                 }
 
@@ -578,6 +606,32 @@ namespace Axiom.Core.Agent
             {
                 _tools.Workflow.NoteTestsPassedClear(filter);
             }
+        }
+
+        // Deliberately narrow and cheap (no NLP, just shape): a trailing "?" or a leading
+        // question-word covers the overwhelming majority of real questions ("why did you use X?",
+        // "what does this do", "is that safe?") without trying to fully understand the sentence.
+        // False negatives here just mean a genuine question gets treated as an action request (an
+        // extra unwanted retry nudge, mildly annoying); false positives would mean a real follow-up
+        // fix request gets exempted from the safety net (the actual bug this exists to catch), so
+        // this deliberately leans toward under-excluding rather than over-excluding.
+        // Public for direct regression testing (matches OpenRouterChatService.BuildChatRequest's
+        // existing pattern of exposing otherwise-internal logic rather than adding a mocking seam).
+        public static bool LooksLikePureQuestion(string message)
+        {
+            string trimmed = (message ?? string.Empty).TrimEnd();
+            if (trimmed.Length == 0)
+                return false;
+            if (trimmed.EndsWith('?'))
+                return true;
+
+            string lower = trimmed.TrimStart().ToLowerInvariant();
+            string[] questionStarts =
+            [
+                "why ", "what ", "what's ", "how ", "how's ", "is ", "is it", "are ", "can ", "can you",
+                "could ", "could you", "should ", "does ", "do you", "did ", "will ", "would ", "which "
+            ];
+            return questionStarts.Any(s => lower.StartsWith(s, StringComparison.Ordinal));
         }
 
         // Deliberately depends ONLY on `mode` and `isCustomEndpoint` -- both fixed for the life of
