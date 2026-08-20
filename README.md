@@ -45,7 +45,11 @@ when a newer version is available.
 |---|---|
 | `axiom [--model <id>]` | Full-window TUI chat (default). `/` tools · `@` lock folder · `/help` |
 | `axiom config` | Store your OpenRouter API key, a self-hosted endpoint, and/or a [Tavily](https://tavily.com) API key for reliable `web_search` (all encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
+| `axiom connect` | Save Kestrel 1's HTTPS endpoint and this computer's revocable access key |
 | `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
+| `axiom --engine opencode` | Preview: OpenCode's agent TUI, backed by Kestrel 1 |
+| `axiom code --engine opencode [--yes] [--json] "<task>"` | Preview: OpenCode coding agent, backed by Kestrel 1 |
+| `axiom opencode install` | Install Axiom's pinned OpenCode runtime for the current user |
 | `axiom update` | Download and install the latest release for your platform |
 
 `axiom chat` remains a supported alias for the default TUI.
@@ -56,6 +60,29 @@ self-hosted OpenAI-compatible endpoint you configure yourself via `axiom config`
 model id, and API key). Kestral 1 runs on whatever machine you point it at — useful for using
 your own PC as inference compute from a laptop or another machine. `axiom code` uses the
 desktop app's Workplace Council default model unless `--model` is given.
+
+### OpenCode-backed Kestrel preview
+
+The `--engine opencode` preview keeps Kestrel 1 as the inference server while using
+[OpenCode](https://opencode.ai) for the agent runtime. This is intended for using the same
+Kestrel 1 server from another computer: files, shell commands, tests, Git, and other agent tools
+run on that computer; only model requests travel to `ai.axiominference.work` over HTTPS.
+
+```sh
+axiom connect
+axiom --engine opencode
+axiom code --engine opencode "explain the failing test and fix it"
+```
+
+`axiom connect` stores a device-specific Kestrel access key in Axiom's existing encrypted secret
+store. Do not reuse a browser key; create a separate revocable key for each laptop. The bridge
+configures Kestrel as `axiom/omnicoder-2-9b:q5_k_m` with a 131,072-token context window and keeps
+the key out of OpenCode config files.
+
+Run `axiom opencode install` once to install Axiom's pinned OpenCode runtime into Axiom's own
+application-data folder. It requires Node.js and npm; if you already manage OpenCode yourself,
+put it on `PATH` or set `AXIOM_OPENCODE_PATH` to its executable. The legacy Axiom engine remains
+the default during the preview.
 
 ### Cross-platform chat TUI
 `axiom` paints its own interface (alternate screen) on **Windows, macOS, and Linux** so the

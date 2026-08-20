@@ -1,0 +1,82 @@
+using System;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+namespace Axiom.Core.OpenCode;
+
+/// <summary>
+/// Builds the per-process OpenCode configuration used by Axiom's Kestrel bridge.
+/// The API key is intentionally represented by an environment-variable reference:
+/// no credential is written to an OpenCode config file.
+/// </summary>
+public static class KestrelOpenCodeConfiguration
+{
+    public const string DefaultBaseUrl = "https://ai.axiominference.work/v1";
+    public const string ProviderId = "kestrel";
+    public const string ModelId = "axiom/omnicoder-2-9b:q5_k_m";
+    public const string QualifiedModelId = ProviderId + "/" + ModelId;
+    public const string ApiKeyEnvironmentVariable = "AXIOM_KESTREL_API_KEY";
+    public const int ContextWindowTokens = 131_072;
+    public const int MaxOutputTokens = 16_384;
+
+    public static bool TryCreate(string? baseUrl, bool autoApprove, out string configJson, out string error)
+    {
+        configJson = string.Empty;
+        error = string.Empty;
+
+        if (!Uri.TryCreate(baseUrl?.Trim(), UriKind.Absolute, out Uri? endpoint)
+            || endpoint.Scheme != Uri.UriSchemeHttps)
+        {
+            error = "Kestrel requires an https:// endpoint. Run 'axiom connect' to configure it.";
+            return false;
+        }
+
+        string normalizedBaseUrl = endpoint.AbsoluteUri.TrimEnd('/');
+        var permissions = new JsonObject
+        {
+            ["edit"] = autoApprove ? "allow" : "ask",
+            ["bash"] = autoApprove ? "allow" : "ask",
+            ["webfetch"] = "ask",
+            ["websearch"] = "ask"
+        };
+
+        var root = new JsonObject
+        {
+            ["$schema"] = "https://opencode.ai/config.json",
+            ["autoupdate"] = false,
+            ["model"] = QualifiedModelId,
+            ["small_model"] = QualifiedModelId,
+            ["permission"] = permissions,
+            ["provider"] = new JsonObject
+            {
+                [ProviderId] = new JsonObject
+                {
+                    ["npm"] = "@ai-sdk/openai-compatible",
+                    ["name"] = "Kestrel 1",
+                    ["options"] = new JsonObject
+                    {
+                        ["baseURL"] = normalizedBaseUrl,
+                        ["apiKey"] = "{env:" + ApiKeyEnvironmentVariable + "}",
+                        ["timeout"] = 600_000,
+                        ["chunkTimeout"] = 120_000
+                    },
+                    ["models"] = new JsonObject
+                    {
+                        [ModelId] = new JsonObject
+                        {
+                            ["name"] = "Kestrel 1 · OmniCoder-2-9B Q5_K_M",
+                            ["limit"] = new JsonObject
+                            {
+                                ["context"] = ContextWindowTokens,
+                                ["output"] = MaxOutputTokens
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        configJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+        return true;
+    }
+}

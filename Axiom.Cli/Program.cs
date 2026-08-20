@@ -11,6 +11,7 @@ using Axiom.Core;
 using Axiom.Core.Agent;
 using Axiom.Core.Chat;
 using Axiom.Core.Council;
+using Axiom.Core.OpenCode;
 using Axiom.Core.Persistence;
 using Axiom.Core.Tools;
 using Axiom.Core.Workspace;
@@ -38,6 +39,7 @@ internal static class Program
 
         string? modelOverride = ExtractFlag(ref args, "--model");
         string? profileOverride = ExtractFlag(ref args, "--profile") ?? ExtractFlag(ref args, "-p");
+        string? engineOverride = ExtractFlag(ref args, "--engine");
         bool yesFlag = ExtractSwitch(ref args, "--yes") || ExtractSwitch(ref args, "-y");
         bool jsonFlag = ExtractSwitch(ref args, "--json");
 
@@ -56,10 +58,18 @@ internal static class Program
         // Bare `axiom` (no subcommand) opens the chat TUI. `axiom chat` remains an alias.
         string command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         bool isChatEntry = command is "" or "chat";
+        bool useOpenCode = string.Equals(engineOverride, "opencode", StringComparison.OrdinalIgnoreCase);
+        bool useLegacy = string.IsNullOrWhiteSpace(engineOverride)
+            || string.Equals(engineOverride, "legacy", StringComparison.OrdinalIgnoreCase);
+        if (!useOpenCode && !useLegacy)
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Unknown engine:[/] {engineOverride.EscapeMarkup()}. Supported engines: legacy, opencode.");
+            return 1;
+        }
         UpdateInstaller.CleanupPendingBackups();
         ConsoleUi.ConfigureConsole();
 
-        if (isChatEntry && !ownedFlag && !SessionLauncher.IsOwnedSession)
+        if (isChatEntry && !useOpenCode && !ownedFlag && !SessionLauncher.IsOwnedSession)
         {
             var launchArgs = new List<string>();
             if (!string.IsNullOrWhiteSpace(profileOverride))
@@ -91,6 +101,12 @@ internal static class Program
             return command switch
             {
                 "config" => await RunConfigAsync(),
+                "connect" => await RunConnectAsync(),
+                "" or "chat" when useOpenCode => await RunOpenCodeChatAsync(modelOverride, yesFlag),
+                "code" when useOpenCode => await RunOpenCodeCodeAsync(string.Join(' ', args.Skip(1)), modelOverride, yesFlag, jsonFlag),
+                "opencode" when args.Skip(1).FirstOrDefault()?.Equals("install", StringComparison.OrdinalIgnoreCase) == true
+                    => await RunOpenCodeInstallAsync(),
+                "opencode" => await RunOpenCodeChatAsync(modelOverride, yesFlag),
                 "" or "chat" => await RunChatAsync(modelOverride, profileOverride, bootstrapPath),
                 "code" => await RunCodeAsync(string.Join(' ', args.Skip(1)), modelOverride, yesFlag, jsonFlag, profileOverride),
                 "update" => await RunUpdateAsync(),
@@ -108,7 +124,7 @@ internal static class Program
     private static bool IsReservedCommand(string arg)
     {
         string c = arg.ToLowerInvariant();
-        return c is "config" or "chat" or "code" or "update" or "help" or "--help" or "-h";
+        return c is "config" or "connect" or "opencode" or "chat" or "code" or "update" or "help" or "--help" or "-h";
     }
 
     private static bool LooksLikePathArg(string arg)
@@ -171,8 +187,13 @@ internal static class Program
         AnsiConsole.MarkupLine($"  [{gold}]axiom[/] [[path]] [[--model <id>]] [[--profile <name>]]");
         AnsiConsole.MarkupLine($"                              Full-window TUI (default). path locks workspace.");
         AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key and/or self-hosted endpoint");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom connect[/]                 Save Kestrel 1 endpoint and this device's access key");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--yes]] [[--json]] [[--model <id>]] <task>");
         AnsiConsole.MarkupLine($"                              Council on cwd; --yes auto-apply patch; --json machine output");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom --engine opencode[/]       OpenCode TUI backed by Kestrel 1 (preview)");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom code --engine opencode[/] [[--yes]] [[--json]] <task>");
+        AnsiConsole.MarkupLine($"                              OpenCode coding agent backed by Kestrel 1 (preview)");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom opencode install[/]       Install Axiom's pinned OpenCode runtime for this user");
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
         AnsiConsole.MarkupLine($"  [{gold}]axiom help[/]                    Show this help");
         AnsiConsole.WriteLine();
@@ -377,6 +398,118 @@ internal static class Program
 
         AnsiConsole.MarkupLine($"Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom[/] to start chatting.");
         return 0;
+    }
+
+    private static Task<int> RunConnectAsync()
+    {
+        using var db = new DatabaseService();
+        string existingBaseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
+        string? existingApiKey = db.LoadCustomEndpointApiKey();
+        string suggestedBaseUrl = string.IsNullOrWhiteSpace(existingBaseUrl)
+            ? KestrelOpenCodeConfiguration.DefaultBaseUrl
+            : existingBaseUrl;
+
+        AnsiConsole.MarkupLine("[bold]Connect Kestrel 1[/]");
+        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]This saves the connection for this computer only. Your coding tools continue to run locally.[/]");
+        AnsiConsole.Markup($"Kestrel URL (Enter keeps {suggestedBaseUrl.EscapeMarkup()}): ");
+        string baseUrl = (ReadLinePlain() ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            baseUrl = suggestedBaseUrl;
+
+        AnsiConsole.Markup("Kestrel device access key (leave blank to keep the current key): ");
+        string suppliedKey = (ReadLineSecret() ?? string.Empty).Trim();
+        string apiKey = string.IsNullOrWhiteSpace(suppliedKey) ? existingApiKey ?? string.Empty : suppliedKey;
+
+        if (!KestrelOpenCodeConfiguration.TryCreate(baseUrl, autoApprove: false, out _, out string error))
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]{error.EscapeMarkup()}[/]");
+            return Task.FromResult(1);
+        }
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]A device access key is required. Create a separate revocable key on the server, then run 'axiom connect' again.[/]");
+            return Task.FromResult(1);
+        }
+
+        db.SaveSetting(DatabaseService.CustomEndpointBaseUrlSettingKey, baseUrl);
+        db.SaveSetting(DatabaseService.CustomEndpointModelIdSettingKey, KestrelOpenCodeConfiguration.ModelId);
+        if (!string.IsNullOrWhiteSpace(suppliedKey))
+            db.SaveCustomEndpointApiKey(suppliedKey);
+
+        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Success)}]Kestrel 1 is connected for this device.[/]");
+        AnsiConsole.MarkupLine($"Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom --engine opencode[/] for the OpenCode-backed agent.");
+        return Task.FromResult(0);
+    }
+
+    private static Task<int> RunOpenCodeChatAsync(string? modelOverride, bool yesFlag)
+        => RunOpenCodeAsync(task: null, modelOverride, yesFlag, jsonFlag: false);
+
+    private static async Task<int> RunOpenCodeInstallAsync()
+    {
+        AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Installing Axiom's pinned OpenCode runtime. This downloads {OpenCodeRunner.NpmPackageName}@{OpenCodeRunner.PinnedRuntimeVersion} into Axiom's local application data.[/]");
+        OpenCodeRunner.RuntimeInstallResult result = await OpenCodeRunner.InstallManagedRuntimeAsync(CancellationToken.None);
+        AnsiConsole.MarkupLine(result.Success
+            ? $"[{AxiomTheme.Hex(AxiomTheme.Success)}]{result.Message.EscapeMarkup()}[/]"
+            : $"[{AxiomTheme.Hex(AxiomTheme.Error)}]{result.Message.EscapeMarkup()}[/]");
+        return result.Success ? 0 : 1;
+    }
+
+    private static Task<int> RunOpenCodeCodeAsync(string task, string? modelOverride, bool yesFlag, bool jsonFlag)
+    {
+        if (string.IsNullOrWhiteSpace(task))
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Usage:[/] axiom code --engine opencode [[--yes]] [[--json]] \"<task>\"");
+            return Task.FromResult(1);
+        }
+
+        return RunOpenCodeAsync(task, modelOverride, yesFlag, jsonFlag);
+    }
+
+    private static async Task<int> RunOpenCodeAsync(string? task, string? modelOverride, bool yesFlag, bool jsonFlag)
+    {
+        if (!string.IsNullOrWhiteSpace(modelOverride)
+            && !modelOverride.Equals("kestrel", StringComparison.OrdinalIgnoreCase)
+            && !modelOverride.Equals("kestrel 1", StringComparison.OrdinalIgnoreCase)
+            && !modelOverride.Equals(KestrelOpenCodeConfiguration.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]The OpenCode bridge currently supports Kestrel 1 only.[/]");
+            return 1;
+        }
+
+        if (!OpenCodeRunner.TryFindRuntime(out string runtimePath))
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]OpenCode is not installed or discoverable.[/]");
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Run 'axiom opencode install' once, or set AXIOM_OPENCODE_PATH to an existing runtime.[/]");
+            return 1;
+        }
+
+        using var db = new DatabaseService();
+        string baseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            baseUrl = KestrelOpenCodeConfiguration.DefaultBaseUrl;
+        // Useful for ephemeral CI and diagnostics: the override never touches Axiom's secure
+        // store and wins only for this process. Normal laptop use is 'axiom connect'.
+        string apiKey = Environment.GetEnvironmentVariable("AXIOM_CLI_KESTREL_API_KEY")
+            ?? db.LoadCustomEndpointApiKey()
+            ?? string.Empty;
+
+        var arguments = new List<string>();
+        if (string.IsNullOrWhiteSpace(task))
+        {
+            arguments.Add("--model");
+            arguments.Add(KestrelOpenCodeConfiguration.QualifiedModelId);
+        }
+        else
+        {
+            arguments.AddRange(["run", "--model", KestrelOpenCodeConfiguration.QualifiedModelId, "--agent", "build"]);
+            if (jsonFlag)
+                arguments.AddRange(["--format", "json"]);
+            if (yesFlag)
+                arguments.Add("--auto");
+            arguments.Add(task);
+        }
+
+        return await OpenCodeRunner.RunAsync(runtimePath, baseUrl, apiKey, arguments, CancellationToken.None);
     }
 
     private static string Last4(string value) => value.Length <= 4 ? value : value[^4..];
