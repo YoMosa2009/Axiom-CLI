@@ -70,4 +70,8 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "Run 'axiom config' to set your OpenRouter API key, then 'axiom' or 'axiom code \"<task>\"'."
+echo "For Kestrel 1 + OpenCode (requires Node.js/npm), run:"
+echo "  axiom opencode install"
+echo "  axiom connect"
+echo "  axiom --engine opencode"
+echo "For the legacy OpenRouter flow, run 'axiom config' then 'axiom'."

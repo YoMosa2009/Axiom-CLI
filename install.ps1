@@ -47,11 +47,18 @@ try {
     if ($userPath -notlike "*$InstallDir*") {
         [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallDir", "User")
         Write-Host ""
-        Write-Host "Added $InstallDir to your user PATH. Restart your terminal for it to take effect."
+        Write-Host "Added $InstallDir to your user PATH for future terminals."
+    }
+    if ($env:Path -notlike "*$InstallDir*") {
+        $env:Path = "$InstallDir;$env:Path"
     }
 
     Write-Host ""
-    Write-Host "Run 'axiom config' to set your OpenRouter API key, then 'axiom' or 'axiom code `"<task>`"'."
+    Write-Host "For Kestrel 1 + OpenCode (requires Node.js/npm), run:"
+    Write-Host "  axiom opencode install"
+    Write-Host "  axiom connect"
+    Write-Host "  axiom --engine opencode"
+    Write-Host "For the legacy OpenRouter flow, run 'axiom config' then 'axiom'."
 }
 finally {
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue

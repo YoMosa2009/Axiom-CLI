@@ -1,8 +1,8 @@
 # Axiom CLI
 
-A terminal coding agent — an Architect/Builder/Critic council that reads your codebase, proposes
-patches, and applies them after your review. Cross-platform (Windows/macOS/Linux), cloud-first
-via [OpenRouter](https://openrouter.ai), free to use with your own API key.
+A terminal coding agent that can use Axiom's Architect/Builder/Critic council or an
+[OpenCode](https://opencode.ai)-powered agent runtime. Cross-platform (Windows/macOS/Linux),
+with OpenRouter and self-hosted Kestrel 1 support.
 
 Axiom CLI is the command-line sibling of [Axiom](https://github.com/YoMosa2009/Axiom), a
 free local-first AI desktop app for Windows. This project extracts and adapts Axiom's coding-agent
@@ -28,12 +28,47 @@ irm https://raw.githubusercontent.com/YoMosa2009/Axiom-CLI/main/install.ps1 | ie
 Both scripts detect your OS/architecture, download the matching release from
 [Releases](../../releases), and put `axiom` on your PATH.
 
-## Get started
+### Windows copy/paste setup
+
+After installing [Node.js LTS](https://nodejs.org/), paste this entire block into PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/YoMosa2009/Axiom-CLI/main/install.ps1 | iex
+axiom opencode install
+axiom connect
+axiom --engine opencode
+```
+
+## Get started with Kestrel 1 + OpenCode
+
+Install [Node.js LTS](https://nodejs.org/) first: Axiom uses its included npm client to install
+the pinned OpenCode runtime. Then, in a new terminal after installing Axiom, run:
+
+```powershell
+axiom opencode install
+axiom connect
+axiom --engine opencode
+```
+
+`axiom connect` prompts for the Kestrel URL (press Enter to use
+`https://ai.axiominference.work/v1`) and a dedicated, revocable device key. Use a different key
+for each computer; never reuse a browser key. It is saved in Axiom's encrypted local secret store.
+
+To run a one-off agent task in the current repository:
+
+```powershell
+axiom code --engine opencode --yes "explain the failing test and fix it"
+```
+
+The OpenCode TUI, tools, file edits, shell commands, tests, and Git operations run on the computer
+where you launch Axiom. Only model requests travel to Kestrel 1 over HTTPS.
+
+### Legacy Axiom / OpenRouter
 
 ```sh
 axiom config              # paste in an OpenRouter API key (openrouter.ai/keys)
-axiom                     # full-window TUI chat (Windows, macOS, Linux)
-axiom code "add input validation to the signup form"   # coding agent, run inside a repo
+axiom                     # full-window legacy Axiom TUI
+axiom code "add input validation to the signup form"
 ```
 
 Run `axiom update` any time to pull the latest release — the CLI also prints a one-line notice
@@ -47,42 +82,38 @@ when a newer version is available.
 | `axiom config` | Store your OpenRouter API key, a self-hosted endpoint, and/or a [Tavily](https://tavily.com) API key for reliable `web_search` (all encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
 | `axiom connect` | Save Kestrel 1's HTTPS endpoint and this computer's revocable access key |
 | `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
-| `axiom --engine opencode` | Preview: OpenCode's agent TUI, backed by Kestrel 1 |
-| `axiom code --engine opencode [--yes] [--json] "<task>"` | Preview: OpenCode coding agent, backed by Kestrel 1 |
+| `axiom --engine opencode` | OpenCode's agent TUI, backed by Kestrel 1 |
+| `axiom code --engine opencode [--yes] [--json] "<task>"` | OpenCode coding agent, backed by Kestrel 1 |
 | `axiom opencode install` | Install Axiom's pinned OpenCode runtime for the current user |
 | `axiom update` | Download and install the latest release for your platform |
 
 `axiom chat` remains a supported alias for the default TUI.
 
 Available models: `eidos` (Eidos 1, general-purpose reasoning), `hepha` (Hepha 1,
-code-specialized) — the same aliases as the desktop app — and `kestral` (Kestral 1), a
+code-specialized) — the same aliases as the desktop app — and `kestral` (Kestrel 1), a
 self-hosted OpenAI-compatible endpoint you configure yourself via `axiom config` (base URL,
-model id, and API key). Kestral 1 runs on whatever machine you point it at — useful for using
+model id, and API key). Kestrel 1 runs on whatever machine you point it at — useful for using
 your own PC as inference compute from a laptop or another machine. `axiom code` uses the
 desktop app's Workplace Council default model unless `--model` is given.
 
-### OpenCode-backed Kestrel preview
+### OpenCode-backed Kestrel 1
 
-The `--engine opencode` preview keeps Kestrel 1 as the inference server while using
-[OpenCode](https://opencode.ai) for the agent runtime. This is intended for using the same
-Kestrel 1 server from another computer: files, shell commands, tests, Git, and other agent tools
-run on that computer; only model requests travel to `ai.axiominference.work` over HTTPS.
+`--engine opencode` keeps Kestrel 1 as the inference server while using OpenCode for the agent
+runtime. Kestrel is fixed to `axiom/omnicoder-2-9b:q5_k_m` with a 131,072-token context window.
+The agent runs locally, so it can use the files, tools, shell, tests, and Git available on the
+computer where Axiom is launched.
 
-```sh
-axiom connect
+```powershell
+axiom opencode install
+axiom connect                  # enter this computer's Kestrel device key
 axiom --engine opencode
 axiom code --engine opencode "explain the failing test and fix it"
 ```
 
-`axiom connect` stores a device-specific Kestrel access key in Axiom's existing encrypted secret
-store. Do not reuse a browser key; create a separate revocable key for each laptop. The bridge
-configures Kestrel as `axiom/omnicoder-2-9b:q5_k_m` with a 131,072-token context window and keeps
-the key out of OpenCode config files.
-
 Run `axiom opencode install` once to install Axiom's pinned OpenCode runtime into Axiom's own
-application-data folder. It requires Node.js and npm; if you already manage OpenCode yourself,
-put it on `PATH` or set `AXIOM_OPENCODE_PATH` to its executable. The legacy Axiom engine remains
-the default during the preview.
+application-data folder. It requires Node.js and npm; if you manage OpenCode yourself, put it on
+`PATH` or set `AXIOM_OPENCODE_PATH` to its executable. The legacy engine remains the default;
+choose OpenCode explicitly with `--engine opencode`.
 
 ### Cross-platform chat TUI
 `axiom` paints its own interface (alternate screen) on **Windows, macOS, and Linux** so the
