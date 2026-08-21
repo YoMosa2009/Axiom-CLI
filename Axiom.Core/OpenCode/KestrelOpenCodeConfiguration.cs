@@ -16,7 +16,7 @@ public static class KestrelOpenCodeConfiguration
     public const string ModelId = "axiom/omnicoder-2-9b:q5_k_m";
     public const string QualifiedModelId = ProviderId + "/" + ModelId;
     public const string ApiKeyEnvironmentVariable = "AXIOM_KESTREL_API_KEY";
-    public const int ContextWindowTokens = 131_072;
+    public const int ContextWindowTokens = 141_824;
     public const int MaxOutputTokens = 16_384;
 
     public static bool TryCreate(string? baseUrl, bool autoApprove, out string configJson, out string error)
