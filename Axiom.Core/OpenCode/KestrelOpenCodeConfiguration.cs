@@ -18,6 +18,12 @@ public static class KestrelOpenCodeConfiguration
     public const string ApiKeyEnvironmentVariable = "AXIOM_KESTREL_API_KEY";
     public const int ContextWindowTokens = 141_824;
     public const int MaxOutputTokens = 16_384;
+    // Keep enough headroom for the checkpoint-generation call and the next substantive answer.
+    // OpenCode compacts before sending a request that would consume this reserve, then rebuilds
+    // the request from its checkpoint plus the retained recent turns.
+    public const int CompactionReserveTokens = 16_384;
+    public const int CompactionTailTurns = 6;
+    public const int CompactionRecentTokens = 16_384;
 
     public static bool TryCreate(string? baseUrl, bool autoApprove, out string configJson, out string error)
     {
@@ -47,6 +53,23 @@ public static class KestrelOpenCodeConfiguration
             ["model"] = QualifiedModelId,
             ["small_model"] = QualifiedModelId,
             ["permission"] = permissions,
+            ["compaction"] = new JsonObject
+            {
+                ["auto"] = true,
+                ["prune"] = true,
+                ["tail_turns"] = CompactionTailTurns,
+                ["preserve_recent_tokens"] = CompactionRecentTokens,
+                ["reserved"] = CompactionReserveTokens
+            },
+            ["agent"] = new JsonObject
+            {
+                // Pin the compaction/checkpoint request to Kestrel too; the user never silently
+                // falls back to another provider while a long coding session is being continued.
+                ["compaction"] = new JsonObject
+                {
+                    ["model"] = QualifiedModelId
+                }
+            },
             ["provider"] = new JsonObject
             {
                 [ProviderId] = new JsonObject

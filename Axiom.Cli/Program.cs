@@ -102,11 +102,11 @@ internal static class Program
             {
                 "config" => await RunConfigAsync(),
                 "connect" => await RunConnectAsync(),
-                "" or "chat" when useOpenCode => await RunOpenCodeChatAsync(modelOverride, yesFlag),
-                "code" when useOpenCode => await RunOpenCodeCodeAsync(string.Join(' ', args.Skip(1)), modelOverride, yesFlag, jsonFlag),
+                "" or "chat" when useOpenCode => await RunOpenCodeChatAsync(modelOverride, yesFlag, bootstrapPath),
+                "code" when useOpenCode => await RunOpenCodeCodeAsync(string.Join(' ', args.Skip(1)), modelOverride, yesFlag, jsonFlag, bootstrapPath),
                 "opencode" when args.Skip(1).FirstOrDefault()?.Equals("install", StringComparison.OrdinalIgnoreCase) == true
                     => await RunOpenCodeInstallAsync(),
-                "opencode" => await RunOpenCodeChatAsync(modelOverride, yesFlag),
+                "opencode" => await RunOpenCodeChatAsync(modelOverride, yesFlag, args.Skip(1).FirstOrDefault()),
                 "" or "chat" => await RunChatAsync(modelOverride, profileOverride, bootstrapPath),
                 "code" => await RunCodeAsync(string.Join(' ', args.Skip(1)), modelOverride, yesFlag, jsonFlag, profileOverride),
                 "update" => await RunUpdateAsync(),
@@ -190,7 +190,7 @@ internal static class Program
         AnsiConsole.MarkupLine($"  [{gold}]axiom connect[/]                 Save Kestrel 1 endpoint and this device's access key");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--yes]] [[--json]] [[--model <id>]] <task>");
         AnsiConsole.MarkupLine($"                              Council on cwd; --yes auto-apply patch; --json machine output");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom --engine opencode[/]       OpenCode TUI backed by Kestrel 1 (preview)");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom [[path]] --engine opencode[/] OpenCode TUI in path, backed by Kestrel 1");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code --engine opencode[/] [[--yes]] [[--json]] <task>");
         AnsiConsole.MarkupLine($"                              OpenCode coding agent backed by Kestrel 1 (preview)");
         AnsiConsole.MarkupLine($"  [{gold}]axiom opencode install[/]       Install Axiom's pinned OpenCode runtime for this user");
@@ -441,8 +441,8 @@ internal static class Program
         return Task.FromResult(0);
     }
 
-    private static Task<int> RunOpenCodeChatAsync(string? modelOverride, bool yesFlag)
-        => RunOpenCodeAsync(task: null, modelOverride, yesFlag, jsonFlag: false);
+    private static Task<int> RunOpenCodeChatAsync(string? modelOverride, bool yesFlag, string? projectPath = null)
+        => RunOpenCodeAsync(task: null, modelOverride, yesFlag, jsonFlag: false, projectPath);
 
     private static async Task<int> RunOpenCodeInstallAsync()
     {
@@ -454,7 +454,12 @@ internal static class Program
         return result.Success ? 0 : 1;
     }
 
-    private static Task<int> RunOpenCodeCodeAsync(string task, string? modelOverride, bool yesFlag, bool jsonFlag)
+    private static Task<int> RunOpenCodeCodeAsync(
+        string task,
+        string? modelOverride,
+        bool yesFlag,
+        bool jsonFlag,
+        string? projectPath)
     {
         if (string.IsNullOrWhiteSpace(task))
         {
@@ -462,10 +467,15 @@ internal static class Program
             return Task.FromResult(1);
         }
 
-        return RunOpenCodeAsync(task, modelOverride, yesFlag, jsonFlag);
+        return RunOpenCodeAsync(task, modelOverride, yesFlag, jsonFlag, projectPath);
     }
 
-    private static async Task<int> RunOpenCodeAsync(string? task, string? modelOverride, bool yesFlag, bool jsonFlag)
+    private static async Task<int> RunOpenCodeAsync(
+        string? task,
+        string? modelOverride,
+        bool yesFlag,
+        bool jsonFlag,
+        string? projectPath)
     {
         if (!string.IsNullOrWhiteSpace(modelOverride)
             && !modelOverride.Equals("kestrel", StringComparison.OrdinalIgnoreCase)
@@ -483,6 +493,12 @@ internal static class Program
             return 1;
         }
 
+        if (!TryResolveOpenCodeProjectPath(projectPath, out string? resolvedProjectPath, out string projectPathError))
+        {
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]{projectPathError.EscapeMarkup()}[/]");
+            return 1;
+        }
+
         using var db = new DatabaseService();
         string baseUrl = db.GetSetting(DatabaseService.CustomEndpointBaseUrlSettingKey);
         if (string.IsNullOrWhiteSpace(baseUrl))
@@ -496,12 +512,20 @@ internal static class Program
         var arguments = new List<string>();
         if (string.IsNullOrWhiteSpace(task))
         {
+            // OpenCode's interactive TUI accepts its project directory as a positional argument.
+            // Axiom used to parse an initial folder but then silently omit it here, leaving every
+            // session in the shell's original cwd.
+            if (!string.IsNullOrWhiteSpace(resolvedProjectPath))
+                arguments.Add(resolvedProjectPath);
             arguments.Add("--model");
             arguments.Add(KestrelOpenCodeConfiguration.QualifiedModelId);
         }
         else
         {
             arguments.AddRange(["run", "--model", KestrelOpenCodeConfiguration.QualifiedModelId, "--agent", "build"]);
+            // `opencode run` uses --dir rather than the TUI's positional project argument.
+            if (!string.IsNullOrWhiteSpace(resolvedProjectPath))
+                arguments.AddRange(["--dir", resolvedProjectPath]);
             if (jsonFlag)
                 arguments.AddRange(["--format", "json"]);
             if (yesFlag)
@@ -510,6 +534,35 @@ internal static class Program
         }
 
         return await OpenCodeRunner.RunAsync(runtimePath, baseUrl, apiKey, arguments, CancellationToken.None);
+    }
+
+    private static bool TryResolveOpenCodeProjectPath(string? candidate, out string? projectPath, out string error)
+    {
+        projectPath = null;
+        error = string.Empty;
+        if (string.IsNullOrWhiteSpace(candidate))
+            return true;
+
+        try
+        {
+            string fullPath = Path.GetFullPath(candidate.Trim().Trim('"'));
+            if (File.Exists(fullPath))
+                fullPath = Path.GetDirectoryName(fullPath) ?? fullPath;
+
+            if (!Directory.Exists(fullPath))
+            {
+                error = $"OpenCode project folder does not exist: {candidate}";
+                return false;
+            }
+
+            projectPath = fullPath;
+            return true;
+        }
+        catch (Exception)
+        {
+            error = $"OpenCode project folder is not a valid path: {candidate}";
+            return false;
+        }
     }
 
     private static string Last4(string value) => value.Length <= 4 ? value : value[^4..];
