@@ -70,7 +70,7 @@ jobs:
           git clone --depth 1 --branch v1.18.18 https://github.com/anomalyco/opencode.git opencode-source
           git -C opencode-source apply "$GITHUB_WORKSPACE/assets/opencode/axiom-code-logo.patch"
           bun install --cwd opencode-source --frozen-lockfile
-          bun --cwd opencode-source/packages/opencode run build --single
+          bun run --cwd opencode-source/packages/opencode build --single
           rid="${{ matrix.rid }}"
           arch="${rid##*-}"
           case "$rid" in
