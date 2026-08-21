@@ -21,7 +21,9 @@ jobs:
             os: ubuntu-24.04-arm
             archive: tar
           - rid: osx-x64
-            os: macos-latest
+            # macos-latest is ARM64. The OpenCode --single build must run on an
+            # Intel host to emit its x64 binary.
+            os: macos-13
             archive: tar
           - rid: osx-arm64
             os: macos-latest
