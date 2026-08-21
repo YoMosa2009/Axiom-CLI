@@ -17,13 +17,19 @@ public static class KestrelOpenCodeConfiguration
     public const string QualifiedModelId = ProviderId + "/" + ModelId;
     public const string ApiKeyEnvironmentVariable = "AXIOM_KESTREL_API_KEY";
     public const int ContextWindowTokens = 135_168;
+    // Kestrel still serves its full 135,168-token window. This lower client-side input
+    // budget causes OpenCode to checkpoint before repeated project history makes each
+    // subsequent coding turn unnecessarily slow.
+    public const int OpenCodeInputBudgetTokens = 112_640;
     public const int MaxOutputTokens = 16_384;
     // Keep enough headroom for the checkpoint-generation call and the next substantive answer.
     // OpenCode compacts before sending a request that would consume this reserve, then rebuilds
     // the request from its checkpoint plus the retained recent turns.
     public const int CompactionReserveTokens = 16_384;
     public const int CompactionTailTurns = 6;
-    public const int CompactionRecentTokens = 16_384;
+    // OpenCode 1.18.18 clamps this setting to 15,000 tokens.
+    public const int CompactionRecentTokens = 15_000;
+    public const int StreamStallTimeoutMilliseconds = 900_000;
 
     public static bool TryCreate(string? baseUrl, bool autoApprove, out string configJson, out string error)
     {
@@ -80,8 +86,13 @@ public static class KestrelOpenCodeConfiguration
                     {
                         ["baseURL"] = normalizedBaseUrl,
                         ["apiKey"] = "{env:" + ApiKeyEnvironmentVariable + "}",
-                        ["timeout"] = 600_000,
-                        ["chunkTimeout"] = 120_000
+                        // Kestrel can legitimately spend several minutes preparing a large
+                        // prompt. Do not abort an active request solely because its total
+                        // lifetime exceeds a client-side deadline.
+                        ["timeout"] = false,
+                        ["headerTimeout"] = false,
+                        // Retain a finite escape hatch for a genuinely stalled stream.
+                        ["chunkTimeout"] = StreamStallTimeoutMilliseconds
                     },
                     ["models"] = new JsonObject
                     {
@@ -91,6 +102,7 @@ public static class KestrelOpenCodeConfiguration
                             ["limit"] = new JsonObject
                             {
                                 ["context"] = ContextWindowTokens,
+                                ["input"] = OpenCodeInputBudgetTokens,
                                 ["output"] = MaxOutputTokens
                             }
                         }

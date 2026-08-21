@@ -39,10 +39,11 @@ axiom connect
 axiom --engine opencode
 ```
 
-## Get started with Kestrel 1 + OpenCode
+## Get started with Kestrel 1 + Axiom Code
 
 Install [Node.js LTS](https://nodejs.org/) first: Axiom uses its included npm client to install
-the pinned OpenCode runtime. Then, in a new terminal after installing Axiom, run:
+the pinned runtime. Axiom Code is Axiom's branded OpenCode runtime; it retains OpenCode's tools,
+commands, and TUI behavior. Then, in a new terminal after installing Axiom, run:
 
 ```powershell
 axiom opencode install
@@ -73,8 +74,8 @@ axiom code "add input validation to the signup form"
 
 Run `axiom update` any time to pull the latest release — the CLI also prints a one-line notice
 when a newer version is available. The next `--engine opencode` launch automatically aligns an
-existing Axiom-managed OpenCode runtime with that release's tested version; no npm command or
-configuration prompt is required.
+existing Axiom-managed runtime with that release's tested version and Axiom Code wordmark; no npm
+command or configuration prompt is required.
 
 ## Commands
 
@@ -84,10 +85,10 @@ configuration prompt is required.
 | `axiom config` | Store your OpenRouter API key, a self-hosted endpoint, and/or a [Tavily](https://tavily.com) API key for reliable `web_search` (all encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
 | `axiom connect` | Save Kestrel 1's HTTPS endpoint and this computer's revocable access key |
 | `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
-| `axiom [path] --engine opencode` | OpenCode's agent TUI in `path`, backed by Kestrel 1 |
-| `axiom [path] code --engine opencode [--yes] [--json] "<task>"` | OpenCode coding agent in `path`, backed by Kestrel 1 |
-| `axiom opencode install` | Install or refresh Axiom's pinned OpenCode runtime for the current user |
-| `axiom update` | Download and install the latest release; the next OpenCode launch refreshes Axiom's managed runtime automatically |
+| `axiom [path] --engine opencode` | Axiom Code agent TUI in `path`, backed by Kestrel 1 |
+| `axiom [path] code --engine opencode [--yes] [--json] "<task>"` | Axiom Code coding agent in `path`, backed by Kestrel 1 |
+| `axiom opencode install` | Install or refresh Axiom Code (Axiom's pinned OpenCode runtime) for the current user |
+| `axiom update` | Download and install the latest release; the next Axiom Code launch refreshes its managed runtime automatically |
 
 `axiom chat` remains a supported alias for the default TUI.
 
@@ -98,10 +99,11 @@ model id, and API key). Kestrel 1 runs on whatever machine you point it at — u
 your own PC as inference compute from a laptop or another machine. `axiom code` uses the
 desktop app's Workplace Council default model unless `--model` is given.
 
-### OpenCode-backed Kestrel 1
+### Axiom Code-backed Kestrel 1
 
-`--engine opencode` keeps Kestrel 1 as the inference server while using OpenCode for the agent
-runtime. Kestrel is fixed to `axiom/omnicoder-2-9b:q5_k_m` with a 135,168-token context window.
+`--engine opencode` keeps Kestrel 1 as the inference server while using Axiom Code, Axiom's
+branded build of [OpenCode](https://opencode.ai), for the agent runtime. Kestrel is fixed to
+`axiom/omnicoder-2-9b:q5_k_m` with a 135,168-token context window.
 The agent runs locally, so it can use the files, tools, shell, tests, and Git available on the
 computer where Axiom is launched.
 
@@ -112,8 +114,8 @@ axiom --engine opencode G:\AxiomWork
 axiom G:\AxiomWork code --engine opencode "explain the failing test and fix it"
 ```
 
-Run `axiom opencode install` once to install Axiom's pinned OpenCode runtime into Axiom's own
-application-data folder. It requires Node.js and npm; if you manage OpenCode yourself, put it on
+Run `axiom opencode install` once to install Axiom Code into Axiom's own application-data folder.
+It requires Node.js and npm; if you manage OpenCode yourself, put it on
 `PATH` or set `AXIOM_OPENCODE_PATH` to its executable. The legacy engine remains the default;
 choose OpenCode explicitly with `--engine opencode`.
 
@@ -124,10 +126,12 @@ slash command that moves an already-running session to another drive; start the 
 with one of these commands instead. Axiom now forwards that folder to OpenCode instead of
 silently discarding it.
 
-OpenCode compaction is enabled for Kestrel sessions. Before a request would exceed the 135,168-token
-window, it generates a checkpoint, prunes older bulky tool output, retains the six newest user turns
-(up to 16,384 recent tokens), and continues with a fresh window. The reserve is also 16,384 tokens,
-so normal replies and the compaction request have headroom rather than relying on an overflow retry.
+Axiom Code compaction is enabled for Kestrel sessions. Kestrel still has a 135,168-token service
+window, but Axiom checkpoints before repeated project history dominates each next turn: its input
+budget is 112,640 tokens, with a 16,384-token reserve, so compaction starts around 96,256 tokens.
+It prunes older bulky tool output, retains the six newest user turns (up to OpenCode's supported
+15,000 recent tokens), and continues from a fresh checkpoint. Kestrel requests have no fixed total
+or header deadline; only a 15-minute no-output stream-stall safeguard remains.
 
 ### Cross-platform chat TUI
 `axiom` paints its own interface (alternate screen) on **Windows, macOS, and Linux** so the
