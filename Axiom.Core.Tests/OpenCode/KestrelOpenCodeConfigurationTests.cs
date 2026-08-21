@@ -26,7 +26,17 @@ public sealed class KestrelOpenCodeConfigurationTests
         Assert.Equal(
             KestrelOpenCodeConfiguration.ContextWindowTokens,
             root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]![KestrelOpenCodeConfiguration.ModelId]!["limit"]!["context"]!.GetValue<int>());
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.OpenCodeInputBudgetTokens,
+            root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]![KestrelOpenCodeConfiguration.ModelId]!["limit"]!["input"]!.GetValue<int>());
         Assert.Equal(135_168, KestrelOpenCodeConfiguration.ContextWindowTokens);
+        Assert.False(
+            root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["options"]!["timeout"]!.GetValue<bool>());
+        Assert.False(
+            root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["options"]!["headerTimeout"]!.GetValue<bool>());
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.StreamStallTimeoutMilliseconds,
+            root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["options"]!["chunkTimeout"]!.GetValue<int>());
         Assert.True(root["compaction"]!["auto"]!.GetValue<bool>());
         Assert.True(root["compaction"]!["prune"]!.GetValue<bool>());
         Assert.Equal(

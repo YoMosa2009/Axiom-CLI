@@ -60,10 +60,34 @@ jobs:
         shell: bash
         run: tar -czf axiom-cli-${{ matrix.rid }}.tar.gz -C publish/${{ matrix.rid }} .
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Build Axiom Code runtime
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v1.18.18 https://github.com/anomalyco/opencode.git opencode-source
+          git -C opencode-source apply "$GITHUB_WORKSPACE/assets/opencode/axiom-code-logo.patch"
+          bun install --cwd opencode-source --frozen-lockfile
+          bun --cwd opencode-source/packages/opencode run build --single
+          rid="${{ matrix.rid }}"
+          arch="${rid##*-}"
+          case "$rid" in
+            win-*) target="windows-$arch"; extension=".exe" ;;
+            osx-*) target="darwin-$arch"; extension="" ;;
+            *) target="linux-$arch"; extension="" ;;
+          esac
+          mkdir axiom-code-runtime
+          cp "opencode-source/packages/opencode/dist/opencode-$target/bin/opencode$extension" "axiom-code-runtime/opencode$extension"
+          (cd axiom-code-runtime && zip -r "../axiom-code-runtime-$rid.zip" .)
+
       - uses: actions/upload-artifact@v4
         with:
           name: axiom-cli-${{ matrix.rid }}
-          path: axiom-cli-*
+          path: |
+            axiom-cli-*
+            axiom-code-runtime-*.zip
 
   release:
     needs: build
