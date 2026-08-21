@@ -82,7 +82,11 @@ jobs:
           esac
           mkdir axiom-code-runtime
           cp "opencode-source/packages/opencode/dist/opencode-$target/bin/opencode$extension" "axiom-code-runtime/opencode$extension"
-          (cd axiom-code-runtime && zip -r "../axiom-code-runtime-$rid.zip" .)
+          if [[ "$rid" == win-* ]]; then
+            pwsh -NoProfile -Command "Compress-Archive -Path 'axiom-code-runtime/*' -DestinationPath 'axiom-code-runtime-$rid.zip' -Force"
+          else
+            (cd axiom-code-runtime && zip -r "../axiom-code-runtime-$rid.zip" .)
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
