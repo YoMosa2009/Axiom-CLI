@@ -320,17 +320,11 @@ namespace Axiom.Core.Chat
         // manually-typed number that can go stale.
         //
         // Chosen empirically against Kestral 1's real hardware (GTX 1080, 8GB VRAM) with full GPU
-        // residency (CustomEndpointNumGpuLayers) already forced. 131072 measures 100% GPU-resident
-        // with ~235MB free and was validated under *heavy* load specifically (not just a short
-        // test reply): three consecutive ~2,000-token generations (close to the real 8,192
-        // max-tokens ceiling) all measured the same ~26 tok/s with zero degradation and zero
-        // crashes. An earlier, more conservative pass had rejected 131072 for a measured slowdown
-        // under background load, but that was before the Lively Wallpaper VRAM hog and the
-        // duplicate model pull were cleaned up -- with those gone, 131072 now holds up reliably.
-        // 163840 and above hard-crash the server outright (cudaMalloc failed: out of memory --
-        // llama-server terminates and the model has to fully reload on the next request), so
-        // 131072 is the real ceiling on this card, not merely the current comfort setting.
-        public const int CustomEndpointContextWindowTokens = 131072;
+        // residency (CustomEndpointNumGpuLayers) already forced. 141824 is the measured 100%-GPU
+        // ceiling on Kestrel's GTX 1080: 141824 passed a live generation request, while 141952
+        // failed at llama-server startup with CUDA out-of-memory. One whole model layer exceeds
+        // the allowed 1% CPU-offload budget, so full GPU residency is the fastest valid layout.
+        public const int CustomEndpointContextWindowTokens = 141824;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
         // llama.cpp/Ollama convention: any value >= the model's real layer count offloads every
