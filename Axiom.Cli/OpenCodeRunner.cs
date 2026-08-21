@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Axiom.Core;
 using Axiom.Core.OpenCode;
 
@@ -51,7 +52,7 @@ internal static class OpenCodeRunner
 
     internal static async Task<RuntimeInstallResult> InstallManagedRuntimeAsync(CancellationToken cancellationToken)
     {
-        if (TryFindManagedRuntime(out _))
+        if (TryFindManagedRuntime(out _) && IsManagedRuntimeCurrent())
             return new RuntimeInstallResult(true, $"The managed OpenCode runtime ({PinnedRuntimeVersion}) is already installed.");
 
         if (!TryFindExecutable("npm", out string npmPath))
@@ -108,6 +109,17 @@ internal static class OpenCodeRunner
         return new RuntimeInstallResult(true, $"Installed managed OpenCode runtime {PinnedRuntimeVersion}.");
     }
 
+    internal static async Task<RuntimeInstallResult> EnsureManagedRuntimeCurrentAsync(CancellationToken cancellationToken)
+    {
+        if (!TryFindManagedRuntime(out _))
+            return new RuntimeInstallResult(true, "No managed OpenCode runtime is installed.");
+
+        if (IsManagedRuntimeCurrent())
+            return new RuntimeInstallResult(true, $"The managed OpenCode runtime ({PinnedRuntimeVersion}) is already current.");
+
+        return await InstallManagedRuntimeAsync(cancellationToken);
+    }
+
     private static bool TryFindManagedRuntime(out string runtimePath)
     {
         string[] relativeCandidates = OperatingSystem.IsWindows()
@@ -122,6 +134,21 @@ internal static class OpenCodeRunner
 
         runtimePath = string.Empty;
         return false;
+    }
+
+    private static bool IsManagedRuntimeCurrent()
+    {
+        string manifestPath = Path.Combine(ManagedRuntimeRoot, "node_modules", NpmPackageName, "package.json");
+        try
+        {
+            using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            return manifest.RootElement.TryGetProperty("version", out JsonElement version)
+                && string.Equals(version.GetString(), PinnedRuntimeVersion, StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static bool TryFindExecutable(string executableName, out string executablePath)

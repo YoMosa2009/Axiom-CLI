@@ -486,6 +486,18 @@ internal static class Program
             return 1;
         }
 
+        // Axiom owns this runtime, so keep an existing managed install aligned with the release's
+        // tested version before starting OpenCode. AXIOM_OPENCODE_PATH remains fully user-managed.
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(OpenCodeRunner.RuntimePathEnvironmentVariable)))
+        {
+            OpenCodeRunner.RuntimeInstallResult runtimeUpdate = await OpenCodeRunner.EnsureManagedRuntimeCurrentAsync(CancellationToken.None);
+            if (!runtimeUpdate.Success)
+            {
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Could not update Axiom's managed OpenCode runtime: {runtimeUpdate.Message.EscapeMarkup()}[/]");
+                return 1;
+            }
+        }
+
         if (!OpenCodeRunner.TryFindRuntime(out string runtimePath))
         {
             AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]OpenCode is not installed or discoverable.[/]");

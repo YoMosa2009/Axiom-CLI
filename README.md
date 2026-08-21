@@ -72,7 +72,9 @@ axiom code "add input validation to the signup form"
 ```
 
 Run `axiom update` any time to pull the latest release — the CLI also prints a one-line notice
-when a newer version is available.
+when a newer version is available. The next `--engine opencode` launch automatically aligns an
+existing Axiom-managed OpenCode runtime with that release's tested version; no npm command or
+configuration prompt is required.
 
 ## Commands
 
@@ -84,8 +86,8 @@ when a newer version is available.
 | `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
 | `axiom [path] --engine opencode` | OpenCode's agent TUI in `path`, backed by Kestrel 1 |
 | `axiom [path] code --engine opencode [--yes] [--json] "<task>"` | OpenCode coding agent in `path`, backed by Kestrel 1 |
-| `axiom opencode install` | Install Axiom's pinned OpenCode runtime for the current user |
-| `axiom update` | Download and install the latest release for your platform |
+| `axiom opencode install` | Install or refresh Axiom's pinned OpenCode runtime for the current user |
+| `axiom update` | Download and install the latest release; the next OpenCode launch refreshes Axiom's managed runtime automatically |
 
 `axiom chat` remains a supported alias for the default TUI.
 

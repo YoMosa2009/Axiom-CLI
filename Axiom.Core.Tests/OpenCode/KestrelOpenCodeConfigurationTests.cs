@@ -26,6 +26,7 @@ public sealed class KestrelOpenCodeConfigurationTests
         Assert.Equal(
             KestrelOpenCodeConfiguration.ContextWindowTokens,
             root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]![KestrelOpenCodeConfiguration.ModelId]!["limit"]!["context"]!.GetValue<int>());
+        Assert.Equal(135_168, KestrelOpenCodeConfiguration.ContextWindowTokens);
         Assert.True(root["compaction"]!["auto"]!.GetValue<bool>());
         Assert.True(root["compaction"]!["prune"]!.GetValue<bool>());
         Assert.Equal(
