@@ -26,6 +26,17 @@ public sealed class KestrelOpenCodeConfigurationTests
         Assert.Equal(
             KestrelOpenCodeConfiguration.ContextWindowTokens,
             root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]![KestrelOpenCodeConfiguration.ModelId]!["limit"]!["context"]!.GetValue<int>());
+        Assert.True(root["compaction"]!["auto"]!.GetValue<bool>());
+        Assert.True(root["compaction"]!["prune"]!.GetValue<bool>());
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.CompactionReserveTokens,
+            root["compaction"]!["reserved"]!.GetValue<int>());
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.CompactionRecentTokens,
+            root["compaction"]!["preserve_recent_tokens"]!.GetValue<int>());
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.QualifiedModelId,
+            root["agent"]!["compaction"]!["model"]!.GetValue<string>());
     }
 
     [Theory]
