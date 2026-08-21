@@ -99,7 +99,7 @@ desktop app's Workplace Council default model unless `--model` is given.
 ### OpenCode-backed Kestrel 1
 
 `--engine opencode` keeps Kestrel 1 as the inference server while using OpenCode for the agent
-runtime. Kestrel is fixed to `axiom/omnicoder-2-9b:q5_k_m` with a 141,824-token context window.
+runtime. Kestrel is fixed to `axiom/omnicoder-2-9b:q5_k_m` with a 135,168-token context window.
 The agent runs locally, so it can use the files, tools, shell, tests, and Git available on the
 computer where Axiom is launched.
 
@@ -122,7 +122,7 @@ slash command that moves an already-running session to another drive; start the 
 with one of these commands instead. Axiom now forwards that folder to OpenCode instead of
 silently discarding it.
 
-OpenCode compaction is enabled for Kestrel sessions. Before a request would exceed the 141,824-token
+OpenCode compaction is enabled for Kestrel sessions. Before a request would exceed the 135,168-token
 window, it generates a checkpoint, prunes older bulky tool output, retains the six newest user turns
 (up to 16,384 recent tokens), and continues with a fresh window. The reserve is also 16,384 tokens,
 so normal replies and the compaction request have headroom rather than relying on an overflow retry.
