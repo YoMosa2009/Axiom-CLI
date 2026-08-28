@@ -319,12 +319,10 @@ namespace Axiom.Core.Chat
         // RunConfigAsync) -- it is purely auto-detected or this validated default, never a
         // manually-typed number that can go stale.
         //
-        // Chosen empirically against Kestral 1's real hardware (GTX 1080, 8GB VRAM) with full GPU
-        // residency (CustomEndpointNumGpuLayers) already forced. 135168 passed a cold-load
-        // generation at 100% GPU on Kestrel's GTX 1080 after a 141824-token OpenCode request
-        // returned a CUDA runtime error. One whole model layer exceeds the allowed 1% CPU-offload
-        // budget, so full GPU residency remains the fastest valid layout.
-        public const int CustomEndpointContextWindowTokens = 135168;
+        // Validated against Kestrel 1's RTX 3060 (12GB VRAM) with full GPU residency
+        // (CustomEndpointNumGpuLayers) and q4_0 K/V cache. Ollama reports the complete
+        // 262,144-token allocation resident at 100% GPU.
+        public const int CustomEndpointContextWindowTokens = 262144;
         // Tesslate's OmniCoder-9B model card recommendation (both general and agentic use).
         public const int CustomEndpointTopK = 20;
         // llama.cpp/Ollama convention: any value >= the model's real layer count offloads every

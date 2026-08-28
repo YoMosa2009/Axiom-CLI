@@ -16,11 +16,10 @@ public static class KestrelOpenCodeConfiguration
     public const string ModelId = "axiom/omnicoder-2-9b:q5_k_m";
     public const string QualifiedModelId = ProviderId + "/" + ModelId;
     public const string ApiKeyEnvironmentVariable = "AXIOM_KESTREL_API_KEY";
-    public const int ContextWindowTokens = 135_168;
-    // Kestrel still serves its full 135,168-token window. This lower client-side input
-    // budget causes OpenCode to checkpoint before repeated project history makes each
-    // subsequent coding turn unnecessarily slow.
-    public const int OpenCodeInputBudgetTokens = 112_640;
+    public const int ContextWindowTokens = 262_144;
+    // Reserve the final 16,384 tokens for the response. OpenCode checkpoints before the
+    // remaining input would crowd out that reserve, then resumes from its compact checkpoint.
+    public const int OpenCodeInputBudgetTokens = 245_760;
     public const int MaxOutputTokens = 16_384;
     // Keep enough headroom for the checkpoint-generation call and the next substantive answer.
     // OpenCode compacts before sending a request that would consume this reserve, then rebuilds

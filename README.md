@@ -103,7 +103,7 @@ desktop app's Workplace Council default model unless `--model` is given.
 
 `--engine opencode` keeps Kestrel 1 as the inference server while using Axiom Code, Axiom's
 branded build of [OpenCode](https://opencode.ai), for the agent runtime. Kestrel is fixed to
-`axiom/omnicoder-2-9b:q5_k_m` with a 135,168-token context window.
+`axiom/omnicoder-2-9b:q5_k_m` with a 262,144-token context window.
 The agent runs locally, so it can use the files, tools, shell, tests, and Git available on the
 computer where Axiom is launched.
 
@@ -126,9 +126,9 @@ slash command that moves an already-running session to another drive; start the 
 with one of these commands instead. Axiom now forwards that folder to OpenCode instead of
 silently discarding it.
 
-Axiom Code compaction is enabled for Kestrel sessions. Kestrel still has a 135,168-token service
-window, but Axiom checkpoints before repeated project history dominates each next turn: its input
-budget is 112,640 tokens, with a 16,384-token reserve, so compaction starts around 96,256 tokens.
+Axiom Code compaction is enabled for Kestrel sessions. Kestrel has a 262,144-token service
+window, and Axiom reserves 16,384 tokens for the response; compaction begins before the input
+would exceed its 245,760-token budget.
 It prunes older bulky tool output, retains the six newest user turns (up to OpenCode's supported
 15,000 recent tokens), and continues from a fresh checkpoint. Kestrel requests have no fixed total
 or header deadline; only a 15-minute no-output stream-stall safeguard remains.

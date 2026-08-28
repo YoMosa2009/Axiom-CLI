@@ -29,7 +29,7 @@ public sealed class KestrelOpenCodeConfigurationTests
         Assert.Equal(
             KestrelOpenCodeConfiguration.OpenCodeInputBudgetTokens,
             root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]![KestrelOpenCodeConfiguration.ModelId]!["limit"]!["input"]!.GetValue<int>());
-        Assert.Equal(135_168, KestrelOpenCodeConfiguration.ContextWindowTokens);
+        Assert.Equal(262_144, KestrelOpenCodeConfiguration.ContextWindowTokens);
         Assert.False(
             root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["options"]!["timeout"]!.GetValue<bool>());
         Assert.False(
