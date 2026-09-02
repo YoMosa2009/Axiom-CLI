@@ -1,0 +1,137 @@
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 57f372e..5c218f7 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -57,7 +57,6 @@ import { PromptHistoryProvider } from "./component/prompt/history"
+ import { FrecencyProvider } from "./component/prompt/frecency"
+ import { PromptStashProvider } from "./component/prompt/stash"
+ import { DialogAlert } from "./ui/dialog-alert"
+-import { DialogConfirm } from "./ui/dialog-confirm"
+ import { ToastProvider, useToast } from "./ui/toast"
+ import { isDefaultTitle } from "./util/session"
+ import { KVProvider, useKV } from "./context/kv"
+@@ -1035,45 +1034,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
+     const skipped = kv.get("skipped_version")
+     if (skipped && !isVersionGreater(version, skipped)) return
+ 
+-    const choice = await DialogConfirm.show(
+-      dialog,
+-      `Update Available`,
+-      `A new release v${version} is available. Would you like to update now?`,
+-      "skip",
+-    )
+-
+-    if (choice === false) {
+-      kv.set("skipped_version", version)
+-      return
+-    }
+-
+-    if (choice !== true) return
+-
+-    toast.show({
+-      variant: "info",
+-      message: `Updating to v${version}...`,
+-      duration: 30000,
+-    })
+-
+-    const result = await sdk.client.global.upgrade({ target: version })
+-
+-    if (result.error || !result.data?.success) {
+-      toast.show({
+-        variant: "error",
+-        title: "Update Failed",
+-        message: "Update failed",
+-        duration: 10000,
+-      })
+-      return
+-    }
+-
+     await DialogAlert.show(
+       dialog,
+-      "Update Complete",
+-      `Successfully updated to OpenCode v${result.data.version}. Please restart the application.`,
++      "Axiom Code update available",
++      `A newer OpenCode release (v${version}) is available. Axiom Code is managed by Axiom, so its in-terminal updater is disabled. Close Axiom Code, run \`axiom update\`, then launch it again.`,
+     )
+-
+-    void exit()
++    kv.set("skipped_version", version)
+   })
+ 
+   const plugin = createMemo(() => {
+diff --git a/packages/tui/src/component/dialog-move-session.tsx b/packages/tui/src/component/dialog-move-session.tsx
+index e0d5508..6c5342a 100644
+--- a/packages/tui/src/component/dialog-move-session.tsx
++++ b/packages/tui/src/component/dialog-move-session.tsx
+@@ -16,6 +16,7 @@ import { useCommandShortcut } from "../keymap"
+ import { useProject } from "../context/project"
+ import { Spinner } from "./spinner"
+ import { DialogWorkspaceFileChanges } from "./dialog-workspace-file-changes"
++import { DialogPrompt } from "../ui/dialog-prompt"
+ import type { ProjectDirectories } from "@opencode-ai/sdk/v2"
+ import { useRoute } from "../context/route"
+ 
+@@ -279,6 +280,35 @@ export function DialogMoveSession(props: DialogMoveSessionProps) {
+     if (await removedCurrent(deletingCurrent)) return
+   }
+ 
++  async function chooseDestinationFolder() {
++    const requested = await DialogPrompt.show(dialog, "Move to folder", {
++      value: currentDirectory(),
++      placeholder: "C:\\Projects\\example or G:\\AxiomWork",
++      description: () => (
++        <text fg={theme.textMuted}>
++          Enter an existing folder in this same project. To open a different project, start Axiom Code from that folder.
++        </text>
++      ),
++    })
++    if (requested === null) return
++
++    const input = requested.trim()
++    if (!input) {
++      toast.show({ variant: "error", title: "Folder required", message: "Enter an existing destination folder." })
++      dialog.clear()
++      return
++    }
++
++    const directory = path.resolve(input)
++    try {
++      await sdk.client.path.get({ directory }, { throwOnError: true })
++      props.onSelect({ type: "directory", directory, subdirectory: false })
++    } catch (error) {
++      toast.show({ variant: "error", title: "Folder unavailable", message: errorMessage(error) })
++      dialog.clear()
++    }
++  }
++
+   const fullHeight = createMemo(() =>
+     Math.max(8, Math.min(16, dimensions().height - Math.floor(dimensions().height / 4) - 2)),
+   )
+@@ -324,6 +354,11 @@ export function DialogMoveSession(props: DialogMoveSessionProps) {
+                   title: "new",
+                   onTrigger: () => props.onSelect({ type: "new" }),
+                 },
++                {
++                  command: "dialog.move_session.folder",
++                  title: "folder",
++                  onTrigger: () => void chooseDestinationFolder(),
++                },
+                 {
+                   command: "dialog.move_session.delete",
+                   title: "delete",
+diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybind.ts
+index 5dd7e4b..38f03e9 100644
+--- a/packages/tui/src/config/keybind.ts
++++ b/packages/tui/src/config/keybind.ts
+@@ -208,7 +208,10 @@ export const Definitions = {
+   "dialog.select.submit": keybind("return", "Submit selected dialog item"),
+   "dialog.prompt.submit": keybind("return", "Submit dialog prompt"),
+   "dialog.mcp.toggle": keybind("space", "Toggle MCP in MCP dialog"),
+-  "dialog.move_session.new": keybind("ctrl+m", "New project copy"),
++  // Ctrl+M is encoded as carriage return by standard terminals, making it indistinguishable
++  // from Enter. Use Alt+M so the action is reachable on Windows Terminal and other terminals.
++  "dialog.move_session.new": keybind("alt+m", "New project copy"),
++  "dialog.move_session.folder": keybind("alt+g", "Choose destination folder"),
+   "dialog.move_session.delete": keybind("ctrl+d", "Delete project copy"),
+   "dialog.move_session.refresh": keybind("ctrl+r", "Refresh project copies"),
+   "prompt.autocomplete.prev": keybind("up,ctrl+p", "Move to previous autocomplete item"),

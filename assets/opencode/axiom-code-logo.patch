@@ -1,13 +1,25 @@
 diff --git a/packages/tui/src/logo.ts b/packages/tui/src/logo.ts
-index 1ff2c7256..a81f0c9ac 100644
+index 1ff2c7256..a58a8cf.. 100644
 --- a/packages/tui/src/logo.ts
 +++ b/packages/tui/src/logo.ts
-@@ -1,4 +1,4 @@
+@@ -1,4 +1,16 @@
  export const logo = {
 -  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
 -  right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
-+  left: ["", "Axiom ", "", ""],
-+  right: ["", "Code", "", ""],
++  left: [
++    " █████  ██   ██ ██  ██████  ███    ███ ",
++    "██   ██  ██ ██  ██ ██    ██ ████  ████ ",
++    "███████   ███   ██ ██    ██ ██ ███ ██ ",
++    "██   ██  ██ ██  ██ ██    ██ ██  ████ ",
++    "██   ██ ██   ██ ██  ██████  ██   ███ ",
++  ],
++  right: [
++    " ██████  ██████  ██████  ███████ ",
++    "██      ██    ██ ██   ██ ██      ",
++    "██      ██    ██ ██   ██ █████   ",
++    "██      ██    ██ ██   ██ ██      ",
++    " ██████  ██████  ██████  ███████ ",
++  ],
  }
 diff --git a/packages/opencode/src/cli/cmd/run/splash.ts b/packages/opencode/src/cli/cmd/run/splash.ts
 index 9b482b28f..37e0af4dd 100644

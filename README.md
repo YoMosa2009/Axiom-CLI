@@ -75,7 +75,9 @@ axiom code "add input validation to the signup form"
 Run `axiom update` any time to pull the latest release — the CLI also prints a one-line notice
 when a newer version is available. The next `--engine opencode` launch automatically aligns an
 existing Axiom-managed runtime with that release's tested version and Axiom Code wordmark; no npm
-command or configuration prompt is required.
+command or configuration prompt is required. If Axiom Code itself reports that an OpenCode update
+is available, close it and run `axiom update`; its own updater is intentionally disabled because
+Axiom distributes and verifies the compatible runtime.
 
 ## Commands
 
@@ -119,11 +121,12 @@ It requires Node.js and npm; if you manage OpenCode yourself, put it on
 `PATH` or set `AXIOM_OPENCODE_PATH` to its executable. The legacy engine remains the default;
 choose OpenCode explicitly with `--engine opencode`.
 
-Choose the project folder when launching OpenCode. For example, use
+Choose the project folder when launching Axiom Code. For example, use
 `axiom --engine opencode G:\AxiomWork` (interactive) or
-`axiom G:\AxiomWork code --engine opencode "your task"` (one-off). OpenCode does not provide a
-slash command that moves an already-running session to another drive; start the target project
-with one of these commands instead. Axiom now forwards that folder to OpenCode instead of
+`axiom G:\AxiomWork code --engine opencode "your task"` (one-off). In the `/move` picker,
+use `Alt+G` to enter an existing folder within the current project, or `Alt+M` to create a project
+copy. A session cannot be moved safely into an unrelated project: launch Axiom Code in that target
+folder with one of the commands above instead. Axiom forwards the folder to Axiom Code instead of
 silently discarding it.
 
 Axiom Code compaction is enabled for Kestrel sessions. Kestrel has a 262,144-token service
