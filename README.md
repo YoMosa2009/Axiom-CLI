@@ -104,8 +104,10 @@ desktop app's Workplace Council default model unless `--model` is given.
 ### Axiom Code-backed Kestrel 1
 
 `--engine opencode` keeps Kestrel 1 as the inference server while using Axiom Code, Axiom's
-branded build of [OpenCode](https://opencode.ai), for the agent runtime. Kestrel is fixed to
-`axiom/omnicoder-2-9b:q5_k_m` with a 262,144-token context window.
+branded build of [OpenCode](https://opencode.ai), for the agent runtime. Its `/models` picker
+offers both `Kestrel 1 · OmniCoder-2-9B Q5_K_M` and `Kestrel 1 Pro · Gemma 4 12B IT`, each with
+a 262,144-token context window. Selecting one securely switches the self-hosted server; only one
+model is loaded into VRAM at a time.
 The agent runs locally, so it can use the files, tools, shell, tests, and Git available on the
 computer where Axiom is launched.
 

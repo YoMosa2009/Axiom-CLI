@@ -50,6 +50,28 @@ public sealed class KestrelOpenCodeConfigurationTests
             root["agent"]!["compaction"]!["model"]!.GetValue<string>());
     }
 
+    [Fact]
+    public void TryCreate_UsesTheActiveGemmaModelInTheOpenCodeCatalog()
+    {
+        bool success = KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1/",
+            autoApprove: false,
+            out string json,
+            out string error,
+            activeContextWindowTokens: 262_144,
+            activeModelLabel: "Gemma 4 12B IT",
+            activeModelId: "gemma4:12b");
+
+        Assert.True(success, error);
+        JsonNode root = JsonNode.Parse(json)!;
+        Assert.Equal("kestrel/gemma4:12b", root["model"]!.GetValue<string>());
+        Assert.Equal("Kestrel 1 Pro · Gemma 4 12B IT",
+            root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]!["gemma4:12b"]!["name"]!.GetValue<string>());
+        Assert.Equal("Kestrel 1 · OmniCoder-2-9B Q5_K_M",
+            root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]![KestrelOpenCodeConfiguration.ModelId]!["name"]!.GetValue<string>());
+        Assert.Equal("kestrel/gemma4:12b", root["agent"]!["compaction"]!["model"]!.GetValue<string>());
+    }
+
     [Theory]
     [InlineData("http://ai.axiominference.work/v1")]
     [InlineData("not a url")]

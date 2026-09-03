@@ -309,10 +309,19 @@ internal static class OpenCodeRunner
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
     {
-        if (!KestrelOpenCodeConfiguration.TryCreate(baseUrl, autoApprove: arguments.Contains("--auto"), out string config, out string error))
-            throw new InvalidOperationException(error);
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("No Kestrel access key is configured. Run 'axiom connect'.");
+
+        (string? modelId, int? contextWindow, string? label) = await TryGetActiveKestrelProfileAsync(baseUrl, apiKey, cancellationToken);
+        if (!KestrelOpenCodeConfiguration.TryCreate(
+                baseUrl,
+                autoApprove: arguments.Contains("--auto"),
+                out string config,
+                out string error,
+                contextWindow,
+                label,
+                modelId))
+            throw new InvalidOperationException(error);
 
         string isolatedRoot = Path.Combine(AppPaths.Root, "OpenCode");
         Directory.CreateDirectory(isolatedRoot);
@@ -344,5 +353,45 @@ internal static class OpenCodeRunner
 
         await process.WaitForExitAsync(cancellationToken);
         return process.ExitCode;
+    }
+
+    private static async Task<(string? ModelId, int? ContextWindow, string? Label)> TryGetActiveKestrelProfileAsync(
+        string baseUrl,
+        string apiKey,
+        CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(baseUrl.TrimEnd('/') + "/models/current", UriKind.Absolute, out Uri? endpoint))
+            return (null, null, null);
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey.Trim());
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(5));
+            using HttpResponseMessage response = await BrandedRuntimeHttp.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+                return (null, null, null);
+
+            using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+            JsonElement root = document.RootElement;
+            int? context = root.TryGetProperty("context_window", out JsonElement contextElement)
+                && contextElement.ValueKind == JsonValueKind.Number
+                && contextElement.TryGetInt32(out int value)
+                && value >= 2_048
+                    ? value
+                    : null;
+            string? label = root.TryGetProperty("label", out JsonElement labelElement)
+                ? labelElement.GetString()
+                : null;
+            string? modelId = root.TryGetProperty("model", out JsonElement modelElement)
+                ? modelElement.GetString()
+                : null;
+            return (modelId, context, label);
+        }
+        catch
+        {
+            return (null, null, null);
+        }
     }
 }

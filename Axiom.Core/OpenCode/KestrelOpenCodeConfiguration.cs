@@ -14,6 +14,7 @@ public static class KestrelOpenCodeConfiguration
     public const string DefaultBaseUrl = "https://ai.axiominference.work/v1";
     public const string ProviderId = "kestrel";
     public const string ModelId = "axiom/omnicoder-2-9b:q5_k_m";
+    public const string GemmaModelId = "gemma4:12b";
     public const string QualifiedModelId = ProviderId + "/" + ModelId;
     public const string ApiKeyEnvironmentVariable = "AXIOM_KESTREL_API_KEY";
     public const int ContextWindowTokens = 262_144;
@@ -30,7 +31,14 @@ public static class KestrelOpenCodeConfiguration
     public const int CompactionRecentTokens = 15_000;
     public const int StreamStallTimeoutMilliseconds = 900_000;
 
-    public static bool TryCreate(string? baseUrl, bool autoApprove, out string configJson, out string error)
+    public static bool TryCreate(
+        string? baseUrl,
+        bool autoApprove,
+        out string configJson,
+        out string error,
+        int? activeContextWindowTokens = null,
+        string? activeModelLabel = null,
+        string? activeModelId = null)
     {
         configJson = string.Empty;
         error = string.Empty;
@@ -43,6 +51,23 @@ public static class KestrelOpenCodeConfiguration
         }
 
         string normalizedBaseUrl = endpoint.AbsoluteUri.TrimEnd('/');
+        string modelId = string.IsNullOrWhiteSpace(activeModelId)
+            ? ModelId
+            : activeModelId.Trim();
+        string qualifiedModelId = ProviderId + "/" + modelId;
+        int contextWindowTokens = activeContextWindowTokens is >= 2_048
+            ? activeContextWindowTokens.Value
+            : ContextWindowTokens;
+        int outputTokens = Math.Min(MaxOutputTokens, Math.Max(1_024, contextWindowTokens / 4));
+        int reserveTokens = Math.Min(CompactionReserveTokens, Math.Max(2_048, contextWindowTokens / 4));
+        int inputTokens = Math.Max(2_048, contextWindowTokens - reserveTokens);
+        int recentTokens = Math.Min(CompactionRecentTokens, inputTokens);
+        int tailTurns = contextWindowTokens <= 16_384 ? 4 : CompactionTailTurns;
+        string displayName = string.IsNullOrWhiteSpace(activeModelLabel)
+            ? "Kestrel 1 · OmniCoder-2-9B Q5_K_M"
+            : (modelId.Equals("gemma4:12b", StringComparison.OrdinalIgnoreCase)
+                ? "Kestrel 1 Pro · "
+                : "Kestrel 1 · ") + activeModelLabel;
         var permissions = new JsonObject
         {
             ["edit"] = autoApprove ? "allow" : "ask",
@@ -51,20 +76,28 @@ public static class KestrelOpenCodeConfiguration
             ["websearch"] = "ask"
         };
 
+        var modelCatalog = new JsonObject
+        {
+            [ModelId] = CreateModelDefinition("Kestrel 1 · OmniCoder-2-9B Q5_K_M", contextWindowTokens, inputTokens, outputTokens),
+            [GemmaModelId] = CreateModelDefinition("Kestrel 1 Pro · Gemma 4 12B IT", contextWindowTokens, inputTokens, outputTokens)
+        };
+        if (!modelCatalog.ContainsKey(modelId))
+            modelCatalog[modelId] = CreateModelDefinition(displayName, contextWindowTokens, inputTokens, outputTokens);
+
         var root = new JsonObject
         {
             ["$schema"] = "https://opencode.ai/config.json",
             ["autoupdate"] = false,
-            ["model"] = QualifiedModelId,
-            ["small_model"] = QualifiedModelId,
+            ["model"] = qualifiedModelId,
+            ["small_model"] = qualifiedModelId,
             ["permission"] = permissions,
             ["compaction"] = new JsonObject
             {
                 ["auto"] = true,
                 ["prune"] = true,
-                ["tail_turns"] = CompactionTailTurns,
-                ["preserve_recent_tokens"] = CompactionRecentTokens,
-                ["reserved"] = CompactionReserveTokens
+                ["tail_turns"] = tailTurns,
+                ["preserve_recent_tokens"] = recentTokens,
+                ["reserved"] = reserveTokens
             },
             ["agent"] = new JsonObject
             {
@@ -72,7 +105,7 @@ public static class KestrelOpenCodeConfiguration
                 // falls back to another provider while a long coding session is being continued.
                 ["compaction"] = new JsonObject
                 {
-                    ["model"] = QualifiedModelId
+                    ["model"] = qualifiedModelId
                 }
             },
             ["provider"] = new JsonObject
@@ -93,19 +126,7 @@ public static class KestrelOpenCodeConfiguration
                         // Retain a finite escape hatch for a genuinely stalled stream.
                         ["chunkTimeout"] = StreamStallTimeoutMilliseconds
                     },
-                    ["models"] = new JsonObject
-                    {
-                        [ModelId] = new JsonObject
-                        {
-                            ["name"] = "Kestrel 1 · OmniCoder-2-9B Q5_K_M",
-                            ["limit"] = new JsonObject
-                            {
-                                ["context"] = ContextWindowTokens,
-                                ["input"] = OpenCodeInputBudgetTokens,
-                                ["output"] = MaxOutputTokens
-                            }
-                        }
-                    }
+                    ["models"] = modelCatalog
                 }
             }
         };
@@ -113,4 +134,16 @@ public static class KestrelOpenCodeConfiguration
         configJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
         return true;
     }
+
+    private static JsonObject CreateModelDefinition(string name, int context, int input, int output) =>
+        new()
+        {
+            ["name"] = name,
+            ["limit"] = new JsonObject
+            {
+                ["context"] = context,
+                ["input"] = input,
+                ["output"] = output
+            }
+        };
 }

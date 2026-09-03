@@ -572,6 +572,28 @@ namespace Axiom.Core.Chat
 
             try
             {
+                // Kestrel's authenticated OpenAI-compatible profile endpoint is the authoritative
+                // source when the server can switch models. Unlike /api/ps it is available through
+                // the public tunnel and reports the selected profile even before it is warmed.
+                string currentModelUrl = _customEndpointBaseUrl.TrimEnd('/') + "/models/current";
+                using (var currentRequest = new HttpRequestMessage(HttpMethod.Get, currentModelUrl))
+                {
+                    ApplyCustomEndpointHeaders(currentRequest);
+                    using var currentTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    currentTimeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                    using HttpResponseMessage currentResponse = await CustomEndpointHttp.SendAsync(currentRequest, currentTimeoutCts.Token);
+                    if (currentResponse.IsSuccessStatusCode)
+                    {
+                        string currentBody = await currentResponse.Content.ReadAsStringAsync(currentTimeoutCts.Token);
+                        using JsonDocument currentDocument = JsonDocument.Parse(currentBody);
+                        if (currentDocument.RootElement.TryGetProperty("context_window", out JsonElement currentContext)
+                            && currentContext.ValueKind == JsonValueKind.Number
+                            && currentContext.TryGetInt32(out int detectedContext)
+                            && detectedContext > 0)
+                            return detectedContext;
+                    }
+                }
+
                 string psUrl = BuildNativeOllamaUrl(_customEndpointBaseUrl, "/api/ps");
                 using var request = new HttpRequestMessage(HttpMethod.Get, psUrl);
                 ApplyCustomEndpointHeaders(request);
