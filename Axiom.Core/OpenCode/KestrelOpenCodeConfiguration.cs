@@ -27,9 +27,21 @@ public static class KestrelOpenCodeConfiguration
     // the request from its checkpoint plus the retained recent turns.
     public const int CompactionReserveTokens = 16_384;
     public const int CompactionTailTurns = 6;
-    // OpenCode 1.18.18 clamps this setting to 15,000 tokens.
+    // OpenCode 1.18.29 clamps this setting to 15,000 tokens (MAX_PRESERVE_RECENT_TOKENS).
     public const int CompactionRecentTokens = 15_000;
     public const int StreamStallTimeoutMilliseconds = 900_000;
+
+    // OpenCode only sends a temperature when the model declares the capability (its provider
+    // layer reads `capabilities.temperature`), so without both the flag on each catalog entry and
+    // an agent-level value every request fell through to Ollama's per-model default -- 1.0 for
+    // Gemma 4, and 0.8 for a model that ships no Modelfile parameters at all. That is far too
+    // loose for a tool-calling loop: the model narrates its next step instead of calling the tool,
+    // the turn ends with no tool call, and OpenCode correctly exits the loop. These values are
+    // deliberately moderate rather than minimal -- Gemma's own model card asks for 1.0, and
+    // pushing it very low is what triggers that family's repetition failure mode.
+    public const double GemmaTemperature = 0.6;
+    public const double OmniCoderTemperature = 0.3;
+    public const double SamplingTopP = 0.95;
 
     public static bool TryCreate(
         string? baseUrl,
@@ -38,7 +50,8 @@ public static class KestrelOpenCodeConfiguration
         out string error,
         int? activeContextWindowTokens = null,
         string? activeModelLabel = null,
-        string? activeModelId = null)
+        string? activeModelId = null,
+        string? instructionsFilePath = null)
     {
         configJson = string.Empty;
         error = string.Empty;
@@ -63,11 +76,15 @@ public static class KestrelOpenCodeConfiguration
         int inputTokens = Math.Max(2_048, contextWindowTokens - reserveTokens);
         int recentTokens = Math.Min(CompactionRecentTokens, inputTokens);
         int tailTurns = contextWindowTokens <= 16_384 ? 4 : CompactionTailTurns;
+        // Gemma is a vision model on this server; OmniCoder is text-only. Declaring it lets
+        // OpenCode attach images, which the proxy already translates into Ollama's native
+        // base64 `images` field.
+        bool isGemma = modelId.Equals(GemmaModelId, StringComparison.OrdinalIgnoreCase);
         string displayName = string.IsNullOrWhiteSpace(activeModelLabel)
             ? "Kestrel 1 · OmniCoder-2-9B Q5_K_M"
-            : (modelId.Equals("gemma4:12b", StringComparison.OrdinalIgnoreCase)
-                ? "Kestrel 1 Pro · "
-                : "Kestrel 1 · ") + activeModelLabel;
+            : (isGemma ? "Kestrel 1 Pro · " : "Kestrel 1 · ") + activeModelLabel;
+        double temperature = isGemma ? GemmaTemperature : OmniCoderTemperature;
+
         var permissions = new JsonObject
         {
             ["edit"] = autoApprove ? "allow" : "ask",
@@ -78,11 +95,11 @@ public static class KestrelOpenCodeConfiguration
 
         var modelCatalog = new JsonObject
         {
-            [ModelId] = CreateModelDefinition("Kestrel 1 · OmniCoder-2-9B Q5_K_M", contextWindowTokens, inputTokens, outputTokens),
-            [GemmaModelId] = CreateModelDefinition("Kestrel 1 Pro · Gemma 4 12B IT", contextWindowTokens, inputTokens, outputTokens)
+            [ModelId] = CreateModelDefinition("Kestrel 1 · OmniCoder-2-9B Q5_K_M", contextWindowTokens, inputTokens, outputTokens, vision: false),
+            [GemmaModelId] = CreateModelDefinition("Kestrel 1 Pro · Gemma 4 12B IT", contextWindowTokens, inputTokens, outputTokens, vision: true)
         };
         if (!modelCatalog.ContainsKey(modelId))
-            modelCatalog[modelId] = CreateModelDefinition(displayName, contextWindowTokens, inputTokens, outputTokens);
+            modelCatalog[modelId] = CreateModelDefinition(displayName, contextWindowTokens, inputTokens, outputTokens, vision: false);
 
         var root = new JsonObject
         {
@@ -106,7 +123,9 @@ public static class KestrelOpenCodeConfiguration
                 ["compaction"] = new JsonObject
                 {
                     ["model"] = qualifiedModelId
-                }
+                },
+                ["build"] = CreateAgentSampling(temperature),
+                ["plan"] = CreateAgentSampling(temperature)
             },
             ["provider"] = new JsonObject
             {
@@ -131,14 +150,35 @@ public static class KestrelOpenCodeConfiguration
             }
         };
 
+        if (!string.IsNullOrWhiteSpace(instructionsFilePath))
+            root["instructions"] = new JsonArray(instructionsFilePath.Trim());
+
         configJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
         return true;
     }
 
-    private static JsonObject CreateModelDefinition(string name, int context, int input, int output) =>
+    private static JsonObject CreateAgentSampling(double temperature) =>
         new()
         {
+            ["temperature"] = temperature,
+            ["top_p"] = SamplingTopP
+        };
+
+    private static JsonObject CreateModelDefinition(string name, int context, int input, int output, bool vision)
+    {
+        var definition = new JsonObject
+        {
             ["name"] = name,
+            // Without this OpenCode treats the model as temperature-incapable and drops the
+            // agent temperature above, leaving Ollama's own (much hotter) default in charge.
+            ["temperature"] = true,
+            ["tool_call"] = true,
+            ["attachment"] = vision,
+            ["modalities"] = new JsonObject
+            {
+                ["input"] = vision ? new JsonArray("text", "image") : new JsonArray("text"),
+                ["output"] = new JsonArray("text")
+            },
             ["limit"] = new JsonObject
             {
                 ["context"] = context,
@@ -146,4 +186,6 @@ public static class KestrelOpenCodeConfiguration
                 ["output"] = output
             }
         };
+        return definition;
+    }
 }

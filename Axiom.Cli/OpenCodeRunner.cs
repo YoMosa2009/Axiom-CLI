@@ -12,11 +12,32 @@ internal static class OpenCodeRunner
     internal const string RuntimePathEnvironmentVariable = "AXIOM_OPENCODE_PATH";
     internal const string NpmPackageName = "opencode-ai";
     // Updating OpenCode is a compatibility decision, not an implicit behavior change for users.
-    internal const string PinnedRuntimeVersion = "1.18.18";
+    internal const string PinnedRuntimeVersion = "1.18.29";
     private const string BrandedRuntimeDirectoryName = "axiom-code";
     private const string BrandedRuntimeVersionFileName = ".axiom-code-version";
     private const string BrandedRuntimeAssetPrefix = "axiom-code-runtime-";
     private static readonly HttpClient BrandedRuntimeHttp = CreateBrandedRuntimeHttpClient();
+
+    private const string InstructionsFileName = "kestrel-operating-rules.md";
+
+    // Small local models reliably end a turn by announcing the next step instead of taking it.
+    // OpenCode's loop is correct to stop there -- the turn produced no tool call -- so the fix
+    // belongs in the instructions the model actually reads, not in the loop.
+    private const string InstructionsContent = """
+        # Kestrel operating rules
+
+        1. Do the work in the same turn. Never end a turn with a statement of intent such as
+           "I will now ...", "Next I will ...", or "Let me continue". If more work remains, call
+           the next tool immediately instead of describing it.
+        2. A turn that ends without a tool call ends the whole task. Stop only when the request is
+           actually complete, or when you genuinely need an answer from the user.
+        3. Keep the todo list accurate with the todo tool, and never end a turn while an item is
+           still pending or in progress.
+        4. Prefer many small, concrete tool calls over one large plan. Read before you edit, and
+           verify after you edit.
+        5. Use only the tools that exist in this session. If you need a capability you do not
+           have, say so plainly instead of inventing a tool name.
+        """;
 
     private static string ManagedRuntimeRoot => Path.Combine(AppPaths.Root, "OpenCode", "runtime");
     private static string BrandedRuntimeRoot => Path.Combine(ManagedRuntimeRoot, BrandedRuntimeDirectoryName);
@@ -302,29 +323,43 @@ internal static class OpenCodeRunner
         return false;
     }
 
+    /// <param name="buildArguments">
+    /// Receives the fully qualified id of the model Kestrel is actually serving right now. The id
+    /// cannot be hard-coded by the caller: the server owns which profile is loaded, and passing a
+    /// stale id made OpenCode ask for a model the server was not running, which in turn made the
+    /// proxy unload the live model and reload the requested one mid-session.
+    /// </param>
     internal static async Task<int> RunAsync(
         string runtimePath,
         string baseUrl,
         string apiKey,
-        IReadOnlyList<string> arguments,
+        bool autoApprove,
+        Func<string, IReadOnlyList<string>> buildArguments,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("No Kestrel access key is configured. Run 'axiom connect'.");
 
+        string isolatedRoot = Path.Combine(AppPaths.Root, "OpenCode");
+        Directory.CreateDirectory(isolatedRoot);
+        string? instructionsPath = TryWriteInstructions(isolatedRoot);
+
         (string? modelId, int? contextWindow, string? label) = await TryGetActiveKestrelProfileAsync(baseUrl, apiKey, cancellationToken);
         if (!KestrelOpenCodeConfiguration.TryCreate(
                 baseUrl,
-                autoApprove: arguments.Contains("--auto"),
+                autoApprove,
                 out string config,
                 out string error,
                 contextWindow,
                 label,
-                modelId))
+                modelId,
+                instructionsPath))
             throw new InvalidOperationException(error);
 
-        string isolatedRoot = Path.Combine(AppPaths.Root, "OpenCode");
-        Directory.CreateDirectory(isolatedRoot);
+        string qualifiedModelId = KestrelOpenCodeConfiguration.ProviderId
+            + "/"
+            + (string.IsNullOrWhiteSpace(modelId) ? KestrelOpenCodeConfiguration.ModelId : modelId.Trim());
+        IReadOnlyList<string> arguments = buildArguments(qualifiedModelId);
 
         var startInfo = new ProcessStartInfo
         {
@@ -353,6 +388,24 @@ internal static class OpenCodeRunner
 
         await process.WaitForExitAsync(cancellationToken);
         return process.ExitCode;
+    }
+
+    private static string? TryWriteInstructions(string isolatedRoot)
+    {
+        try
+        {
+            string directory = Path.Combine(isolatedRoot, "instructions");
+            Directory.CreateDirectory(directory);
+            string file = Path.Combine(directory, InstructionsFileName);
+            // Rewritten every launch so an Axiom update always ships the current rules.
+            File.WriteAllText(file, InstructionsContent);
+            return file;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The rules are a quality nudge, not a requirement. Never block a session over them.
+            return null;
+        }
     }
 
     private static async Task<(string? ModelId, int? ContextWindow, string? Label)> TryGetActiveKestrelProfileAsync(

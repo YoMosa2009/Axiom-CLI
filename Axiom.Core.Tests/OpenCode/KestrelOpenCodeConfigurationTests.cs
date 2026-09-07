@@ -72,6 +72,94 @@ public sealed class KestrelOpenCodeConfigurationTests
         Assert.Equal("kestrel/gemma4:12b", root["agent"]!["compaction"]!["model"]!.GetValue<string>());
     }
 
+    [Fact]
+    public void TryCreate_DeclaresSamplingSoOpenCodeDoesNotFallBackToOllamaDefaults()
+    {
+        bool success = KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1",
+            autoApprove: false,
+            out string json,
+            out string error,
+            activeModelId: KestrelOpenCodeConfiguration.GemmaModelId,
+            activeModelLabel: "Gemma 4 12B IT");
+
+        Assert.True(success, error);
+        JsonNode root = JsonNode.Parse(json)!;
+        JsonNode models = root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]!;
+
+        // OpenCode drops the agent temperature unless the model declares the capability.
+        Assert.True(models[KestrelOpenCodeConfiguration.GemmaModelId]!["temperature"]!.GetValue<bool>());
+        Assert.True(models[KestrelOpenCodeConfiguration.ModelId]!["temperature"]!.GetValue<bool>());
+        Assert.True(models[KestrelOpenCodeConfiguration.GemmaModelId]!["tool_call"]!.GetValue<bool>());
+
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.GemmaTemperature,
+            root["agent"]!["build"]!["temperature"]!.GetValue<double>());
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.SamplingTopP,
+            root["agent"]!["build"]!["top_p"]!.GetValue<double>());
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.GemmaTemperature,
+            root["agent"]!["plan"]!["temperature"]!.GetValue<double>());
+    }
+
+    [Fact]
+    public void TryCreate_UsesTheOmniCoderTemperatureWhenOmniCoderIsServing()
+    {
+        bool success = KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1",
+            autoApprove: false,
+            out string json,
+            out string error,
+            activeModelId: KestrelOpenCodeConfiguration.ModelId);
+
+        Assert.True(success, error);
+        JsonNode root = JsonNode.Parse(json)!;
+        Assert.Equal(
+            KestrelOpenCodeConfiguration.OmniCoderTemperature,
+            root["agent"]!["build"]!["temperature"]!.GetValue<double>());
+    }
+
+    [Fact]
+    public void TryCreate_MarksOnlyTheVisionModelAsAttachmentCapable()
+    {
+        bool success = KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1",
+            autoApprove: false,
+            out string json,
+            out string error);
+
+        Assert.True(success, error);
+        JsonNode models = JsonNode.Parse(json)!["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]!;
+        Assert.True(models[KestrelOpenCodeConfiguration.GemmaModelId]!["attachment"]!.GetValue<bool>());
+        Assert.False(models[KestrelOpenCodeConfiguration.ModelId]!["attachment"]!.GetValue<bool>());
+
+        JsonArray gemmaInput = models[KestrelOpenCodeConfiguration.GemmaModelId]!["modalities"]!["input"]!.AsArray();
+        Assert.Contains(gemmaInput, item => item!.GetValue<string>() == "image");
+        JsonArray omniInput = models[KestrelOpenCodeConfiguration.ModelId]!["modalities"]!["input"]!.AsArray();
+        Assert.DoesNotContain(omniInput, item => item!.GetValue<string>() == "image");
+    }
+
+    [Fact]
+    public void TryCreate_IncludesTheOperatingRulesFileOnlyWhenOneIsSupplied()
+    {
+        Assert.True(KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1",
+            autoApprove: false,
+            out string withoutRules,
+            out string error));
+        Assert.Null(JsonNode.Parse(withoutRules)!["instructions"]);
+
+        Assert.True(KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1",
+            autoApprove: false,
+            out string withRules,
+            out error,
+            instructionsFilePath: "/axiom/rules.md"), error);
+        JsonArray instructions = JsonNode.Parse(withRules)!["instructions"]!.AsArray();
+        Assert.Equal("/axiom/rules.md", Assert.Single(instructions)!.GetValue<string>());
+    }
+
     [Theory]
     [InlineData("http://ai.axiominference.work/v1")]
     [InlineData("not a url")]

@@ -22,8 +22,11 @@ jobs:
             archive: tar
           - rid: osx-x64
             # macos-latest is ARM64. The OpenCode --single build must run on an
-            # Intel host to emit its x64 binary.
-            os: macos-13
+            # Intel host to emit its x64 binary. macos-13 was retired by GitHub,
+            # which silently left this job queued until it was cancelled -- and a
+            # cancelled matrix job skipped the release job entirely, so every tag
+            # after v1.14.4 published Windows-only assets.
+            os: macos-15-intel
             archive: tar
           - rid: osx-arm64
             os: macos-latest
@@ -69,7 +72,15 @@ jobs:
       - name: Build Axiom Code runtime
         shell: bash
         run: |
-          git clone --depth 1 --branch v1.18.18 https://github.com/anomalyco/opencode.git opencode-source
+          # Single source of truth for the pinned runtime, so the branded build can never drift
+          # from the version the CLI checks for and installs at runtime.
+          opencode_version="$(grep -oE 'PinnedRuntimeVersion = "[0-9.]+"' Axiom.Cli/OpenCodeRunner.cs | grep -oE '[0-9.]+')"
+          if [ -z "$opencode_version" ]; then
+            echo "Could not read PinnedRuntimeVersion from Axiom.Cli/OpenCodeRunner.cs" >&2
+            exit 1
+          fi
+          echo "Building Axiom Code on OpenCode v$opencode_version"
+          git clone --depth 1 --branch "v$opencode_version" https://github.com/anomalyco/opencode.git opencode-source
           git -C opencode-source apply "$GITHUB_WORKSPACE/assets/opencode/axiom-code-logo.patch"
           git -C opencode-source apply "$GITHUB_WORKSPACE/assets/opencode/axiom-code-experience.patch"
           bun install --cwd opencode-source --frozen-lockfile
@@ -98,6 +109,9 @@ jobs:
 
   release:
     needs: build
+    # Publish whatever did build instead of skipping the release entirely when one platform
+    # breaks, then fail loudly below so a partial release is never mistaken for a complete one.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -111,3 +125,21 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+
+      - name: Verify every platform shipped
+        shell: bash
+        run: |
+          missing=0
+          for rid in win-x64 linux-x64 linux-arm64 osx-x64 osx-arm64; do
+            case "$rid" in
+              win-*) cli="axiom-cli-$rid.zip" ;;
+              *) cli="axiom-cli-$rid.tar.gz" ;;
+            esac
+            for asset in "$cli" "axiom-code-runtime-$rid.zip"; do
+              if [ ! -f "artifacts/$asset" ]; then
+                echo "::error::Release is missing $asset"
+                missing=1
+              fi
+            done
+          done
+          exit "$missing"

@@ -40,3 +40,26 @@ jobs:
       - name: Smoke code usage (no network)
         run: dotnet run --project Axiom.Cli --no-build -c Release -- code
         continue-on-error: true
+
+  # The Axiom Code runtime is built by applying these patches to a pinned OpenCode tag. Nothing
+  # else notices when a version bump makes them stale -- the failure would otherwise surface only
+  # during a release build, after the tag is already pushed.
+  opencode-patches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the Axiom Code patches still apply to the pinned OpenCode tag
+        shell: bash
+        run: |
+          version="$(grep -oE 'PinnedRuntimeVersion = "[0-9.]+"' Axiom.Cli/OpenCodeRunner.cs | grep -oE '[0-9.]+')"
+          if [ -z "$version" ]; then
+            echo "::error::Could not read PinnedRuntimeVersion from Axiom.Cli/OpenCodeRunner.cs"
+            exit 1
+          fi
+          echo "Checking patches against OpenCode v$version"
+          git clone --depth 1 --branch "v$version" https://github.com/anomalyco/opencode.git opencode-source
+          for patch in assets/opencode/*.patch; do
+            echo "--- $patch"
+            git -C opencode-source apply --check "$GITHUB_WORKSPACE/$patch"
+          done

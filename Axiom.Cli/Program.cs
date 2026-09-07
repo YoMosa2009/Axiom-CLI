@@ -491,10 +491,18 @@ internal static class Program
         if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(OpenCodeRunner.RuntimePathEnvironmentVariable)))
         {
             OpenCodeRunner.RuntimeInstallResult runtimeUpdate = await OpenCodeRunner.EnsureManagedRuntimeCurrentAsync(CancellationToken.None);
+            // A failed refresh used to abort the session outright, which meant a release that
+            // shipped no branded runtime for this platform locked the user out of an engine that
+            // was already installed and working. Only a genuinely missing runtime is fatal.
             if (!runtimeUpdate.Success)
             {
-                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Could not update Axiom's managed OpenCode runtime: {runtimeUpdate.Message.EscapeMarkup()}[/]");
-                return 1;
+                if (!OpenCodeRunner.TryFindRuntime(out _))
+                {
+                    AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Could not install Axiom's managed OpenCode runtime: {runtimeUpdate.Message.EscapeMarkup()}[/]");
+                    return 1;
+                }
+
+                AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.SystemMuted)}]Continuing with the installed runtime. Could not refresh it: {runtimeUpdate.Message.EscapeMarkup()}[/]");
             }
         }
 
@@ -521,31 +529,47 @@ internal static class Program
             ?? db.LoadCustomEndpointApiKey()
             ?? string.Empty;
 
-        var arguments = new List<string>();
-        if (string.IsNullOrWhiteSpace(task))
+        // The model id is supplied by the runner, which asks the server which profile is actually
+        // loaded. Hard-coding it here used to send OpenCode after OmniCoder even when the server
+        // was serving Gemma, which made the proxy swap the loaded model out from under the session.
+        IReadOnlyList<string> BuildArguments(string qualifiedModelId)
         {
-            // OpenCode's interactive TUI accepts its project directory as a positional argument.
-            // Axiom used to parse an initial folder but then silently omit it here, leaving every
-            // session in the shell's original cwd.
-            if (!string.IsNullOrWhiteSpace(resolvedProjectPath))
-                arguments.Add(resolvedProjectPath);
-            arguments.Add("--model");
-            arguments.Add(KestrelOpenCodeConfiguration.QualifiedModelId);
-        }
-        else
-        {
-            arguments.AddRange(["run", "--model", KestrelOpenCodeConfiguration.QualifiedModelId, "--agent", "build"]);
-            // `opencode run` uses --dir rather than the TUI's positional project argument.
-            if (!string.IsNullOrWhiteSpace(resolvedProjectPath))
-                arguments.AddRange(["--dir", resolvedProjectPath]);
-            if (jsonFlag)
-                arguments.AddRange(["--format", "json"]);
-            if (yesFlag)
-                arguments.Add("--auto");
-            arguments.Add(task);
+            var arguments = new List<string>();
+            if (string.IsNullOrWhiteSpace(task))
+            {
+                // OpenCode's interactive TUI accepts its project directory as a positional argument.
+                // Axiom used to parse an initial folder but then silently omit it here, leaving every
+                // session in the shell's original cwd.
+                if (!string.IsNullOrWhiteSpace(resolvedProjectPath))
+                    arguments.Add(resolvedProjectPath);
+                arguments.Add("--model");
+                arguments.Add(qualifiedModelId);
+            }
+            else
+            {
+                arguments.AddRange(["run", "--model", qualifiedModelId, "--agent", "build"]);
+                // `opencode run` uses --dir rather than the TUI's positional project argument.
+                if (!string.IsNullOrWhiteSpace(resolvedProjectPath))
+                    arguments.AddRange(["--dir", resolvedProjectPath]);
+                if (jsonFlag)
+                    arguments.AddRange(["--format", "json"]);
+                if (yesFlag)
+                    arguments.Add("--auto");
+                arguments.Add(task);
+            }
+
+            return arguments;
         }
 
-        return await OpenCodeRunner.RunAsync(runtimePath, baseUrl, apiKey, arguments, CancellationToken.None);
+        // --yes previously only reached `opencode run`; the TUI silently kept asking for every
+        // edit even though the user had already opted into auto-approval.
+        return await OpenCodeRunner.RunAsync(
+            runtimePath,
+            baseUrl,
+            apiKey,
+            autoApprove: yesFlag,
+            BuildArguments,
+            CancellationToken.None);
     }
 
     private static bool TryResolveOpenCodeProjectPath(string? candidate, out string? projectPath, out string error)
