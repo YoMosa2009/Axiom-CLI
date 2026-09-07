@@ -83,6 +83,7 @@ jobs:
           git clone --depth 1 --branch "v$opencode_version" https://github.com/anomalyco/opencode.git opencode-source
           git -C opencode-source apply "$GITHUB_WORKSPACE/assets/opencode/axiom-code-logo.patch"
           git -C opencode-source apply "$GITHUB_WORKSPACE/assets/opencode/axiom-code-experience.patch"
+          git -C opencode-source apply "$GITHUB_WORKSPACE/assets/opencode/axiom-code-persistence.patch"
           bun install --cwd opencode-source --frozen-lockfile
           bun run --cwd opencode-source/packages/opencode build --single
           rid="${{ matrix.rid }}"

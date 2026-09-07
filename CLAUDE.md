@@ -166,6 +166,24 @@ To restart after editing `app.py`:
     introduce and invisible until the next reboot. After editing any `.vbs`, verify with
     `cscript //nologo //B <file>` and confirm exit code 0.
 
+11. **Kestrel's models cannot drive OpenCode's delegation tools, and the failure looks like a
+    hang.** Given `task` or `skill`, a 9-12B model calls them with malformed arguments and
+    retries forever: measured against a 26k-line repository, eleven consecutive `task` calls
+    rejected for a missing `description`, not one file read, then a statement of intent. On
+    screen this is simply "it ran for 31 seconds and did nothing". Both are turned off in the
+    generated config (`DelegationTools`), via `tools[name]=false` *and* a permission deny -- the
+    permission is what also strips the skills catalog out of the system prompt.
+
+12. **A small model ends a turn by announcing its next step, and OpenCode is right to stop.** The
+    loop exits when a turn produces no tool call, which is correct in general and wrong here: the
+    model's own todo list still has unfinished items. The operating-rules instructions file alone
+    does not fix this -- it is demonstrably in the prompt (verified on the wire) and the model
+    still signs off with "I will continue...". `assets/opencode/axiom-code-persistence.patch`
+    makes the loop refuse such a turn while todos remain, up to six times *in a row* (the counter
+    resets whenever the model does real work). Do not reach for `agent.prompt` to inject rules
+    instead: in `session/llm/request.ts` it *replaces* the built-in system prompt rather than
+    adding to it, which strips the tool-usage guidance a small model needs most.
+
 ## Verification pattern that actually works
 
 For any proxy change: test with raw `curl`/Python `urllib` directly against `http://127.0.0.1:8080/v1/chat/completions` first (fast iteration, full visibility into wire format) before testing through the real `axiom.exe` binary. For any Axiom-CLI change: `dotnet build && dotnet test`, then `dotnet publish` a throwaway binary and run real prompts against it in a scratch directory — don't trust unit tests alone for anything touching the model-facing prompt/wire format, since that's exactly where subtle regressions hide. Always confirm with real file output (`xxd`/hexdump for encoding issues) rather than trusting a JSON success summary alone.

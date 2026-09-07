@@ -1,0 +1,106 @@
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 0f85d44..c8cd89a 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -99,6 +99,47 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
+   return part.state.status === "error" && part.state.metadata?.interrupted === true
+ }
+ 
++// AXIOM: how many no-tool-call turns the loop will refuse in a row before accepting that the
++// model really is finished. High enough to carry a long multi-file review past several stumbles,
++// low enough that a model with nothing left to say still terminates promptly.
++const AXIOM_MAX_NUDGES = 6
++
++// The model's own todo list, as last written by the todowrite tool. Read from the message parts
++// rather than the Todo service so this stays a self-contained change with no new dependency on
++// the loop's Effect context.
++function axiomUnfinishedTodos(messages: SessionV1.WithParts[]): string[] {
++  for (let m = messages.length - 1; m >= 0; m--) {
++    const parts = messages[m].parts
++    for (let p = parts.length - 1; p >= 0; p--) {
++      const part = parts[p]
++      if (part.type !== "tool" || part.tool !== "todowrite") continue
++      if (part.state.status !== "completed") continue
++      const todos = part.state.metadata?.todos
++      if (!Array.isArray(todos)) continue
++      return todos
++        .filter((todo) => todo && todo.status !== "completed" && todo.status !== "cancelled")
++        .map((todo) => String(todo.content ?? "").trim())
++        .filter((content) => content.length > 0)
++    }
++  }
++  return []
++}
++
++function axiomContinueText(unfinished: string[]): string {
++  return [
++    "You ended that turn without calling a tool, but your own todo list still has unfinished work:",
++    ...unfinished.map((item) => "  - " + item),
++    "",
++    "Saying what you will do next does not do it, and nothing will prompt you again: a turn that",
++    "ends without a tool call ends the entire task.",
++    "",
++    "Continue now. Call the next tool needed for the first unfinished item. Do not restate your",
++    "plan, do not repeat a summary you have already given, and do not announce your intentions --",
++    "act. When every item really is done, mark them completed with todowrite and give your final",
++    "answer in that same turn.",
++  ].join("\n")
++}
++
+ export interface Interface {
+   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+@@ -1083,6 +1124,10 @@ const layer = Layer.effect(
+         const ctx = yield* InstanceState.context
+         let structured: unknown
+         let step = 0
++        // Consecutive no-tool-call turns this loop has refused (see the Axiom block below).
++        // Reset whenever the model does real work, so the budget is "N refusals in a row",
++        // not N per session.
++        let axiomNudges = 0
+         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+ 
+         while (true) {
+@@ -1125,8 +1170,40 @@ const layer = Layer.effect(
+                 callID: orphan.callID,
+               })
+             }
+-            yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
+-            break
++            // AXIOM: a 9-12B model routinely ends a turn by announcing its next step ("I will
++            // continue with the remaining modules...") instead of taking it. The loop is right
++            // that the turn produced no tool call, but the task plainly is not finished -- the
++            // model's own todo list still has unfinished items. Rather than accept that as
++            // completion, tell it what it just did and run the turn again. Bounded, and only
++            // ever triggered by the model's own recorded todos, so a genuinely finished task
++            // (every item completed, or no list at all) still exits immediately.
++            const axiomUnfinished = axiomUnfinishedTodos(msgs)
++            if (axiomUnfinished.length > 0 && axiomNudges < AXIOM_MAX_NUDGES) {
++              axiomNudges++
++              yield* Effect.logInfo("axiom: refusing a no-tool-call turn with unfinished todos", {
++                "session.id": sessionID,
++                nudge: axiomNudges,
++                unfinished: axiomUnfinished.length,
++              })
++              const axiomUserMsg = msgs.findLast((msg) => msg.info.role === "user")
++              if (axiomUserMsg) {
++                // Deliberately in-memory only: the nudge steers this one retry and must not
++                // pile up in the persisted transcript across turns.
++                axiomUserMsg.parts.push({
++                  id: PartID.ascending(),
++                  messageID: axiomUserMsg.info.id,
++                  sessionID: axiomUserMsg.info.sessionID,
++                  type: "text",
++                  text: axiomContinueText(axiomUnfinished),
++                  synthetic: true,
++                })
++              }
++            } else {
++              yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
++              break
++            }
++          } else {
++            axiomNudges = 0
+           }
+ 
+           step++
