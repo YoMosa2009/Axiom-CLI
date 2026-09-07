@@ -1,8 +1,8 @@
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 0f85d44..c8cd89a 100644
+index 0f85d44..cbe22bd 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -99,6 +99,47 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
+@@ -99,6 +99,83 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
    return part.state.status === "error" && part.state.metadata?.interrupted === true
  }
  
@@ -32,6 +32,42 @@ index 0f85d44..c8cd89a 100644
 +  return []
 +}
 +
++// AXIOM: identical consecutive tool calls before the loop intervenes, and before it gives up.
++// Measured: Gemma 4 12B issued the byte-identical glob 370 times in a row, receiving the same
++// result every time, for 24 minutes -- a hard repetition lock, and nothing in the stock loop
++// stops it because each repeat is a legitimate tool call.
++const AXIOM_REPEAT_WARN = 3
++const AXIOM_REPEAT_ABORT = 8
++
++// Length of the trailing run of byte-identical tool calls (same tool, same input).
++function axiomRepeatedTail(messages: SessionV1.WithParts[]): { tool: string; count: number } | undefined {
++  const calls: { tool: string; key: string }[] = []
++  for (const message of messages) {
++    if (message.info.role !== "assistant") continue
++    for (const part of message.parts) {
++      if (part.type !== "tool") continue
++      if (part.state.status !== "completed" && part.state.status !== "error") continue
++      calls.push({ tool: part.tool, key: part.tool + " " + JSON.stringify(part.state.input ?? {}) })
++    }
++  }
++  if (calls.length === 0) return undefined
++  const last = calls[calls.length - 1]
++  let count = 1
++  for (let i = calls.length - 2; i >= 0 && calls[i].key === last.key; i--) count++
++  return { tool: last.tool, count }
++}
++
++function axiomRepeatText(tool: string, count: number): string {
++  return [
++    `You have now called \`${tool}\` ${count} times in a row with exactly the same arguments, and`,
++    "received exactly the same result every time. Repeating it again cannot tell you anything new.",
++    "",
++    "Use the result you already have. Move to a different action: read one of the files it returned,",
++    "or work on the next unfinished item on your todo list. Do not call `" + tool + "` with those",
++    "arguments again.",
++  ].join("\n")
++}
++
 +function axiomContinueText(unfinished: string[]): string {
 +  return [
 +    "You ended that turn without calling a tool, but your own todo list still has unfinished work:",
@@ -50,7 +86,7 @@ index 0f85d44..c8cd89a 100644
  export interface Interface {
    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
    readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
-@@ -1083,6 +1124,10 @@ const layer = Layer.effect(
+@@ -1083,6 +1160,10 @@ const layer = Layer.effect(
          const ctx = yield* InstanceState.context
          let structured: unknown
          let step = 0
@@ -61,7 +97,7 @@ index 0f85d44..c8cd89a 100644
          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
  
          while (true) {
-@@ -1125,8 +1170,40 @@ const layer = Layer.effect(
+@@ -1125,8 +1206,71 @@ const layer = Layer.effect(
                  callID: orphan.callID,
                })
              }
@@ -101,6 +137,37 @@ index 0f85d44..c8cd89a 100644
 +            }
 +          } else {
 +            axiomNudges = 0
++          }
++
++          // AXIOM: the mirror image of the nudge above. That one refuses to stop too early; this
++          // one refuses to spin forever. Every repeat is a legitimate tool call, so nothing in the
++          // stock loop notices a model that has locked onto one. Tell it once, then stop.
++          const axiomRepeat = axiomRepeatedTail(msgs)
++          if (axiomRepeat && axiomRepeat.count >= AXIOM_REPEAT_WARN) {
++            if (axiomRepeat.count >= AXIOM_REPEAT_ABORT) {
++              yield* Effect.logWarning("axiom: aborting a locked tool-call loop", {
++                "session.id": sessionID,
++                tool: axiomRepeat.tool,
++                count: axiomRepeat.count,
++              })
++              break
++            }
++            yield* Effect.logInfo("axiom: breaking a repeated tool call", {
++              "session.id": sessionID,
++              tool: axiomRepeat.tool,
++              count: axiomRepeat.count,
++            })
++            const axiomRepeatMsg = msgs.findLast((msg) => msg.info.role === "user")
++            if (axiomRepeatMsg) {
++              axiomRepeatMsg.parts.push({
++                id: PartID.ascending(),
++                messageID: axiomRepeatMsg.info.id,
++                sessionID: axiomRepeatMsg.info.sessionID,
++                type: "text",
++                text: axiomRepeatText(axiomRepeat.tool, axiomRepeat.count),
++                synthetic: true,
++              })
++            }
            }
  
            step++
