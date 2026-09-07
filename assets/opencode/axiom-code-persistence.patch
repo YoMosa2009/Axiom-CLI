@@ -1,8 +1,8 @@
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 0f85d44..cbe22bd 100644
+index 0f85d44..11fc7fd 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -99,6 +99,83 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
+@@ -99,6 +99,167 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
    return part.state.status === "error" && part.state.metadata?.interrupted === true
  }
  
@@ -30,6 +30,68 @@ index 0f85d44..cbe22bd 100644
 +    }
 +  }
 +  return []
++}
++
++// Length of the trailing run of identical assistant answers. A model that believes it is finished
++// answers any nudge by re-emitting the same text verbatim -- measured on a real session as four
++// byte-identical 1,899-character answers in a row -- so this is the signal that pushing again is
++// pointless no matter what the todo list still says.
++function axiomRepeatedAnswers(messages: SessionV1.WithParts[]): number {
++  const answers: string[] = []
++  for (const message of messages) {
++    if (message.info.role !== "assistant") continue
++    const text = message.parts
++      .map((part) => (part.type === "text" && !part.synthetic ? part.text : ""))
++      .join("")
++      .trim()
++    if (text.length > 0) answers.push(text)
++  }
++  if (answers.length < 2) return answers.length
++  let count = 1
++  for (let i = answers.length - 2; i >= 0 && answers[i] === answers[answers.length - 1]; i--) count++
++  return count
++}
++
++// Files the model's own searches turned up but never opened. Derived purely from the transcript --
++// glob output lines minus read inputs -- so it needs no extra IO and no new service dependency.
++function axiomUnreadFiles(messages: SessionV1.WithParts[], limit: number): string[] {
++  const found = new Set<string>()
++  const read = new Set<string>()
++  for (const message of messages) {
++    for (const part of message.parts) {
++      if (part.type !== "tool" || part.state.status !== "completed") continue
++      if (part.tool === "read") {
++        const target = (part.state.input as { filePath?: string })?.filePath
++        if (typeof target === "string") read.add(target.trim())
++        continue
++      }
++      if (part.tool !== "glob") continue
++      for (const line of String(part.state.output ?? "").split("\n")) {
++        const candidate = line.trim()
++        // Skip the blank line and the "(Results are truncated...)" footer glob appends.
++        if (candidate.length === 0 || candidate.startsWith("(")) continue
++        if (!candidate.includes(".")) continue
++        found.add(candidate)
++      }
++    }
++  }
++  const unread: string[] = []
++  for (const candidate of found) {
++    if (read.has(candidate)) continue
++    unread.push(candidate)
++    if (unread.length >= limit) break
++  }
++  return unread
++}
++
++// Whether any search has ever returned a file. An empty result set is not evidence of an
++// empty project -- it usually means the pattern was wrong.
++function axiomFoundAnyFile(messages: SessionV1.WithParts[]): boolean {
++  return axiomUnreadFiles(messages, 1).length > 0 || messages.some((message) =>
++    message.parts.some(
++      (part) => part.type === "tool" && part.tool === "read" && part.state.status === "completed",
++    ),
++  )
 +}
 +
 +// AXIOM: identical consecutive tool calls before the loop intervenes, and before it gives up.
@@ -68,25 +130,47 @@ index 0f85d44..cbe22bd 100644
 +  ].join("\n")
 +}
 +
-+function axiomContinueText(unfinished: string[]): string {
-+  return [
++function axiomContinueText(unfinished: string[], unread: string[], searchedSuccessfully: boolean): string {
++  const lines = [
 +    "You ended that turn without calling a tool, but your own todo list still has unfinished work:",
 +    ...unfinished.map((item) => "  - " + item),
 +    "",
 +    "Saying what you will do next does not do it, and nothing will prompt you again: a turn that",
 +    "ends without a tool call ends the entire task.",
++  ]
++  if (unread.length > 0) {
++    // Naming actual paths is what makes this actionable. Told only "you have unfinished todos",
++    // the model concludes it is already done and re-sends the same summary.
++    lines.push(
++      "",
++      "You have not opened these files, which your own searches returned:",
++      ...unread.map((file) => "  - " + file),
++    )
++  } else if (!searchedSuccessfully) {
++    // Measured: the model globbed for every language except the one the project is written in
++    // (js/ts/py/go/rs/java/... against a C# repository), got nothing twice, and had no idea the
++    // files existed. Do not let it conclude anything from an empty search.
++    lines.push(
++      "",
++      "Your searches have not returned a single file yet, so you have not seen this project at",
++      "all. Do not draw any conclusion from that. Run `glob` with the pattern `**/*` to list what",
++      "is actually here before going further -- do not guess at file extensions.",
++    )
++  }
++  lines.push(
 +    "",
-+    "Continue now. Call the next tool needed for the first unfinished item. Do not restate your",
-+    "plan, do not repeat a summary you have already given, and do not announce your intentions --",
-+    "act. When every item really is done, mark them completed with todowrite and give your final",
-+    "answer in that same turn.",
-+  ].join("\n")
++    "Do NOT write another summary -- your previous message already contained one, and repeating it",
++    "wastes the turn. Call `read` on a file you have not opened yet, or take the next concrete",
++    "action for the first unfinished item. When the work is genuinely done, mark the items",
++    "completed with todowrite and give your final answer in that same turn.",
++  )
++  return lines.join("\n")
 +}
 +
  export interface Interface {
    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
    readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
-@@ -1083,6 +1160,10 @@ const layer = Layer.effect(
+@@ -1083,6 +1244,10 @@ const layer = Layer.effect(
          const ctx = yield* InstanceState.context
          let structured: unknown
          let step = 0
@@ -97,7 +181,7 @@ index 0f85d44..cbe22bd 100644
          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
  
          while (true) {
-@@ -1125,8 +1206,71 @@ const layer = Layer.effect(
+@@ -1125,8 +1290,82 @@ const layer = Layer.effect(
                  callID: orphan.callID,
                })
              }
@@ -111,6 +195,17 @@ index 0f85d44..cbe22bd 100644
 +            // ever triggered by the model's own recorded todos, so a genuinely finished task
 +            // (every item completed, or no list at all) still exits immediately.
 +            const axiomUnfinished = axiomUnfinishedTodos(msgs)
++            const axiomUnread = axiomUnreadFiles(msgs, 12)
++            // A model that has decided it is finished answers every nudge with the same text.
++            // Once that happens, further pushing only reprints the answer, so take it and stop.
++            const axiomAnswerRepeats = axiomRepeatedAnswers(msgs)
++            if (axiomAnswerRepeats >= 2) {
++              yield* Effect.logInfo("axiom: accepting a repeated final answer", {
++                "session.id": sessionID,
++                repeats: axiomAnswerRepeats,
++              })
++              break
++            }
 +            if (axiomUnfinished.length > 0 && axiomNudges < AXIOM_MAX_NUDGES) {
 +              axiomNudges++
 +              yield* Effect.logInfo("axiom: refusing a no-tool-call turn with unfinished todos", {
@@ -127,7 +222,7 @@ index 0f85d44..cbe22bd 100644
 +                  messageID: axiomUserMsg.info.id,
 +                  sessionID: axiomUserMsg.info.sessionID,
 +                  type: "text",
-+                  text: axiomContinueText(axiomUnfinished),
++                  text: axiomContinueText(axiomUnfinished, axiomUnread, axiomFoundAnyFile(msgs)),
 +                  synthetic: true,
 +                })
 +              }
