@@ -19,10 +19,24 @@ namespace Axiom.Core.Persistence
         private readonly ISecretStore _secretStore;
         private readonly PersistentSettingsStore _settingsBackup;
         private readonly object _gate = new();
+        private readonly HashSet<string> _unreadableSecretKeys = new(StringComparer.Ordinal);
         private bool _isInitialized;
         private bool _disposed;
 
         public bool IsReady => _isInitialized && !_disposed;
+
+        // Settings that hold a value no available store can decrypt. This is deliberately distinct
+        // from "not configured": treating the two the same is what let a permanently unreadable key
+        // log an exception on every launch for weeks while the CLI simply acted as though no key
+        // had ever been set. Callers should tell the user to re-enter it.
+        public IReadOnlyCollection<string> UnreadableSecretKeys
+        {
+            get
+            {
+                lock (_unreadableSecretKeys)
+                    return new List<string>(_unreadableSecretKeys);
+            }
+        }
 
         public DatabaseService(ISecretStore? secretStore = null, string? databasePath = null)
         {
@@ -300,24 +314,8 @@ namespace Axiom.Core.Persistence
             }
         }
 
-        public string? LoadOpenRouterApiKey()
-        {
-            try
-            {
-                string stored = GetSetting(OpenRouterApiKeySettingKey);
-                if (string.IsNullOrWhiteSpace(stored))
-                    return null;
-
-                string decryptedKey = _secretStore.Unprotect(stored).Trim();
-                return string.IsNullOrWhiteSpace(decryptedKey) ? null : decryptedKey;
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"LoadOpenRouterApiKey error: {ex.Message}");
-                _ = BackendLogService.LogErrorAsync("DatabaseService.LoadOpenRouterApiKey", ex);
-                return TryLoadBackupSecret(OpenRouterApiKeySettingKey);
-            }
-        }
+        public string? LoadOpenRouterApiKey() =>
+            LoadSecret(OpenRouterApiKeySettingKey, nameof(LoadOpenRouterApiKey));
 
         public void SaveCustomEndpointApiKey(string apiKey)
         {
@@ -339,24 +337,8 @@ namespace Axiom.Core.Persistence
             }
         }
 
-        public string? LoadCustomEndpointApiKey()
-        {
-            try
-            {
-                string stored = GetSetting(CustomEndpointApiKeySettingKey);
-                if (string.IsNullOrWhiteSpace(stored))
-                    return null;
-
-                string decryptedKey = _secretStore.Unprotect(stored).Trim();
-                return string.IsNullOrWhiteSpace(decryptedKey) ? null : decryptedKey;
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"LoadCustomEndpointApiKey error: {ex.Message}");
-                _ = BackendLogService.LogErrorAsync("DatabaseService.LoadCustomEndpointApiKey", ex);
-                return TryLoadBackupSecret(CustomEndpointApiKeySettingKey);
-            }
-        }
+        public string? LoadCustomEndpointApiKey() =>
+            LoadSecret(CustomEndpointApiKeySettingKey, nameof(LoadCustomEndpointApiKey));
 
         public void SaveTavilyApiKey(string apiKey)
         {
@@ -378,22 +360,60 @@ namespace Axiom.Core.Persistence
             }
         }
 
-        public string? LoadTavilyApiKey()
+        public string? LoadTavilyApiKey() =>
+            LoadSecret(TavilyApiKeySettingKey, nameof(LoadTavilyApiKey));
+
+        // One path for all three secrets: read, decrypt, fall back to the settings backup, and --
+        // only when every one of those fails on a value that is actually present -- record the key
+        // as unreadable so the caller can prompt for it instead of silently continuing.
+        private string? LoadSecret(string settingKey, string operation)
         {
+            string stored;
             try
             {
-                string stored = GetSetting(TavilyApiKeySettingKey);
-                if (string.IsNullOrWhiteSpace(stored))
-                    return null;
-
-                string decryptedKey = _secretStore.Unprotect(stored).Trim();
-                return string.IsNullOrWhiteSpace(decryptedKey) ? null : decryptedKey;
+                stored = GetSetting(settingKey);
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"LoadTavilyApiKey error: {ex.Message}");
-                _ = BackendLogService.LogErrorAsync("DatabaseService.LoadTavilyApiKey", ex);
-                return TryLoadBackupSecret(TavilyApiKeySettingKey);
+                Debug.WriteLine($"{operation} error: {ex.Message}");
+                _ = BackendLogService.LogErrorAsync($"DatabaseService.{operation}", ex);
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(stored))
+            {
+                MarkSecret(settingKey, unreadable: false);
+                return null;
+            }
+
+            try
+            {
+                string plaintext = _secretStore.Unprotect(stored).Trim();
+                if (!string.IsNullOrWhiteSpace(plaintext))
+                {
+                    MarkSecret(settingKey, unreadable: false);
+                    return plaintext;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"{operation} error: {ex.Message}");
+                _ = BackendLogService.LogErrorAsync($"DatabaseService.{operation}", ex);
+            }
+
+            string? backup = TryLoadBackupSecret(settingKey);
+            MarkSecret(settingKey, unreadable: backup == null);
+            return backup;
+        }
+
+        private void MarkSecret(string settingKey, bool unreadable)
+        {
+            lock (_unreadableSecretKeys)
+            {
+                if (unreadable)
+                    _unreadableSecretKeys.Add(settingKey);
+                else
+                    _unreadableSecretKeys.Remove(settingKey);
             }
         }
 

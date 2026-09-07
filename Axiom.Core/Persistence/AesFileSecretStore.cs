@@ -45,7 +45,12 @@ namespace Axiom.Core.Persistence
 
         public string Unprotect(string protectedText)
         {
-            byte[] key = LoadOrCreateKey();
+            // Deliberately does NOT create a key. Minting a fresh random key here can never
+            // decrypt an existing payload -- it only turns "the key material is missing" into an
+            // authentication-tag mismatch, which reads like data corruption and sends you looking
+            // in the wrong place. It also leaves a key file behind that makes the next run look
+            // legitimately configured.
+            byte[] key = LoadKeyForRead();
             byte[] payload = Convert.FromBase64String(protectedText);
             if (payload.Length < NonceSizeBytes + TagSizeBytes)
                 throw new CryptographicException("Encrypted payload is too short.");
@@ -59,6 +64,16 @@ namespace Axiom.Core.Persistence
                 aes.Decrypt(nonce, cipherBytes, tag, plainBytes);
 
             return Encoding.UTF8.GetString(plainBytes);
+        }
+
+        private byte[] LoadKeyForRead()
+        {
+            if (!File.Exists(_keyPath))
+                throw new CryptographicException(
+                    $"No local key material at '{_keyPath}', so secrets written by this store cannot be read. " +
+                    "This normally means the data directory was copied from another machine without its key file.");
+
+            return Convert.FromBase64String(File.ReadAllText(_keyPath).Trim());
         }
 
         private byte[] LoadOrCreateKey()

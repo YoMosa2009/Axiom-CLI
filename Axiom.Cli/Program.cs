@@ -201,6 +201,24 @@ internal static class Program
         return 0;
     }
 
+    // A stored secret that cannot be decrypted is not the same as no secret. Silently treating it
+    // as absent is what let an unreadable key sit there logging an exception on every launch, with
+    // nothing on screen to connect the failure to the fix ('axiom connect').
+    private static void WarnAboutUnreadableSecrets(DatabaseService db)
+    {
+        IReadOnlyCollection<string> unreadable = db.UnreadableSecretKeys;
+        if (unreadable.Count == 0)
+            return;
+
+        string warning = AxiomTheme.Hex(AxiomTheme.Warning);
+        foreach (string key in unreadable)
+        {
+            AnsiConsole.MarkupLine(
+                $"[{warning}]Stored '{key.EscapeMarkup()}' could not be decrypted on this machine — " +
+                $"it was most likely saved on a different one. Run 'axiom connect' to re-enter it.[/]");
+        }
+    }
+
     private static async Task<int> RunUpdateAsync()
     {
         string muted = AxiomTheme.Hex(AxiomTheme.SystemMuted);
@@ -528,6 +546,7 @@ internal static class Program
         string apiKey = Environment.GetEnvironmentVariable("AXIOM_CLI_KESTREL_API_KEY")
             ?? db.LoadCustomEndpointApiKey()
             ?? string.Empty;
+        WarnAboutUnreadableSecrets(db);
 
         // The model id is supplied by the runner, which asks the server which profile is actually
         // loaded. Hard-coding it here used to send OpenCode after OmniCoder even when the server
