@@ -43,6 +43,19 @@ public static class KestrelOpenCodeConfiguration
     public const double OmniCoderTemperature = 0.3;
     public const double SamplingTopP = 0.95;
 
+    // Kestrel's models are 9-12B. They cannot drive OpenCode's two delegation tools: measured
+    // against a 26k-line repository, the model called `task` with a missing required `description`
+    // more than ten times in a row -- every turn rejected by the schema, not one file read -- then
+    // gave up and emitted a statement of intent. `skill` fails the same way, and picking
+    // "customize-opencode" for a code-review request wastes a turn and floods a small model's
+    // context with instructions for customizing OpenCode itself.
+    //
+    // Removing them is what makes the loop productive: the same prompt that stalled completes when
+    // read/glob/grep are the only options. OpenCode drops a tool from the request when
+    // `tools[name]` is false OR a permission denies it (session/llm/request.ts, resolveTools), so
+    // both are set -- the permission additionally strips the skills catalog from the system prompt.
+    public static readonly string[] DelegationTools = ["task", "skill"];
+
     public static bool TryCreate(
         string? baseUrl,
         bool autoApprove,
@@ -90,7 +103,12 @@ public static class KestrelOpenCodeConfiguration
             ["edit"] = autoApprove ? "allow" : "ask",
             ["bash"] = autoApprove ? "allow" : "ask",
             ["webfetch"] = "ask",
-            ["websearch"] = "ask"
+            ["websearch"] = "ask",
+            // Denied rather than merely hidden: OpenCode gates the skills catalog in the system
+            // prompt on this same permission, so denying it removes the temptation as well as the
+            // tool. See DelegationTools for why.
+            ["task"] = "deny",
+            ["skill"] = "deny"
         };
 
         var modelCatalog = new JsonObject
@@ -108,6 +126,7 @@ public static class KestrelOpenCodeConfiguration
             ["model"] = qualifiedModelId,
             ["small_model"] = qualifiedModelId,
             ["permission"] = permissions,
+            ["tools"] = CreateToolToggles(),
             ["compaction"] = new JsonObject
             {
                 ["auto"] = true,
@@ -155,6 +174,14 @@ public static class KestrelOpenCodeConfiguration
 
         configJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
         return true;
+    }
+
+    private static JsonObject CreateToolToggles()
+    {
+        var toggles = new JsonObject();
+        foreach (string tool in DelegationTools)
+            toggles[tool] = false;
+        return toggles;
     }
 
     private static JsonObject CreateAgentSampling(double temperature) =>

@@ -160,6 +160,34 @@ public sealed class KestrelOpenCodeConfigurationTests
         Assert.Equal("/axiom/rules.md", Assert.Single(instructions)!.GetValue<string>());
     }
 
+    [Fact]
+    public void TryCreate_TurnsOffTheDelegationToolsKestrelModelsCannotDrive()
+    {
+        // Against a 26k-line repository the model called `task` with a missing required
+        // `description` more than ten times consecutively -- every turn rejected by the schema,
+        // no file read -- then gave up and stated its intent. With these off, the same prompt
+        // reads files and makes progress.
+        Assert.True(KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1",
+            autoApprove: false,
+            out string json,
+            out string error), error);
+
+        JsonNode root = JsonNode.Parse(json)!;
+        foreach (string tool in KestrelOpenCodeConfiguration.DelegationTools)
+        {
+            // OpenCode drops a tool when either of these says so (resolveTools in
+            // session/llm/request.ts). The permission also strips the skills catalog from the
+            // system prompt, so the model is never shown the option.
+            Assert.False(root["tools"]![tool]!.GetValue<bool>());
+            Assert.Equal("deny", root["permission"]![tool]!.GetValue<string>());
+        }
+
+        // The tools it can actually drive must survive.
+        Assert.Null(root["tools"]!["read"]);
+        Assert.Equal("ask", root["permission"]!["edit"]!.GetValue<string>());
+    }
+
     [Theory]
     [InlineData("http://ai.axiominference.work/v1")]
     [InlineData("not a url")]
