@@ -50,8 +50,7 @@ which one is selected. Only the selected profile is ever loaded into Ollama.
 ## Where things live and how to change them
 
 ### Ollama (the model server)
-- Env is set by `G:\AI_Server
-un_ollama_hidden.vbs`; warmup/priority by
+- Env is set by `G:\AI_Server\run_ollama_hidden.vbs`; warmup/priority by
   `G:\AI_Server\warmup_kestral.ps1` (pairs with `OLLAMA_KEEP_ALIVE=-1`).
 - Verify with `ollama ps` (loaded model + GPU/CPU split) or
   `curl http://127.0.0.1:11434/api/tags`.
@@ -67,8 +66,7 @@ in `G:\AI_Server\disabled-startup-scripts-backup\`. Do not re-enable them; they 
 second proxy loop.
 
 - Scheduled task **`AxiomInference Proxy Control Plane`** runs
-  `wscript "G:\AI_Server\proxy
-un_proxy_resilient.vbs"`, which is a restart loop around
+  `wscript "G:\AI_Server\proxy\run_proxy_resilient.vbs"`, which is a restart loop around
   `uvicorn app:app --host 127.0.0.1 --port 8080`, appending failures to `proxy_watchdog.log`.
   Read that log first when the proxy misbehaves — it survives restarts.
 - The only remaining Startup-folder entry, `AIServer-Proxy-ControlPlane.vbs`, is a three-line
@@ -111,7 +109,7 @@ To restart after editing `app.py`:
   branded OpenCode build called **Axiom Code** (`Axiom.Cli/OpenCodeRunner.cs`). The API key is
   passed as an env-var reference (`{env:AXIOM_KESTREL_API_KEY}`); no credential is ever written
   to a config file. OpenCode's data/config is isolated under
-  `%LOCALAPPDATA%xiom-cli\OpenCode` via `XDG_*` so it never collides with a standalone
+  `%LOCALAPPDATA%\axiom-cli\OpenCode` via `XDG_*` so it never collides with a standalone
   OpenCode install.
 - The branding is two patches in `assets/opencode/` applied to a pinned upstream tag
   (`OpenCodeRunner.PinnedRuntimeVersion`, currently **1.18.29**). Both workflows derive the tag
