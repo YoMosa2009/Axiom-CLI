@@ -37,6 +37,9 @@ jobs:
       - name: Smoke help
         run: dotnet run --project Axiom.Cli --no-build -c Release -- help
 
+      - name: Smoke scoped review inventory (no network)
+        run: dotnet run --project Axiom.Cli --no-build -c Release -- review --plan
+
       - name: Smoke code usage (no network)
         run: dotnet run --project Axiom.Cli --no-build -c Release -- code
         continue-on-error: true

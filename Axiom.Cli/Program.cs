@@ -59,6 +59,11 @@ internal static class Program
         string command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         bool isChatEntry = command is "" or "chat";
         bool useOpenCode = string.Equals(engineOverride, "opencode", StringComparison.OrdinalIgnoreCase);
+        if (command == "review" && (engineOverride != null || modelOverride != null || profileOverride != null || yesFlag || jsonFlag))
+        {
+            Console.Error.WriteLine("review supports --plan and a task. It uses the current Kestrel model and always writes a JSON report.");
+            return 1;
+        }
         bool useLegacy = string.IsNullOrWhiteSpace(engineOverride)
             || string.Equals(engineOverride, "legacy", StringComparison.OrdinalIgnoreCase);
         if (!useOpenCode && !useLegacy)
@@ -102,6 +107,7 @@ internal static class Program
             {
                 "config" => await RunConfigAsync(),
                 "connect" => await RunConnectAsync(),
+                "review" => await ScopedReviewRunner.RunAsync(args.Skip(1).ToArray()),
                 "" or "chat" when useOpenCode => await RunOpenCodeChatAsync(modelOverride, yesFlag, bootstrapPath),
                 "code" when useOpenCode => await RunOpenCodeCodeAsync(string.Join(' ', args.Skip(1)), modelOverride, yesFlag, jsonFlag, bootstrapPath),
                 "opencode" when args.Skip(1).FirstOrDefault()?.Equals("install", StringComparison.OrdinalIgnoreCase) == true
@@ -124,7 +130,7 @@ internal static class Program
     private static bool IsReservedCommand(string arg)
     {
         string c = arg.ToLowerInvariant();
-        return c is "config" or "connect" or "opencode" or "chat" or "code" or "update" or "help" or "--help" or "-h";
+        return c is "config" or "connect" or "opencode" or "chat" or "code" or "review" or "update" or "help" or "--help" or "-h";
     }
 
     private static bool LooksLikePathArg(string arg)
@@ -188,6 +194,7 @@ internal static class Program
         AnsiConsole.MarkupLine($"                              Full-window TUI (default). path locks workspace.");
         AnsiConsole.MarkupLine($"  [{gold}]axiom config[/]                  Set your OpenRouter API key and/or self-hosted endpoint");
         AnsiConsole.MarkupLine($"  [{gold}]axiom connect[/]                 Save Kestrel 1 endpoint and this device's access key");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom review[/] [[--plan]] <task>  Scoped review of tracked source; --plan previews coverage");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--yes]] [[--json]] [[--model <id>]] <task>");
         AnsiConsole.MarkupLine($"                              Council on cwd; --yes auto-apply patch; --json machine output");
         AnsiConsole.MarkupLine($"  [{gold}]axiom [[path]] --engine opencode[/] OpenCode TUI in path, backed by Kestrel 1");

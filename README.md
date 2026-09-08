@@ -196,6 +196,33 @@ dotnet run --project Axiom.Cli -- chat
 dotnet test
 ```
 
+## Scoped source review
+
+Run `axiom review --plan` from a Git repository to preview a deterministic inventory.
+Run `axiom review "Find correctness bugs"` to review those excerpts against the current
+Kestrel model. This is a separate, read-only review command; ordinary `axiom code`
+behavior is unchanged.
+
+The command uses tracked working-tree source and documentation files (including staged
+additions), ordered by path. Untracked files are outside the inventory. Non-allowlisted
+extensions, empty/binary/unreadable files, links, and files over 4 MiB are reported as
+omitted. The inventory is a snapshot taken at startup. Source excerpts are at most
+12,000 characters, split at newlines where possible; very long lines can span passes.
+Tracked source is sent to the configured Kestrel endpoint, just as source read by the
+coding agent is. Preview the inventory before reviewing unfamiliar repositories.
+
+Each excerpt gets a fresh request with no tools or delegation. Sampling remains model
+specific. Responses are limited to 2,048 tokens and requests to three minutes. A failed,
+empty, or truncated response stops the run with a nonzero exit code. Ctrl+C stops it.
+The JSON report is checkpointed after every attempted pass under the application's
+`reviews` directory; the command prints its path. It records answers, excerpt hashes,
+omissions, failures, and unattempted ranges. It does not persist source excerpts or keys.
+
+Coverage means **source supplied**, not verified comprehension. Independent excerpts
+cannot establish cross-file correctness, and there is deliberately no generated final
+summary that could hide missed work. This mode does not edit files, run tests, or claim
+to replace an integrated architecture review.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
