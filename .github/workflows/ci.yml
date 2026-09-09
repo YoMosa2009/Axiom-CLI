@@ -52,6 +52,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
       - name: Verify the Axiom Code patches still apply to the pinned OpenCode tag
         shell: bash
         run: |
@@ -66,3 +70,13 @@ jobs:
             echo "--- $patch"
             git -C opencode-source apply --check "$GITHUB_WORKSPACE/$patch"
           done
+
+      - name: Test patched coverage and read behavior
+        shell: bash
+        run: |
+          for patch in assets/opencode/*.patch; do
+            git -C opencode-source apply "$GITHUB_WORKSPACE/$patch"
+          done
+          bun install --cwd opencode-source --frozen-lockfile
+          cd opencode-source/packages/opencode
+          bun test test/session/axiom-coverage.test.ts test/tool/read.test.ts --timeout 30000

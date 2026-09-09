@@ -21,8 +21,7 @@ internal static class OpenCodeRunner
     private const string InstructionsFileName = "kestrel-operating-rules.md";
 
     // Small local models reliably end a turn by announcing the next step instead of taking it.
-    // OpenCode's loop is correct to stop there -- the turn produced no tool call -- so the fix
-    // belongs in the instructions the model actually reads, not in the loop.
+    // Instructions supplement the runtime's coverage and bounded persistence guards.
     private const string InstructionsContent = """
         # Kestrel operating rules
 

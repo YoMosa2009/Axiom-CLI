@@ -86,7 +86,9 @@ Axiom distributes and verifies the compatible runtime.
 | `axiom [--model <id>]` | Full-window TUI chat (default). `/` tools · `@` lock folder · `/help` |
 | `axiom config` | Store your OpenRouter API key, a self-hosted endpoint, and/or a [Tavily](https://tavily.com) API key for reliable `web_search` (all encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
 | `axiom connect` | Save Kestrel 1's HTTPS endpoint and this computer's revocable access key |
-| `axiom code [--model <id>] "<task>"` | Architect → Builder → Critic council on the current directory |
+| `axiom code "<task>"` | Axiom Code on the current directory, using the active Kestrel model |
+| `axiom code --engine legacy [--model <id>] "<task>"` | Architect → Builder → Critic Council |
+| `axiom connect openrouter` | Replace an unreadable Council credential through hidden local input |
 | `axiom [path] --engine opencode` | Axiom Code agent TUI in `path`, backed by Kestrel 1 |
 | `axiom [path] code --engine opencode [--yes] [--json] "<task>"` | Axiom Code coding agent in `path`, backed by Kestrel 1 |
 | `axiom opencode install` | Install or refresh Axiom Code (Axiom's pinned OpenCode runtime) for the current user |
@@ -98,8 +100,9 @@ Available models: `eidos` (Eidos 1, general-purpose reasoning), `hepha` (Hepha 1
 code-specialized) — the same aliases as the desktop app — and `kestral` (Kestrel 1), a
 self-hosted OpenAI-compatible endpoint you configure yourself via `axiom config` (base URL,
 model id, and API key). Kestrel 1 runs on whatever machine you point it at — useful for using
-your own PC as inference compute from a laptop or another machine. `axiom code` uses the
-desktop app's Workplace Council default model unless `--model` is given.
+your own PC as inference compute from a laptop or another machine. Bare `axiom code` uses
+Axiom Code. Existing explicit `--model` or `--profile` selections retain the legacy route
+unless `--engine opencode` is supplied.
 
 ### Axiom Code-backed Kestrel 1
 
@@ -120,8 +123,8 @@ axiom G:\AxiomWork code --engine opencode "explain the failing test and fix it"
 
 Run `axiom opencode install` once to install Axiom Code into Axiom's own application-data folder.
 It requires Node.js and npm; if you manage OpenCode yourself, put it on
-`PATH` or set `AXIOM_OPENCODE_PATH` to its executable. The legacy engine remains the default;
-choose OpenCode explicitly with `--engine opencode`.
+`PATH` or set `AXIOM_OPENCODE_PATH` to its executable. Bare `axiom code` selects OpenCode;
+use `--engine legacy` to select Council explicitly.
 
 Choose the project folder when launching Axiom Code. For example, use
 `axiom --engine opencode G:\AxiomWork` (interactive) or
@@ -197,6 +200,25 @@ dotnet test
 ```
 
 ## Scoped source review
+
+### Automatic coverage in Axiom Code
+
+Broad requests such as `axiom code "Analyze this repository"` now schedule source reads
+inside the ordinary runtime. Up to four 200-line ranges are supplied per model turn;
+large files continue from the actual returned line boundary. Reads use the existing
+permission checks. Narrow requests containing `only`, `just`, or `limited to` keep
+on-demand tool use instead of automatically expanding to the whole project.
+
+The final coverage receipt reports supplied files, omissions, and unread ranges.
+Limits are 10,000 inventory entries and 512 read ranges. Read failures, source-line
+truncation, and exhausted limits are reported as incomplete, never full coverage.
+Model comprehension is not guaranteed by source delivery. Repeated answers with
+unfinished work and repeated tool loops now produce an explicit error.
+
+Unchanged read ranges already retained in the conversation are referenced instead of
+duplicating their source payload. Changed files and compacted results remain readable.
+
+### Explicit excerpt review
 
 Run `axiom review --plan` from a Git repository to preview a deterministic inventory.
 Run `axiom review "Find correctness bugs"` to review those excerpts against the current

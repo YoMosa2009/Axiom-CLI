@@ -1,8 +1,91 @@
+diff --git a/packages/opencode/src/session/axiom-coverage.ts b/packages/opencode/src/session/axiom-coverage.ts
+new file mode 100644
+index 0000000..27980ca
+--- /dev/null
++++ b/packages/opencode/src/session/axiom-coverage.ts
+@@ -0,0 +1,68 @@
++import path from "path"
++
++export function requested(text: string) {
++  if (/\b(only|just|limited to)\b/i.test(text)) return false
++  return /\b(review|analy[sz]e|audit|understand|explain|inspect)\b/i.test(text) &&
++    /\b(repository|repo|codebase|project|architecture)\b/i.test(text)
++}
++
++export function stable(value: unknown): string {
++  if (Array.isArray(value)) return "[" + value.map(stable).join(",") + "]"
++  if (value && typeof value === "object") return "{" + Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
++    .map(([key, item]) => JSON.stringify(key) + ":" + stable(item)).join(",") + "}"
++  return JSON.stringify(value) ?? "null"
++}
++
++export function promisesWork(text: string) {
++  return /^(?:I will|I'll|Let me|Next I will)\s+(?:now\s+)?(?:continue|read|inspect|check|implement|fix|analy[sz]e|review|run|examine)\b/i.test(text.trim()) && text.trim().length < 600
++}
++
++const extensions = new Set([".cs", ".xaml", ".csproj", ".props", ".targets", ".fs", ".vb", ".js", ".jsx", ".ts", ".tsx", ".py", ".go", ".rs", ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".swift", ".rb", ".php", ".html", ".css", ".scss", ".sql", ".sh", ".ps1", ".md"])
++
++export class Coverage {
++  readonly files: string[]
++  readonly omitted: string[]
++  readonly failures: string[] = []
++  index = 0
++  offset = 1
++  passes = 0
++  readonly maxPasses = 512
++  constructor(files: string[], readonly capped = false) {
++    const sorted = [...new Set(files)].sort()
++    this.files = sorted.filter((file) => extensions.has(path.extname(file).toLowerCase()))
++    this.omitted = sorted.filter((file) => !this.files.includes(file))
++  }
++  get pending() { return this.index < this.files.length && this.passes < this.maxPasses && this.failures.length === 0 }
++  next() { return { filePath: this.files[this.index], offset: this.offset, limit: 200 } }
++  accept(output: string, metadata: Record<string, unknown>) {
++    this.passes++
++    const display = metadata.display as { type?: string; lineEnd?: number; truncated?: boolean } | undefined
++    if (display?.type !== "file" || typeof display.lineEnd !== "number") {
++      this.failures.push(`${this.files[this.index]}: no text range returned`)
++      return
++    }
++    if (output.includes("... (line truncated to ")) {
++      this.failures.push(`${this.files[this.index]}: a source line exceeds the read tool's character limit`)
++      return
++    }
++    if (display.truncated) {
++      if (display.lineEnd < this.offset) {
++        this.failures.push(`${this.files[this.index]}: read made no progress`)
++        return
++      }
++      this.offset = display.lineEnd + 1
++      return
++    }
++    this.index++
++    this.offset = 1
++  }
++  receipt() {
++    return `[Axiom source coverage: ${this.index}/${this.files.length} eligible files supplied through ${this.passes} read passes; ${this.omitted.length} non-source files omitted. ` +
++      (this.capped ? "Inventory exceeded 10,000 entries. " : "") +
++      (this.index < this.files.length ? `INCOMPLETE. Next unread range: ${this.files[this.index]}:${this.offset}. ` : "") +
++      (this.failures.length ? this.failures.join("; ") + ". " : "") +
++      "Scope: non-ignored source under the current project directory. Supplied source is not proof of correct analysis.]"
++  }
++}
++
++export * as AxiomCoverage from "./axiom-coverage"
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 0f85d44..11fc7fd 100644
+index 0f85d44..e122474 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -99,6 +99,167 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
+@@ -9,6 +9,8 @@ import { SessionRevert } from "./revert"
+ import { Session } from "./session"
+ import { Agent } from "../agent/agent"
+ import { Provider } from "@/provider/provider"
++import { Ripgrep } from "@opencode-ai/core/ripgrep"
++import { AxiomCoverage } from "./axiom-coverage"
+ 
+ import { type Tool as AITool, tool, jsonSchema } from "ai"
+ import type { JSONSchema7 } from "@ai-sdk/provider"
+@@ -99,6 +101,168 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
    return part.state.status === "error" && part.state.metadata?.interrupted === true
  }
  
@@ -107,21 +190,22 @@ index 0f85d44..11fc7fd 100644
 +  for (const message of messages) {
 +    if (message.info.role !== "assistant") continue
 +    for (const part of message.parts) {
-+      if (part.type !== "tool") continue
++      if (part.type !== "tool" || part.callID.startsWith("axiom-coverage-")) continue
 +      if (part.state.status !== "completed" && part.state.status !== "error") continue
-+      calls.push({ tool: part.tool, key: part.tool + " " + JSON.stringify(part.state.input ?? {}) })
++      calls.push({ tool: part.tool, key: part.tool + " " + AxiomCoverage.stable(part.state.input ?? {}) + " " + (part.state.status === "completed" ? part.state.output : part.state.error) })
 +    }
 +  }
 +  if (calls.length === 0) return undefined
 +  const last = calls[calls.length - 1]
 +  let count = 1
 +  for (let i = calls.length - 2; i >= 0 && calls[i].key === last.key; i--) count++
++  count = Math.max(count, calls.slice(-16).filter((call) => call.key === last.key).length)
 +  return { tool: last.tool, count }
 +}
 +
 +function axiomRepeatText(tool: string, count: number): string {
 +  return [
-+    `You have now called \`${tool}\` ${count} times in a row with exactly the same arguments, and`,
++    `You have now called \`${tool}\` ${count} times recently with exactly the same arguments, and`,
 +    "received exactly the same result every time. Repeating it again cannot tell you anything new.",
 +    "",
 +    "Use the result you already have. Move to a different action: read one of the files it returned,",
@@ -170,7 +254,15 @@ index 0f85d44..11fc7fd 100644
  export interface Interface {
    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
    readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
-@@ -1083,6 +1244,10 @@ const layer = Layer.effect(
+@@ -124,6 +288,7 @@ const layer = Layer.effect(
+     const config = yield* Config.Service
+     const permission = yield* Permission.Service
+     const fsys = yield* FSUtil.Service
++    const axiomRipgrep = yield* Ripgrep.Service
+     const mcp = yield* MCP.Service
+     const lsp = yield* LSP.Service
+     const registry = yield* ToolRegistry.Service
+@@ -1083,6 +1248,12 @@ const layer = Layer.effect(
          const ctx = yield* InstanceState.context
          let structured: unknown
          let step = 0
@@ -178,10 +270,36 @@ index 0f85d44..11fc7fd 100644
 +        // Reset whenever the model does real work, so the budget is "N refusals in a row",
 +        // not N per session.
 +        let axiomNudges = 0
++        let axiomCoverage: AxiomCoverage.Coverage | undefined
++        let axiomCoverageUser: string | undefined
          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
  
          while (true) {
-@@ -1125,8 +1290,82 @@ const layer = Layer.effect(
+@@ -1096,6 +1267,7 @@ const layer = Layer.effect(
+           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
+ 
+           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
++          const axiomCurrentMessages = msgs.slice(msgs.findLastIndex((message) => message.info.role === "user"))
+ 
+           const lastAssistantMsg = msgs.findLast(
+             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
+@@ -1105,13 +1277,14 @@ const layer = Layer.effect(
+           // the model, but ignore cleanup-marked interrupted orphans.
+           const hasToolCalls =
+             lastAssistantMsg?.parts.some(
+-              (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
++              (part) => part.type === "tool" && !part.callID.startsWith("axiom-coverage-") && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
+             ) ?? false
+ 
+           if (
+             lastAssistant?.finish &&
+             !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+             !hasToolCalls &&
++            !axiomCoverage?.pending &&
+             lastAssistant.parentID === lastUser.id
+           ) {
+             const orphan = lastAssistantMsg?.parts.find(
+@@ -1125,8 +1298,93 @@ const layer = Layer.effect(
                  callID: orphan.callID,
                })
              }
@@ -194,12 +312,17 @@ index 0f85d44..11fc7fd 100644
 +            // completion, tell it what it just did and run the turn again. Bounded, and only
 +            // ever triggered by the model's own recorded todos, so a genuinely finished task
 +            // (every item completed, or no list at all) still exits immediately.
-+            const axiomUnfinished = axiomUnfinishedTodos(msgs)
-+            const axiomUnread = axiomUnreadFiles(msgs, 12)
++            const axiomUnfinished = axiomUnfinishedTodos(axiomCurrentMessages)
++            const axiomPromise = AxiomCoverage.promisesWork(lastAssistantMsg?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("") ?? "")
++            if (axiomPromise && axiomUnfinished.length === 0) axiomUnfinished.push("Carry out the work you just promised instead of ending with a statement of intent")
++            const axiomUnread = axiomUnreadFiles(axiomCurrentMessages, 12)
 +            // A model that has decided it is finished answers every nudge with the same text.
 +            // Once that happens, further pushing only reprints the answer, so take it and stop.
-+            const axiomAnswerRepeats = axiomRepeatedAnswers(msgs)
++            const axiomAnswerRepeats = axiomRepeatedAnswers(axiomCurrentMessages)
 +            if (axiomAnswerRepeats >= 2) {
++              if (axiomUnfinished.length > 0) yield* events.publish(Session.Event.Error, {
++                sessionID, error: new NamedError.Unknown({ message: "Axiom stopped: the model repeated its answer while work remained incomplete." }).toObject(),
++              })
 +              yield* Effect.logInfo("axiom: accepting a repeated final answer", {
 +                "session.id": sessionID,
 +                repeats: axiomAnswerRepeats,
@@ -227,6 +350,9 @@ index 0f85d44..11fc7fd 100644
 +                })
 +              }
 +            } else {
++              if (axiomUnfinished.length > 0) yield* events.publish(Session.Event.Error, {
++                sessionID, error: new NamedError.Unknown({ message: "Axiom stopped after six consecutive turns without progress; the task is incomplete." }).toObject(),
++              })
 +              yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
 +              break
 +            }
@@ -237,9 +363,12 @@ index 0f85d44..11fc7fd 100644
 +          // AXIOM: the mirror image of the nudge above. That one refuses to stop too early; this
 +          // one refuses to spin forever. Every repeat is a legitimate tool call, so nothing in the
 +          // stock loop notices a model that has locked onto one. Tell it once, then stop.
-+          const axiomRepeat = axiomRepeatedTail(msgs)
++          const axiomRepeat = axiomRepeatedTail(axiomCurrentMessages)
 +          if (axiomRepeat && axiomRepeat.count >= AXIOM_REPEAT_WARN) {
 +            if (axiomRepeat.count >= AXIOM_REPEAT_ABORT) {
++              yield* events.publish(Session.Event.Error, {
++                sessionID, error: new NamedError.Unknown({ message: "Axiom stopped a repeated tool-call loop; the task is incomplete." }).toObject(),
++              })
 +              yield* Effect.logWarning("axiom: aborting a locked tool-call loop", {
 +                "session.id": sessionID,
 +                tool: axiomRepeat.tool,
@@ -266,3 +395,222 @@ index 0f85d44..11fc7fd 100644
            }
  
            step++
+@@ -1240,6 +1498,56 @@ const layer = Layer.effect(
+               Effect.provideService(RuntimeFlags.Service, flags),
+             )
+ 
++            if (axiomCoverageUser !== lastUser.id) {
++              axiomCoverageUser = lastUser.id
++              axiomCoverage = undefined
++              const text = lastUserMsg?.parts.flatMap((part) => part.type === "text" && !part.synthetic ? [part.text] : []).join("\n") ?? ""
++              if (model.providerID === "kestrel" && AxiomCoverage.requested(text)) {
++                yield* permission.ask({ sessionID, permission: "glob", patterns: ["**/*"], always: ["*"],
++                  metadata: { path: ctx.directory, reason: "Repository review source coverage" },
++                  ruleset: Permission.merge(agent.permission, session.permission ?? []) }).pipe(Effect.orDie)
++                const files = yield* axiomRipgrep.glob({ cwd: ctx.directory, pattern: "**/*", limit: 10001, follow: false }).pipe(Effect.orDie)
++                axiomCoverage = new AxiomCoverage.Coverage(files.slice(0, 10000).map((file) => path.resolve(ctx.directory, file.path)), files.length > 10000)
++              }
++            }
++            for (let axiomBatch = 0; axiomCoverage?.pending && axiomBatch < 4; axiomBatch++) {
++              const input = axiomCoverage.next()
++              const callID = "axiom-coverage-" + ulid()
++              const part: SessionV1.ToolPart = {
++                id: PartID.ascending(), sessionID, messageID: msg.id, type: "tool", tool: "read", callID,
++                state: { status: "running", input, time: { start: Date.now() } },
++              }
++              yield* sessions.updatePart(part)
++              const read = tools.read?.execute
++              const result = yield* Effect.tryPromise({
++                try: async (signal) => {
++                  if (!read) throw new Error("Read tool is unavailable")
++                  const result = await read(input, { toolCallId: callID, messages: [], abortSignal: signal })
++                  if (!result || typeof result !== "object" || !("output" in result) || typeof result.output !== "string" || !("metadata" in result))
++                    throw new Error("Read tool returned no source")
++                  return { output: result.output, metadata: result.metadata as Record<string, unknown> }
++                },
++                catch: (error) => error instanceof Error ? error : new Error(String(error)),
++              }).pipe(Effect.catch((error) => Effect.succeed({ error: error.message })))
++              if ("error" in result) {
++                axiomCoverage.failures.push(`${input.filePath}:${input.offset}: ${result.error}`)
++                part.state = { status: "error", input, error: result.error, time: { start: Date.now(), end: Date.now() } }
++              } else {
++                axiomCoverage.accept(result.output, result.metadata)
++                part.state = { status: "completed", input, title: input.filePath, output: result.output,
++                  metadata: result.metadata, time: { start: Date.now(), end: Date.now() } }
++              }
++              yield* sessions.updatePart(part)
++              const sourceMessage = msgs.find((message) => message.info.id === msg.id)
++              if (sourceMessage) sourceMessage.parts.push(part)
++              else msgs.push({ info: msg, parts: [part] })
++              lastUserMsg?.parts.push({ id: PartID.ascending(), sessionID, messageID: lastUser.id,
++                type: "text", synthetic: true,
++                text: axiomCoverage.receipt() + (axiomCoverage.pending
++                  ? "\nThe runtime is supplying remaining source in order. Analyze this excerpt briefly with path/line evidence. Do not rediscover or re-read supplied source, and do not give a final repository summary yet."
++                  : "\nThis is the end of the automatic source pass. Give your findings and preserve all coverage limits. Do not claim full coverage when the receipt says incomplete.") })
++            }
++
+             if (lastUser.format?.type === "json_schema") {
+               tools["StructuredOutput"] = createStructuredOutputTool({
+                 schema: lastUser.format.schema,
+@@ -1280,7 +1588,7 @@ const layer = Layer.effect(
+                 ...modelMsgs,
+                 ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
+               ],
+-              tools,
++              tools: axiomCoverage?.pending ? {} : tools,
+               model,
+               toolChoice: format.type === "json_schema" ? "required" : undefined,
+             })
+@@ -1336,7 +1644,17 @@ const layer = Layer.effect(
+         }
+ 
+         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
+-        return yield* lastAssistant(sessionID)
++        const final = yield* lastAssistant(sessionID)
++        if (axiomCoverage) {
++          const receipt = yield* sessions.updatePart({ id: PartID.ascending(), sessionID, messageID: final.info.id,
++            type: "text", text: axiomCoverage.receipt(), time: { start: Date.now(), end: Date.now() } })
++          final.parts.push(receipt)
++          if (axiomCoverage.index < axiomCoverage.files.length || axiomCoverage.capped || axiomCoverage.failures.length) {
++            const error = new NamedError.Unknown({ message: axiomCoverage.receipt() }).toObject()
++            yield* events.publish(Session.Event.Error, { sessionID, error })
++          }
++        }
++        return final
+       },
+     )
+ 
+@@ -1610,6 +1928,7 @@ export const node = LayerNode.make({
+     Config.node,
+     Permission.node,
+     FSUtil.node,
++    Ripgrep.node,
+     MCP.node,
+     LSP.node,
+     ToolRegistry.node,
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 678ed44..3d99be6 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -341,6 +341,21 @@ export const ReadTool = Tool.define<
+       const last = file.offset + file.raw.length - 1
+       const next = last + 1
+       const truncated = file.more || file.cut
++      // Suppress duplicate source payloads only when the freshly read bytes still match
++      // an unpruned range in this request's history. Edits and compaction remain readable.
++      if (!ctx.callID?.startsWith("axiom-coverage-")) {
++        const previous = ctx.messages.flatMap((message) => message.parts).findLast((part) => {
++          if (part.type !== "tool" || part.tool !== "read" || part.state.status !== "completed" || part.state.time.compacted) return false
++          const display = part.state.metadata?.display as Display | undefined
++          return display?.type === "file" && display.path === filepath && display.lineStart === file.offset &&
++            display.lineEnd === last && display.text === file.raw.join("\n") && !part.state.metadata?.axiomDuplicate
++        })
++        if (previous?.type === "tool") return {
++          title,
++          output: `This unchanged range (${filepath}:${file.offset}-${last}) is already in the retained read result ${previous.callID}. Use that source; choose an unread range or another action.`,
++          metadata: { preview: "Unchanged source already in context", truncated, loaded: [] as string[], axiomDuplicate: true },
++        }
++      }
+       if (file.cut) {
+         output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
+       } else if (file.more) {
+diff --git a/packages/opencode/test/session/axiom-coverage.test.ts b/packages/opencode/test/session/axiom-coverage.test.ts
+new file mode 100644
+index 0000000..f9c1b57
+--- /dev/null
++++ b/packages/opencode/test/session/axiom-coverage.test.ts
+@@ -0,0 +1,62 @@
++import { expect, test } from "bun:test"
++import { AxiomCoverage } from "../../src/session/axiom-coverage"
++
++test("large C# repository is exhausted without model discovery or todos", () => {
++  const files = Array.from({ length: 82 }, (_, i) => `src/Module${i}.cs`)
++  const coverage = new AxiomCoverage.Coverage([...files, "image.png"])
++  const seen = new Set<string>()
++  while (coverage.pending) {
++    const next = coverage.next()
++    const key = `${next.filePath}:${next.offset}`
++    expect(seen.has(key)).toBe(false)
++    seen.add(key)
++    const lines = next.filePath === "src/Module0.cs" ? 21401 : 30
++    const end = Math.min(lines, next.offset + next.limit - 1)
++    coverage.accept("source", { display: { type: "file", lineEnd: end, truncated: end < lines } })
++  }
++  expect(coverage.index).toBe(82)
++  expect(coverage.passes).toBe(189)
++  expect(coverage.omitted).toEqual(["image.png"])
++  expect(coverage.receipt()).not.toContain("INCOMPLETE")
++})
++
++test("byte cap progresses by returned range rather than requested range", () => {
++  const coverage = new AxiomCoverage.Coverage(["a.cs"])
++  coverage.accept("source", { display: { type: "file", lineEnd: 17, truncated: true } })
++  expect(coverage.next().offset).toBe(18)
++})
++
++test("no-progress and truncated source never claim completion", () => {
++  for (const output of ["source", "... (line truncated to 2000 chars)"]) {
++    const coverage = new AxiomCoverage.Coverage(["a.cs"])
++    coverage.accept(output, { display: { type: "file", lineEnd: 0, truncated: true } })
++    expect(coverage.pending).toBe(false)
++    expect(coverage.receipt()).toContain("INCOMPLETE")
++  }
++})
++
++test("budget exhaustion remains explicitly incomplete", () => {
++  const coverage = new AxiomCoverage.Coverage(["huge.cs"], true)
++  while (coverage.pending) coverage.accept("source", { display: { type: "file", lineEnd: coverage.offset, truncated: true } })
++  expect(coverage.passes).toBe(512)
++  expect(coverage.receipt()).toContain("INCOMPLETE")
++  expect(coverage.receipt()).toContain("10,000")
++})
++
++test("coverage only activates for broad analysis requests", () => {
++  expect(AxiomCoverage.requested("Analyze this C# repository")).toBe(true)
++  expect(AxiomCoverage.requested("Review the codebase and fix defects")).toBe(true)
++  expect(AxiomCoverage.requested("Fix the login button")).toBe(false)
++  expect(AxiomCoverage.requested("Review only login.cs in this project")).toBe(false)
++})
++
++test("statements of intent are not successful completion without a todo list", () => {
++  expect(AxiomCoverage.promisesWork("I will now read the remaining files.")).toBe(true)
++  expect(AxiomCoverage.promisesWork("Let me continue with the implementation.")).toBe(true)
++  expect(AxiomCoverage.promisesWork("Implemented the fix and checked the result.")).toBe(false)
++})
++
++test("repeat keys preserve nested arguments and ignore property order", () => {
++  expect(AxiomCoverage.stable({ b: { x: 1 }, a: 2 })).toBe(AxiomCoverage.stable({ a: 2, b: { x: 1 } }))
++  expect(AxiomCoverage.stable({ b: { x: 1 } })).not.toBe(AxiomCoverage.stable({ b: { y: 1 } }))
++})
+diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
+index c1ef61b..2cf0e38 100644
+--- a/packages/opencode/test/tool/read.test.ts
++++ b/packages/opencode/test/tool/read.test.ts
+@@ -94,6 +94,27 @@ const fail = Effect.fn("ReadToolTest.fail")(function* (
+ })
+ 
+ const full = (p: string) => (process.platform === "win32" ? Filesystem.normalizePath(p) : p)
++
++it.live("suppresses unchanged retained source but permits changed and compacted reads", () =>
++  Effect.gen(function* () {
++    const dir = yield* tmpdirScoped()
++    const filePath = path.join(dir, "repeat.txt")
++    yield* Effect.promise(() => Bun.write(filePath, "original source"))
++    const first = yield* exec(dir, { filePath })
++    const time = { start: 1, end: 2, compacted: undefined as number | undefined }
++    const messages = [{ info: { role: "assistant" }, parts: [{ type: "tool", tool: "read", callID: "read-original",
++      state: { status: "completed", input: { filePath }, output: first.output, metadata: first.metadata, time } }] }] as unknown as Tool.Context["messages"]
++    const repeated = yield* exec(dir, { filePath }, { ...ctx, messages })
++    expect(repeated.output).toContain("already in the retained read result")
++    yield* Effect.promise(() => Bun.write(filePath, "changed source"))
++    const changed = yield* exec(dir, { filePath }, { ...ctx, messages })
++    expect(changed.output).toContain("changed source")
++    yield* Effect.promise(() => Bun.write(filePath, "original source"))
++    time.compacted = Date.now()
++    const restored = yield* exec(dir, { filePath }, { ...ctx, messages })
++    expect(restored.output).toContain("1: original source")
++  }),
++)
+ const glob = (p: string) =>
+   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
+ const githubBase = <A, E, R>(url: string, self: Effect.Effect<A, E, R>) =>

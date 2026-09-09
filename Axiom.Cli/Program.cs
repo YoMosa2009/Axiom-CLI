@@ -58,7 +58,8 @@ internal static class Program
         // Bare `axiom` (no subcommand) opens the chat TUI. `axiom chat` remains an alias.
         string command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         bool isChatEntry = command is "" or "chat";
-        bool useOpenCode = string.Equals(engineOverride, "opencode", StringComparison.OrdinalIgnoreCase);
+        bool useOpenCode = string.Equals(engineOverride, "opencode", StringComparison.OrdinalIgnoreCase)
+            || (command == "code" && string.IsNullOrWhiteSpace(engineOverride) && modelOverride == null && profileOverride == null);
         if (command == "review" && (engineOverride != null || modelOverride != null || profileOverride != null || yesFlag || jsonFlag))
         {
             Console.Error.WriteLine("review supports --plan and a task. It uses the current Kestrel model and always writes a JSON report.");
@@ -106,6 +107,8 @@ internal static class Program
             return command switch
             {
                 "config" => await RunConfigAsync(),
+                "connect" when args.Skip(1).FirstOrDefault()?.Equals("openrouter", StringComparison.OrdinalIgnoreCase) == true
+                    => RunConnectOpenRouter(),
                 "connect" => await RunConnectAsync(),
                 "review" => await ScopedReviewRunner.RunAsync(args.Skip(1).ToArray()),
                 "" or "chat" when useOpenCode => await RunOpenCodeChatAsync(modelOverride, yesFlag, bootstrapPath),
@@ -196,7 +199,9 @@ internal static class Program
         AnsiConsole.MarkupLine($"  [{gold}]axiom connect[/]                 Save Kestrel 1 endpoint and this device's access key");
         AnsiConsole.MarkupLine($"  [{gold}]axiom review[/] [[--plan]] <task>  Scoped review of tracked source; --plan previews coverage");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code[/] [[--yes]] [[--json]] [[--model <id>]] <task>");
-        AnsiConsole.MarkupLine($"                              Council on cwd; --yes auto-apply patch; --json machine output");
+        AnsiConsole.MarkupLine($"                              Axiom Code on cwd; --yes auto-approve; --json machine output");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom code --engine legacy[/] <task>  Use the OpenRouter Council engine");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom connect openrouter[/]       Repair or replace the Council credential");
         AnsiConsole.MarkupLine($"  [{gold}]axiom [[path]] --engine opencode[/] OpenCode TUI in path, backed by Kestrel 1");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code --engine opencode[/] [[--yes]] [[--json]] <task>");
         AnsiConsole.MarkupLine($"                              OpenCode coding agent backed by Kestrel 1 (preview)");
@@ -220,9 +225,10 @@ internal static class Program
         string warning = AxiomTheme.Hex(AxiomTheme.Warning);
         foreach (string key in unreadable)
         {
+            string recovery = key == "openrouter_api_key" ? "axiom connect openrouter" : "axiom connect";
             AnsiConsole.MarkupLine(
                 $"[{warning}]Stored '{key.EscapeMarkup()}' could not be decrypted on this machine — " +
-                $"it was most likely saved on a different one. Run 'axiom connect' to re-enter it.[/]");
+                $"run '{recovery}' to re-enter it.[/]");
         }
     }
 
@@ -422,6 +428,22 @@ internal static class Program
         }
 
         AnsiConsole.MarkupLine($"Run [{AxiomTheme.Hex(AxiomTheme.Gold)}]axiom[/] to start chatting.");
+        return 0;
+    }
+
+    private static int RunConnectOpenRouter()
+    {
+        using var db = new DatabaseService();
+        AnsiConsole.Markup("OpenRouter API key (input is hidden; blank cancels): ");
+        string key = (ReadLineSecret() ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(key)) return 1;
+        db.SaveOpenRouterApiKey(key);
+        if (!string.Equals(db.LoadOpenRouterApiKey(), key, StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine("The OpenRouter key could not be saved and read back. Existing configuration was not verified.");
+            return 1;
+        }
+        Console.WriteLine("OpenRouter key stored and read back successfully. Use --engine legacy for Council.");
         return 0;
     }
 
@@ -834,6 +856,14 @@ internal static class Program
             councilModelLabel = profile.DefaultModelLabel ?? councilModelId;
         }
 
+        if (!string.Equals(councilModelId, OpenRouterChatService.CustomEndpointModelId, StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(apiKey))
+        {
+            const string message = "No readable OpenRouter key for Council. Run 'axiom connect openrouter', or use 'axiom code' for Kestrel.";
+            if (jsonFlag) Console.WriteLine(JsonSerializer.Serialize(new { ok = false, error = message }));
+            else Console.Error.WriteLine(message);
+            return 1;
+        }
         IChatPipeline pipeline = new CloudChatPipeline(chatService, councilModelId);
         var workspaceAccess = new WorkspaceAccessService();
 
