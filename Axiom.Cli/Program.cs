@@ -59,6 +59,7 @@ internal static class Program
         string command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         bool isChatEntry = command is "" or "chat";
         bool useOpenCode = string.Equals(engineOverride, "opencode", StringComparison.OrdinalIgnoreCase)
+            || OpenCodeFreeConfiguration.IsModelId(modelOverride)
             || (command == "code" && string.IsNullOrWhiteSpace(engineOverride) && modelOverride == null && profileOverride == null);
         if (command == "review" && (engineOverride != null || modelOverride != null || profileOverride != null || yesFlag || jsonFlag))
         {
@@ -202,9 +203,9 @@ internal static class Program
         AnsiConsole.MarkupLine($"                              Axiom Code on cwd; --yes auto-approve; --json machine output");
         AnsiConsole.MarkupLine($"  [{gold}]axiom code --engine legacy[/] <task>  Use the OpenRouter Council engine");
         AnsiConsole.MarkupLine($"  [{gold}]axiom connect openrouter[/]       Repair or replace the Council credential");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom [[path]] --engine opencode[/] OpenCode TUI in path, backed by Kestrel 1");
-        AnsiConsole.MarkupLine($"  [{gold}]axiom code --engine opencode[/] [[--yes]] [[--json]] <task>");
-        AnsiConsole.MarkupLine($"                              OpenCode coding agent backed by Kestrel 1 (preview)");
+        AnsiConsole.MarkupLine($"  [{gold}]axiom [[path]] --model opencode/big-pickle[/]  Account-free OpenCode TUI");
+        AnsiConsole.WriteLine("  axiom code [--yes] [--json] --model opencode/big-pickle <task>");
+        AnsiConsole.MarkupLine($"                              Account-free OpenCode coding agent; no account or key needed");
         AnsiConsole.MarkupLine($"  [{gold}]axiom opencode install[/]       Install Axiom's pinned OpenCode runtime for this user");
         AnsiConsole.MarkupLine($"  [{gold}]axiom update[/]                  Download and install the latest release");
         AnsiConsole.MarkupLine($"  [{gold}]axiom help[/]                    Show this help");
@@ -524,12 +525,14 @@ internal static class Program
         bool jsonFlag,
         string? projectPath)
     {
+        bool requestedOpenCodeFree = OpenCodeFreeConfiguration.IsModelId(modelOverride);
         if (!string.IsNullOrWhiteSpace(modelOverride)
+            && !requestedOpenCodeFree
             && !modelOverride.Equals("kestrel", StringComparison.OrdinalIgnoreCase)
             && !modelOverride.Equals("kestrel 1", StringComparison.OrdinalIgnoreCase)
             && !modelOverride.Equals(KestrelOpenCodeConfiguration.ModelId, StringComparison.OrdinalIgnoreCase))
         {
-            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]The OpenCode bridge currently supports Kestrel 1 only.[/]");
+            AnsiConsole.MarkupLine($"[{AxiomTheme.Hex(AxiomTheme.Error)}]Use Kestrel or an OpenCode free model such as opencode/big-pickle.[/]");
             return 1;
         }
 
@@ -577,6 +580,15 @@ internal static class Program
             ?? string.Empty;
         WarnAboutUnreadableSecrets(db);
 
+        // A configured Kestrel connection remains the default for existing users. A free model
+        // explicitly selected with --model, or a first run with no Kestrel credential, uses the
+        // OpenCode provider that ships with the managed runtime.
+        string? openCodeFreeModelId = requestedOpenCodeFree
+            ? OpenCodeFreeConfiguration.NormalizeModelId(modelOverride!)
+            : string.IsNullOrWhiteSpace(apiKey)
+                ? OpenCodeFreeConfiguration.DefaultModelId
+                : null;
+
         // The model id is supplied by the runner, which asks the server which profile is actually
         // loaded. Hard-coding it here used to send OpenCode after OmniCoder even when the server
         // was serving Gemma, which made the proxy swap the loaded model out from under the session.
@@ -617,7 +629,8 @@ internal static class Program
             apiKey,
             autoApprove: yesFlag,
             BuildArguments,
-            CancellationToken.None);
+            CancellationToken.None,
+            openCodeFreeModelId: openCodeFreeModelId);
     }
 
     private static bool TryResolveOpenCodeProjectPath(string? candidate, out string? projectPath, out string error)

@@ -2679,12 +2679,15 @@ internal sealed class ChatTui : IDisposable
             return null;
         }
 
-        // Commands that should run immediately (this was the /help bug: it only filled the buffer).
-        if (pick.Id is "clear" or "help" or "workspace" or "sessions" or "browse" or "delete" or "undo" or "mode" or "effort"
-            or "continue" or "export" or "pick")
-            return pick.Id == "mode" ? "/mode" : pick.Id == "effort" ? "/effort" : pick.Id == "rename" ? "/rename " : "/" + pick.Id;
-        if (pick.Id == "rename")
-            return "/rename ";
+        // Every picker entry must either execute or deliberately leave an editable argument
+        // prefix. The former whitelist made most displayed commands silently clear the editor.
+        if (pick.Id is "rename" or "sticky" or "pr")
+        {
+            _input = "/" + pick.Id + " ";
+            _cursor = _input.Length;
+            _menuIndex = 0;
+            return null;
+        }
 
         if (pick.Id.StartsWith("session-del:", StringComparison.Ordinal))
         {
@@ -2697,7 +2700,7 @@ internal sealed class ChatTui : IDisposable
         if (pick.Id.StartsWith("model:", StringComparison.Ordinal))
             return "/model " + pick.Id["model:".Length..];
 
-        return null;
+        return pick.Id == "council-settings" ? "/council" : "/" + pick.Id;
     }
 
     public void BrowseWorkspaceFolder() => PickAndLockFolder();

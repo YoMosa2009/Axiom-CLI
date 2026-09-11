@@ -64,6 +64,21 @@ axiom code --engine opencode --yes "explain the failing test and fix it"
 The OpenCode TUI, tools, file edits, shell commands, tests, and Git operations run on the computer
 where you launch Axiom. Only model requests travel to Kestrel 1 over HTTPS.
 
+## Get started with OpenCode free models
+
+No account, API key, or Kestrel connection is required. Select an `opencode/...` model and Axiom
+starts OpenCode's built-in account-free provider:
+
+```powershell
+axiom --model opencode/big-pickle
+axiom code --model opencode/big-pickle "add input validation to the signup form"
+```
+
+Suggested choices are `opencode/big-pickle`, `opencode/mimo-v2.5-free`,
+`opencode/ling-3.0-flash-fin-free`, `opencode/nemotron-3-ultra-free`,
+`opencode/nemotron-3.5-lightning-free`, and `opencode/muse-spark-1.3-contributor-free`.
+Newly available provider models may be supplied directly as `opencode/<model-id>`.
+
 ### Legacy Axiom / OpenRouter
 
 ```sh
@@ -87,6 +102,8 @@ Axiom distributes and verifies the compatible runtime.
 | `axiom config` | Store your OpenRouter API key, a self-hosted endpoint, and/or a [Tavily](https://tavily.com) API key for reliable `web_search` (all encrypted at rest; DPAPI on Windows, AES key-file on macOS/Linux) |
 | `axiom connect` | Save Kestrel 1's HTTPS endpoint and this computer's revocable access key |
 | `axiom code "<task>"` | Axiom Code on the current directory, using the active Kestrel model |
+| `axiom [path] --model opencode/big-pickle` | Account-free OpenCode TUI |
+| `axiom code --model opencode/big-pickle "<task>"` | Account-free OpenCode coding agent |
 | `axiom code --engine legacy [--model <id>] "<task>"` | Architect → Builder → Critic Council |
 | `axiom connect openrouter` | Replace an unreadable Council credential through hidden local input |
 | `axiom [path] --engine opencode` | Axiom Code agent TUI in `path`, backed by Kestrel 1 |
@@ -101,8 +118,8 @@ code-specialized) — the same aliases as the desktop app — and `kestral` (Kes
 self-hosted OpenAI-compatible endpoint you configure yourself via `axiom config` (base URL,
 model id, and API key). Kestrel 1 runs on whatever machine you point it at — useful for using
 your own PC as inference compute from a laptop or another machine. Bare `axiom code` uses
-Axiom Code. Existing explicit `--model` or `--profile` selections retain the legacy route
-unless `--engine opencode` is supplied.
+Axiom Code. Existing explicit `--model` or `--profile` selections retain the legacy route unless
+`--engine opencode` is supplied; `opencode/<model-id>` always selects the OpenCode runtime.
 
 ### Axiom Code-backed Kestrel 1
 
@@ -170,7 +187,8 @@ pick up exactly where the last one left off.
 ## System requirements
 
 - Windows (x64), macOS (x64 + arm64), or Linux (x64 + arm64)
-- An [OpenRouter](https://openrouter.ai) account and API key (free tier available)
+- No account is needed for OpenCode's listed free models. An [OpenRouter](https://openrouter.ai)
+  account and API key remain optional for the legacy Council engine.
 - For the Python sandbox tool: a system Python 3 install on PATH
 - For the Java sandbox tool: a JDK (`javac`/`java`) on PATH
 

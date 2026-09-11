@@ -18,12 +18,12 @@ internal static class OpenCodeRunner
     private const string BrandedRuntimeAssetPrefix = "axiom-code-runtime-";
     private static readonly HttpClient BrandedRuntimeHttp = CreateBrandedRuntimeHttpClient();
 
-    private const string InstructionsFileName = "kestrel-operating-rules.md";
+    private const string InstructionsFileName = "axiom-code-operating-rules.md";
 
     // Small local models reliably end a turn by announcing the next step instead of taking it.
     // Instructions supplement the runtime's coverage and bounded persistence guards.
     private const string InstructionsContent = """
-        # Kestrel operating rules
+        # Axiom Code operating rules
 
         1. Do the work in the same turn. Never end a turn with a statement of intent such as
            "I will now ...", "Next I will ...", or "Let me continue". If more work remains, call
@@ -322,42 +322,53 @@ internal static class OpenCodeRunner
         return false;
     }
 
-    /// <param name="buildArguments">
-    /// Receives the fully qualified id of the model Kestrel is actually serving right now. The id
-    /// cannot be hard-coded by the caller: the server owns which profile is loaded, and passing a
-    /// stale id made OpenCode ask for a model the server was not running, which in turn made the
-    /// proxy unload the live model and reload the requested one mid-session.
-    /// </param>
+    /// <param name="buildArguments">Receives the fully-qualified model selected for this run.</param>
     internal static async Task<int> RunAsync(
         string runtimePath,
         string baseUrl,
         string apiKey,
         bool autoApprove,
         Func<string, IReadOnlyList<string>> buildArguments,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? openCodeFreeModelId = null)
     {
-        if (string.IsNullOrWhiteSpace(apiKey))
+        bool useOpenCodeFree = OpenCodeFreeConfiguration.IsModelId(openCodeFreeModelId);
+        if (!useOpenCodeFree && string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("No Kestrel access key is configured. Run 'axiom connect'.");
 
         string isolatedRoot = Path.Combine(AppPaths.Root, "OpenCode");
         Directory.CreateDirectory(isolatedRoot);
         string? instructionsPath = TryWriteInstructions(isolatedRoot);
 
-        (string? modelId, int? contextWindow, string? label) = await TryGetActiveKestrelProfileAsync(baseUrl, apiKey, cancellationToken);
-        if (!KestrelOpenCodeConfiguration.TryCreate(
-                baseUrl,
-                autoApprove,
-                out string config,
-                out string error,
-                contextWindow,
-                label,
-                modelId,
-                instructionsPath))
-            throw new InvalidOperationException(error);
+        string config;
+        string qualifiedModelId;
+        if (useOpenCodeFree)
+        {
+            // `opencode` is a built-in provider. Leaving it out of the custom provider map lets
+            // the runtime use its account-free public path without a Kestrel/OpenRouter secret.
+            qualifiedModelId = OpenCodeFreeConfiguration.NormalizeModelId(openCodeFreeModelId!);
+            config = OpenCodeFreeConfiguration.Create(qualifiedModelId, autoApprove, instructionsPath);
+        }
+        else
+        {
+            // The server owns which Kestrel profile is loaded. Passing a stale id made OpenCode
+            // unload the live model and reload a different one mid-session.
+            (string? modelId, int? contextWindow, string? label) = await TryGetActiveKestrelProfileAsync(baseUrl, apiKey, cancellationToken);
+            if (!KestrelOpenCodeConfiguration.TryCreate(
+                    baseUrl,
+                    autoApprove,
+                    out config,
+                    out string error,
+                    contextWindow,
+                    label,
+                    modelId,
+                    instructionsPath))
+                throw new InvalidOperationException(error);
 
-        string qualifiedModelId = KestrelOpenCodeConfiguration.ProviderId
-            + "/"
-            + (string.IsNullOrWhiteSpace(modelId) ? KestrelOpenCodeConfiguration.ModelId : modelId.Trim());
+            qualifiedModelId = KestrelOpenCodeConfiguration.ProviderId
+                + "/"
+                + (string.IsNullOrWhiteSpace(modelId) ? KestrelOpenCodeConfiguration.ModelId : modelId.Trim());
+        }
         IReadOnlyList<string> arguments = buildArguments(qualifiedModelId);
 
         var startInfo = new ProcessStartInfo
@@ -373,13 +384,14 @@ internal static class OpenCodeRunner
             startInfo.ArgumentList.Add(argument);
 
         // Keep OpenCode's data/config isolated from an existing standalone OpenCode install.
-        // The credential only exists in this child process and is not written by Axiom.
+        // A Kestrel credential exists only in the child process and is never written by Axiom.
         startInfo.Environment["XDG_CONFIG_HOME"] = Path.Combine(isolatedRoot, "config");
         startInfo.Environment["XDG_DATA_HOME"] = Path.Combine(isolatedRoot, "data");
         startInfo.Environment["XDG_CACHE_HOME"] = Path.Combine(isolatedRoot, "cache");
         startInfo.Environment["OPENCODE_CONFIG_DIR"] = Path.Combine(isolatedRoot, "extensions");
         startInfo.Environment["OPENCODE_CONFIG_CONTENT"] = config;
-        startInfo.Environment[KestrelOpenCodeConfiguration.ApiKeyEnvironmentVariable] = apiKey.Trim();
+        if (!useOpenCodeFree)
+            startInfo.Environment[KestrelOpenCodeConfiguration.ApiKeyEnvironmentVariable] = apiKey.Trim();
 
         using Process? process = Process.Start(startInfo);
         if (process == null)
