@@ -32,9 +32,15 @@ internal static class OpenCodeRunner
            actually complete, or when you genuinely need an answer from the user.
         3. Keep the todo list accurate with the todo tool, and never end a turn while an item is
            still pending or in progress.
-        4. Prefer many small, concrete tool calls over one large plan. Read before you edit, and
+        4. For file creation or edits, call the Write or Edit tool and wait for its result. Never
+           claim a file exists because you intended to write it. Verify the exact path with Read
+           when a write fails, the path is outside the current project, or the result is unclear.
+           If a write fails, report the tool error and do not claim success.
+        5. Prefer many small, concrete tool calls over one large plan. Read before you edit, and
            verify after you edit.
-        5. Use only the tools that exist in this session. If you need a capability you do not
+        6. Do not reproduce raw model control tokens such as `<|channel|>` or `<channel|>` in
+           user-facing text. Give one concise final answer; do not repeat it as an apology.
+        7. Use only the tools that exist in this session. If you need a capability you do not
            have, say so plainly instead of inventing a tool name.
         """;
 

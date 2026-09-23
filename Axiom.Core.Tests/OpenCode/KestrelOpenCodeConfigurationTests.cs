@@ -91,6 +91,7 @@ public sealed class KestrelOpenCodeConfigurationTests
         Assert.True(models[KestrelOpenCodeConfiguration.GemmaModelId]!["temperature"]!.GetValue<bool>());
         Assert.True(models[KestrelOpenCodeConfiguration.ModelId]!["temperature"]!.GetValue<bool>());
         Assert.True(models[KestrelOpenCodeConfiguration.GemmaModelId]!["tool_call"]!.GetValue<bool>());
+        Assert.False(models[KestrelOpenCodeConfiguration.GemmaModelId]!["reasoning"]!.GetValue<bool>());
 
         Assert.Equal(
             KestrelOpenCodeConfiguration.GemmaTemperature,

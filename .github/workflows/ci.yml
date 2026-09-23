@@ -79,4 +79,4 @@ jobs:
           done
           bun install --cwd opencode-source --frozen-lockfile
           cd opencode-source/packages/opencode
-          bun test test/session/axiom-coverage.test.ts test/tool/read.test.ts --timeout 30000
+          bun test test/session/axiom-coverage.test.ts test/session/llm.test.ts test/tool/read.test.ts --timeout 30000

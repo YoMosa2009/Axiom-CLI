@@ -1,9 +1,9 @@
 diff --git a/packages/opencode/src/session/axiom-coverage.ts b/packages/opencode/src/session/axiom-coverage.ts
 new file mode 100644
-index 0000000..27980ca
+index 0000000..a6b0d06
 --- /dev/null
 +++ b/packages/opencode/src/session/axiom-coverage.ts
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,92 @@
 +import path from "path"
 +
 +export function requested(text: string) {
@@ -21,6 +21,30 @@ index 0000000..27980ca
 +
 +export function promisesWork(text: string) {
 +  return /^(?:I will|I'll|Let me|Next I will)\s+(?:now\s+)?(?:continue|read|inspect|check|implement|fix|analy[sz]e|review|run|examine)\b/i.test(text.trim()) && text.trim().length < 600
++}
++
++// A user-facing file claim is not evidence that the write tool ran. Catch claims that name a
++// concrete file so the session can require an actual write result before it accepts completion.
++export function claimsFileWrite(text: string) {
++  const claims = /\b(?:I|we)(?:'ve| have)?\s+(?:successfully\s+)?(?:created|wrote|written|saved|generated)\b|\b(?:file|document)\s+(?:was|has been)\s+(?:created|saved|written)\b/i.test(text)
++  const file = /\bfile\b|(?:[A-Z]:[\\/]|\.\.?[\\/]|(?:[\w.-]+[\\/])+)[^\s\"'<>`]*\.[a-z0-9]{1,12}\b|\b[\w.-]+\.[a-z0-9]{1,12}\b/i.test(text)
++  return claims && file
++}
++
++export function completedFileWrite(messages: Array<{ parts: unknown[] }>, claim: string, cwd: string) {
++  const claimedPaths = [...claim.matchAll(/(?:[A-Z]:[\\/]|\.\.?[\\/]|(?:[\w.-]+[\\/])+)?[^\s\"'<>`]*\.[a-z0-9]{1,12}/gi)]
++    .map((match) => path.resolve(cwd, match[0]).replaceAll("\\", "/").toLowerCase())
++  return messages.some((message) => message.parts.some((value) => {
++    if (!value || typeof value !== "object") return false
++    const part = value as { type?: unknown; tool?: unknown; state?: { status?: unknown; input?: unknown } }
++    if (part.type !== "tool" || !["write", "edit"].includes(String(part.tool)) || part.state?.status !== "completed") return false
++    if (claimedPaths.length === 0) return true
++    if (!part.state.input || typeof part.state.input !== "object") return false
++    const filePath = (part.state.input as { filePath?: unknown }).filePath
++    if (typeof filePath !== "string") return false
++    const written = path.resolve(cwd, filePath).replaceAll("\\", "/").toLowerCase()
++    return claimedPaths.includes(written)
++  }))
 +}
 +
 +const extensions = new Set([".cs", ".xaml", ".csproj", ".props", ".targets", ".fs", ".vb", ".js", ".jsx", ".ts", ".tsx", ".py", ".go", ".rs", ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".swift", ".rb", ".php", ".html", ".css", ".scss", ".sql", ".sh", ".ps1", ".md"])
@@ -72,8 +96,63 @@ index 0000000..27980ca
 +}
 +
 +export * as AxiomCoverage from "./axiom-coverage"
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+index a99f8ac..468a50c 100644
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -373,7 +373,13 @@ const live: Layer.Layer<
+             return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
+               e instanceof Error ? e : new Error(String(e)),
+             ).pipe(
+-              Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
++              // Kestrel's small local models can return malformed/duplicated reasoning text
++              // (including raw Gemma channel markers) alongside their user-facing answer. Its
++              // catalog does not advertise reasoning, so keep those undeclared chunks out of the
++              // persisted transcript and terminal UI while preserving text and tool events.
++              Stream.mapEffect((event) =>
++                LLMAISDK.toLLMEvents(state, event, { dropReasoning: input.model.providerID === "kestrel" }),
++              ),
+               Stream.flatMap((events) => Stream.fromIterable(events)),
+             )
+           }),
+diff --git a/packages/opencode/src/session/llm/ai-sdk.ts b/packages/opencode/src/session/llm/ai-sdk.ts
+index 13d427a..4aafe24 100644
+--- a/packages/opencode/src/session/llm/ai-sdk.ts
++++ b/packages/opencode/src/session/llm/ai-sdk.ts
+@@ -77,6 +77,7 @@ function currentReasoningID(state: ReturnType<typeof adapterState>, id: string |
+ export function toLLMEvents(
+   state: ReturnType<typeof adapterState>,
+   event: AISDKEvent,
++  options: { dropReasoning?: boolean } = {},
+ ): Effect.Effect<ReadonlyArray<LLMEvent>, unknown> {
+   switch (event.type) {
+     case "start":
+@@ -159,6 +160,7 @@ export function toLLMEvents(
+       })
+ 
+     case "reasoning-start":
++      if (options.dropReasoning) return Effect.succeed([])
+       return Effect.sync(() => {
+         state.currentReasoningID = currentReasoningID(state, event.id)
+         return [
+@@ -170,6 +172,7 @@ export function toLLMEvents(
+       })
+ 
+     case "reasoning-delta":
++      if (options.dropReasoning) return Effect.succeed([])
+       return Effect.succeed([
+         LLMEvent.reasoningDelta({
+           id: currentReasoningID(state, event.id),
+@@ -179,6 +182,7 @@ export function toLLMEvents(
+       ])
+ 
+     case "reasoning-end":
++      if (options.dropReasoning) return Effect.succeed([])
+       return Effect.sync(() => {
+         const id = currentReasoningID(state, event.id)
+         state.currentReasoningID = undefined
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 0f85d44..3553326 100644
+index 0f85d44..4ed6f5d 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -9,6 +9,8 @@ import { SessionRevert } from "./revert"
@@ -85,7 +164,7 @@ index 0f85d44..3553326 100644
  
  import { type Tool as AITool, tool, jsonSchema } from "ai"
  import type { JSONSchema7 } from "@ai-sdk/provider"
-@@ -99,6 +101,168 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
+@@ -99,6 +101,175 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
    return part.state.status === "error" && part.state.metadata?.interrupted === true
  }
  
@@ -214,7 +293,7 @@ index 0f85d44..3553326 100644
 +  ].join("\n")
 +}
 +
-+function axiomContinueText(unfinished: string[], unread: string[], searchedSuccessfully: boolean): string {
++function axiomContinueText(unfinished: string[], unread: string[], searchedSuccessfully: boolean, missingWrite = false): string {
 +  const lines = [
 +    "You ended that turn without calling a tool, but your own todo list still has unfinished work:",
 +    ...unfinished.map((item) => "  - " + item),
@@ -222,7 +301,14 @@ index 0f85d44..3553326 100644
 +    "Saying what you will do next does not do it, and nothing will prompt you again: a turn that",
 +    "ends without a tool call ends the entire task.",
 +  ]
-+  if (unread.length > 0) {
++  if (missingWrite) {
++    lines.push(
++      "",
++      "Your response claims a file was created or saved, but this turn has no successful `write` or `edit` tool result.",
++      "The file has not been verified as created. Call `write` with the exact path now, then use `read` on that path",
++      "to confirm it exists before you say the task is complete. If the write tool fails, report that error plainly.",
++    )
++  } else if (unread.length > 0) {
 +    // Naming actual paths is what makes this actionable. Told only "you have unfinished todos",
 +    // the model concludes it is already done and re-sends the same summary.
 +    lines.push(
@@ -254,7 +340,7 @@ index 0f85d44..3553326 100644
  export interface Interface {
    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
    readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
-@@ -124,6 +288,7 @@ const layer = Layer.effect(
+@@ -124,6 +295,7 @@ const layer = Layer.effect(
      const config = yield* Config.Service
      const permission = yield* Permission.Service
      const fsys = yield* FSUtil.Service
@@ -262,7 +348,7 @@ index 0f85d44..3553326 100644
      const mcp = yield* MCP.Service
      const lsp = yield* LSP.Service
      const registry = yield* ToolRegistry.Service
-@@ -1083,6 +1248,12 @@ const layer = Layer.effect(
+@@ -1083,6 +1255,12 @@ const layer = Layer.effect(
          const ctx = yield* InstanceState.context
          let structured: unknown
          let step = 0
@@ -275,7 +361,7 @@ index 0f85d44..3553326 100644
          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
  
          while (true) {
-@@ -1096,6 +1267,7 @@ const layer = Layer.effect(
+@@ -1096,6 +1274,7 @@ const layer = Layer.effect(
            const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
  
            if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
@@ -283,7 +369,7 @@ index 0f85d44..3553326 100644
  
            const lastAssistantMsg = msgs.findLast(
              (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
-@@ -1105,13 +1277,14 @@ const layer = Layer.effect(
+@@ -1105,13 +1284,14 @@ const layer = Layer.effect(
            // the model, but ignore cleanup-marked interrupted orphans.
            const hasToolCalls =
              lastAssistantMsg?.parts.some(
@@ -299,7 +385,7 @@ index 0f85d44..3553326 100644
              lastAssistant.parentID === lastUser.id
            ) {
              const orphan = lastAssistantMsg?.parts.find(
-@@ -1125,8 +1298,93 @@ const layer = Layer.effect(
+@@ -1125,8 +1305,96 @@ const layer = Layer.effect(
                  callID: orphan.callID,
                })
              }
@@ -313,7 +399,10 @@ index 0f85d44..3553326 100644
 +            // ever triggered by the model's own recorded todos, so a genuinely finished task
 +            // (every item completed, or no list at all) still exits immediately.
 +            const axiomUnfinished = axiomUnfinishedTodos(axiomCurrentMessages)
-+            const axiomPromise = AxiomCoverage.promisesWork(lastAssistantMsg?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("") ?? "")
++            const axiomFinalText = lastAssistantMsg?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("") ?? ""
++            const axiomMissingWrite = AxiomCoverage.claimsFileWrite(axiomFinalText) && !AxiomCoverage.completedFileWrite(axiomCurrentMessages, axiomFinalText, ctx.directory)
++            if (axiomMissingWrite) axiomUnfinished.push("Create and verify the file you just claimed to create")
++            const axiomPromise = AxiomCoverage.promisesWork(axiomFinalText)
 +            if (axiomPromise && axiomUnfinished.length === 0) axiomUnfinished.push("Carry out the work you just promised instead of ending with a statement of intent")
 +            const axiomUnread = axiomUnreadFiles(axiomCurrentMessages, 12)
 +            // A model that has decided it is finished answers every nudge with the same text.
@@ -345,7 +434,7 @@ index 0f85d44..3553326 100644
 +                  messageID: axiomUserMsg.info.id,
 +                  sessionID: axiomUserMsg.info.sessionID,
 +                  type: "text",
-+                  text: axiomContinueText(axiomUnfinished, axiomUnread, axiomFoundAnyFile(msgs)),
++                  text: axiomContinueText(axiomUnfinished, axiomUnread, axiomFoundAnyFile(msgs), axiomMissingWrite),
 +                  synthetic: true,
 +                })
 +              }
@@ -395,7 +484,7 @@ index 0f85d44..3553326 100644
            }
  
            step++
-@@ -1240,6 +1498,56 @@ const layer = Layer.effect(
+@@ -1240,6 +1508,56 @@ const layer = Layer.effect(
                Effect.provideService(RuntimeFlags.Service, flags),
              )
  
@@ -452,7 +541,7 @@ index 0f85d44..3553326 100644
              if (lastUser.format?.type === "json_schema") {
                tools["StructuredOutput"] = createStructuredOutputTool({
                  schema: lastUser.format.schema,
-@@ -1280,7 +1588,7 @@ const layer = Layer.effect(
+@@ -1280,7 +1598,7 @@ const layer = Layer.effect(
                  ...modelMsgs,
                  ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
                ],
@@ -461,7 +550,7 @@ index 0f85d44..3553326 100644
                model,
                toolChoice: format.type === "json_schema" ? "required" : undefined,
              })
-@@ -1336,7 +1644,17 @@ const layer = Layer.effect(
+@@ -1336,7 +1654,17 @@ const layer = Layer.effect(
          }
  
          yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
@@ -480,7 +569,7 @@ index 0f85d44..3553326 100644
        },
      )
  
-@@ -1610,6 +1928,7 @@ export const node = LayerNode.make({
+@@ -1610,6 +1938,7 @@ export const node = LayerNode.make({
      Config.node,
      Permission.node,
      FSUtil.node,
@@ -516,10 +605,10 @@ index 678ed44..3d99be6 100644
        } else if (file.more) {
 diff --git a/packages/opencode/test/session/axiom-coverage.test.ts b/packages/opencode/test/session/axiom-coverage.test.ts
 new file mode 100644
-index 0000000..f9c1b57
+index 0000000..3003073
 --- /dev/null
 +++ b/packages/opencode/test/session/axiom-coverage.test.ts
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,71 @@
 +import { expect, test } from "bun:test"
 +import { AxiomCoverage } from "../../src/session/axiom-coverage"
 +
@@ -578,10 +667,47 @@ index 0000000..f9c1b57
 +  expect(AxiomCoverage.promisesWork("Implemented the fix and checked the result.")).toBe(false)
 +})
 +
++test("a file creation claim requires a completed write or edit tool", () => {
++  const claim = "I have created the animation for you. It is located at F:\\NeuralNetworkAnimation\\index.html."
++  expect(AxiomCoverage.claimsFileWrite(claim)).toBe(true)
++  expect(AxiomCoverage.claimsFileWrite("I can create an animation, but need the destination first.")).toBe(false)
++  expect(AxiomCoverage.completedFileWrite([{ parts: [{ type: "tool", tool: "write", state: { status: "completed", input: { filePath: "F:\\NeuralNetworkAnimation\\index.html" } } }] }], claim, "F:\\NeuralNetworkAnimation")).toBe(true)
++  expect(AxiomCoverage.completedFileWrite([{ parts: [{ type: "tool", tool: "write", state: { status: "completed", input: { filePath: "F:\\other\\index.html" } } }] }], claim, "F:\\NeuralNetworkAnimation")).toBe(false)
++  expect(AxiomCoverage.completedFileWrite([{ parts: [{ type: "tool", tool: "write", state: { status: "error" } }] }], claim, "F:\\NeuralNetworkAnimation")).toBe(false)
++})
++
 +test("repeat keys preserve nested arguments and ignore property order", () => {
 +  expect(AxiomCoverage.stable({ b: { x: 1 }, a: 2 })).toBe(AxiomCoverage.stable({ a: 2, b: { x: 1 } }))
 +  expect(AxiomCoverage.stable({ b: { x: 1 } })).not.toBe(AxiomCoverage.stable({ b: { y: 1 } }))
 +})
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+index fcb536f..d099bfc 100644
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -334,6 +334,23 @@ describe("session.llm.ai-sdk adapter", () => {
+     ).toEqual([])
+   })
+ 
++  test("can suppress undeclared provider reasoning while preserving assistant text", async () => {
++    const state = LLMAISDK.adapterState()
++    const events = await Effect.runPromise(
++      Effect.forEach(
++        [
++          { type: "reasoning-start", id: "reasoning-1" },
++          { type: "reasoning-delta", id: "reasoning-1", text: "<channel|>duplicate answer" },
++          { type: "reasoning-end", id: "reasoning-1" },
++          { type: "text-delta", id: "text-1", text: "The user-facing answer" },
++        ].map((event) => uncheckedAdapterEvent(event)),
++        (event) => LLMAISDK.toLLMEvents(state, event, { dropReasoning: true }),
++      ).pipe(Effect.map((items) => items.flat())),
++    )
++    expect(events).toMatchObject([{ type: "text-delta", id: "text-1", text: "The user-facing answer" }])
++    expect(events.some((event) => event.type.startsWith("reasoning-"))).toBe(false)
++  })
++
+   test("preserves tool-error cause", async () => {
+     const error = new PermissionV1.RejectedError()
+     const events = await Effect.runPromise(
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
 index c1ef61b..2cf0e38 100644
 --- a/packages/opencode/test/tool/read.test.ts

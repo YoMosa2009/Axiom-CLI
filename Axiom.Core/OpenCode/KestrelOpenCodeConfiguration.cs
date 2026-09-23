@@ -196,6 +196,10 @@ public static class KestrelOpenCodeConfiguration
         var definition = new JsonObject
         {
             ["name"] = name,
+            // Kestrel does not define an OpenCode reasoning channel. Some local model gateways
+            // nevertheless return duplicated/malformed reasoning chunks; the runtime filters
+            // those chunks for this provider while leaving assistant text and tool calls intact.
+            ["reasoning"] = false,
             // Without this OpenCode treats the model as temperature-incapable and drops the
             // agent temperature above, leaving Ollama's own (much hotter) default in charge.
             ["temperature"] = true,
