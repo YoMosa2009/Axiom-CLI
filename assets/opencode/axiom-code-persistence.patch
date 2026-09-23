@@ -73,7 +73,7 @@ index 0000000..27980ca
 +
 +export * as AxiomCoverage from "./axiom-coverage"
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 0f85d44..e122474 100644
+index 0f85d44..3553326 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -9,6 +9,8 @@ import { SessionRevert } from "./revert"
@@ -177,12 +177,12 @@ index 0f85d44..e122474 100644
 +  )
 +}
 +
-+// AXIOM: identical consecutive tool calls before the loop intervenes, and before it gives up.
++// AXIOM: after warning at three identical calls, allow one corrective retry. Stop if it repeats again.
 +// Measured: Gemma 4 12B issued the byte-identical glob 370 times in a row, receiving the same
 +// result every time, for 24 minutes -- a hard repetition lock, and nothing in the stock loop
 +// stops it because each repeat is a legitimate tool call.
 +const AXIOM_REPEAT_WARN = 3
-+const AXIOM_REPEAT_ABORT = 8
++const AXIOM_REPEAT_ABORT = 4
 +
 +// Length of the trailing run of byte-identical tool calls (same tool, same input).
 +function axiomRepeatedTail(messages: SessionV1.WithParts[]): { tool: string; count: number } | undefined {

@@ -27,7 +27,7 @@ public static class KestrelOpenCodeConfiguration
     // the request from its checkpoint plus the retained recent turns.
     public const int CompactionReserveTokens = 16_384;
     public const int CompactionTailTurns = 6;
-    // OpenCode 1.18.29 clamps this setting to 15,000 tokens (MAX_PRESERVE_RECENT_TOKENS).
+    // OpenCode clamps this setting to 15,000 tokens (MAX_PRESERVE_RECENT_TOKENS).
     public const int CompactionRecentTokens = 15_000;
     public const int StreamStallTimeoutMilliseconds = 900_000;
 

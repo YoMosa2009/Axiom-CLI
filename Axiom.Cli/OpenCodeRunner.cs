@@ -12,7 +12,7 @@ internal static class OpenCodeRunner
     internal const string RuntimePathEnvironmentVariable = "AXIOM_OPENCODE_PATH";
     internal const string NpmPackageName = "opencode-ai";
     // Updating OpenCode is a compatibility decision, not an implicit behavior change for users.
-    internal const string PinnedRuntimeVersion = "1.18.29";
+    internal const string PinnedRuntimeVersion = "1.18.32";
     private const string BrandedRuntimeDirectoryName = "axiom-code";
     private const string BrandedRuntimeVersionFileName = ".axiom-code-version";
     private const string BrandedRuntimeAssetPrefix = "axiom-code-runtime-";

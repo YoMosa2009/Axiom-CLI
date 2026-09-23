@@ -111,11 +111,11 @@ To restart after editing `app.py`:
   to a config file. OpenCode's data/config is isolated under
   `%LOCALAPPDATA%\axiom-cli\OpenCode` via `XDG_*` so it never collides with a standalone
   OpenCode install.
-- The branding is two patches in `assets/opencode/` applied to a pinned upstream tag
-  (`OpenCodeRunner.PinnedRuntimeVersion`, currently **1.18.29**). Both workflows derive the tag
+- The branded runtime and local-model safeguards use three patches in `assets/opencode/`, applied to a pinned upstream tag
+  (`OpenCodeRunner.PinnedRuntimeVersion`, currently **1.18.32**). Both workflows derive the tag
   from that constant so the built runtime can never drift from what the CLI installs, and the
   `opencode-patches` CI job fails the build when a bump makes a patch stale. **When bumping the
-  pin, always regenerate both patches** — they carry context lines and index hashes.
+  pin, always regenerate all three patches** — they carry context lines and index hashes.
 - Version is a single source of truth: `Directory.Build.props` → `<Version>`. Bump before release.
 - To ship: commit → `git push origin main` → `git tag -a vX.Y.Z` → `git push origin vX.Y.Z`.
   Watch with `gh run watch <run-id> --exit-status`, and **confirm all 10 assets exist** (5 CLI +
