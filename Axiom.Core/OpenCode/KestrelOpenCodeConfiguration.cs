@@ -40,6 +40,7 @@ public static class KestrelOpenCodeConfiguration
     // deliberately moderate rather than minimal -- Gemma's own model card asks for 1.0, and
     // pushing it very low is what triggers that family's repetition failure mode.
     public const double GemmaTemperature = 0.6;
+    public const double OrnithTemperature = 0.6;
     public const double OmniCoderTemperature = 0.3;
     public const double SamplingTopP = 0.95;
 
@@ -93,10 +94,14 @@ public static class KestrelOpenCodeConfiguration
         // OpenCode attach images, which the proxy already translates into Ollama's native
         // base64 `images` field.
         bool isGemma = modelId.Equals(GemmaModelId, StringComparison.OrdinalIgnoreCase);
+        bool isOrnith = modelId.Contains("ornith", StringComparison.OrdinalIgnoreCase)
+            || activeModelLabel?.Contains("ornith", StringComparison.OrdinalIgnoreCase) == true;
         string displayName = string.IsNullOrWhiteSpace(activeModelLabel)
             ? "Kestrel 1 · OmniCoder-2-9B Q5_K_M"
             : (isGemma ? "Kestrel 1 Pro · " : "Kestrel 1 · ") + activeModelLabel;
-        double temperature = isGemma ? GemmaTemperature : OmniCoderTemperature;
+        double temperature = isGemma
+            ? GemmaTemperature
+            : isOrnith ? OrnithTemperature : OmniCoderTemperature;
 
         var permissions = new JsonObject
         {
@@ -118,6 +123,21 @@ public static class KestrelOpenCodeConfiguration
         };
         if (!modelCatalog.ContainsKey(modelId))
             modelCatalog[modelId] = CreateModelDefinition(displayName, contextWindowTokens, inputTokens, outputTokens, vision: false);
+        if (isOrnith)
+        {
+            JsonObject ornithModel = modelCatalog[modelId]!.AsObject();
+            ornithModel["options"] = new JsonObject
+            {
+                ["reasoningEffort"] = "none"
+            };
+            ornithModel["variants"] = new JsonObject
+            {
+                ["deep"] = new JsonObject
+                {
+                    ["reasoningEffort"] = "high"
+                }
+            };
+        }
 
         var root = new JsonObject
         {

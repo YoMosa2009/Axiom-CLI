@@ -348,7 +348,7 @@ index 0f85d44..5f7e8a2 100644
 +    intentOnly || needsFileWrite
 +      ? "Do not end this recovery turn with another statement of intent."
 +      : "wastes the turn. Call `read` on a file you have not opened yet, or take the next concrete",
-+    ...(intentOnly || missingWrite ? [] : [
++    ...(intentOnly || needsFileWrite ? [] : [
 +      "action for the first unfinished item. When the work is genuinely done, mark the items",
 +      "completed with todowrite and give your final answer in that same turn.",
 +    ]),
@@ -770,3 +770,82 @@ index c1ef61b..2cf0e38 100644
  const glob = (p: string) =>
    process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
  const githubBase = <A, E, R>(url: string, self: Effect.Effect<A, E, R>) =>
+
+diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
+--- a/packages/opencode/src/provider/transform.ts
++++ b/packages/opencode/src/provider/transform.ts
+@@ -563,4 +563,5 @@ export function topK(model: Provider.Model) {
+   const id = model.api.id.toLowerCase()
++  if (model.providerID === "kestrel" && (id.includes("ornith") || model.name.toLowerCase().includes("ornith"))) return 20
+   if (id.includes("minimax-m2")) {
+     if (["m2.", "m25", "m21"].some((s) => id.includes(s))) return 40
+     return 20
+@@ -1467,0 +1468,15 @@
++export function kestrelThinkingRequestBody(providerID: string, bodyText: string) {
++  if (providerID !== "kestrel") return bodyText
++  try {
++    const body = JSON.parse(bodyText)
++    const effort = body.reasoning_effort
++    if (effort === undefined) return bodyText
++    const think = effort !== "none"
++    delete body.reasoning_effort
++    body.think = think
++    return JSON.stringify(body)
++  } catch {
++    return bodyText
++  }
++}
++
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -1803,5 +1803,7 @@
+         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
+           const fetchFn = customFetch ?? fetch
+           const opts = init ?? {}
++          if (model.providerID === "kestrel" && typeof opts.body === "string")
++            opts.body = ProviderTransform.kestrelThinkingRequestBody(model.providerID, opts.body)
+           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
+           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
+diff --git a/packages/opencode/test/provider/kestrel.test.ts b/packages/opencode/test/provider/kestrel.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/provider/kestrel.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, test } from "bun:test"
++import { ProviderTransform } from "@/provider/transform"
++
++describe("Kestrel Ornith request controls", () => {
++  test.each([
++    ["none", false],
++    ["high", true],
++  ])("maps reasoning effort %s to Kestrel's think field", (reasoningEffort, think) => {
++    const bodyText = JSON.stringify({ model: "ornith-1.5:9b", reasoning_effort: reasoningEffort })
++    const transformed = ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)
++    expect(JSON.parse(transformed)).toEqual({
++      model: "ornith-1.5:9b",
++      think,
++    })
++  })
++
++  test("leaves non-Ornith request bodies unchanged", () => {
++    const bodyText = JSON.stringify({ model: "llama3.1:8b" })
++    expect(ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)).toBe(bodyText)
++  })
++
++  test("maps explicit profile controls when the runtime model ID is opaque", () => {
++    const bodyText = JSON.stringify({ model: "local-profile-9b", reasoning_effort: "none" })
++    const transformed = ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)
++    expect(JSON.parse(transformed)).toEqual({ model: "local-profile-9b", think: false })
++  })
++
++  test("does not change Ornith requests sent through another provider", () => {
++    const bodyText = JSON.stringify({ model: "ornith-1.5:9b", reasoning_effort: "none" })
++    expect(ProviderTransform.kestrelThinkingRequestBody("openai-compatible", bodyText)).toBe(bodyText)
++  })
++
++  test("uses the model card's top_k for Ornith", () => {
++    const model = { providerID: "kestrel", api: { id: "local-profile-9b" }, name: "Ornith 1.5 9B" } as any
++    expect(ProviderTransform.topK(model)).toBe(20)
++  })
++})

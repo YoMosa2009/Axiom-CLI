@@ -122,6 +122,47 @@ public sealed class KestrelOpenCodeConfigurationTests
     }
 
     [Fact]
+    public void TryCreate_UsesASeparateDirectAndDeepProfileForOrnith()
+    {
+        const string modelId = "ornith-1.5:9b";
+        bool success = KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1",
+            autoApprove: false,
+            out string json,
+            out string error,
+            activeModelId: modelId,
+            activeModelLabel: "Ornith 1.5 9B");
+
+        Assert.True(success, error);
+        JsonNode root = JsonNode.Parse(json)!;
+        JsonNode model = root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]![modelId]!;
+
+        Assert.Equal(0.6, root["agent"]!["build"]!["temperature"]!.GetValue<double>());
+        Assert.Equal(0.6, root["agent"]!["plan"]!["temperature"]!.GetValue<double>());
+        Assert.Equal("none", model["options"]!["reasoningEffort"]!.GetValue<string>());
+        Assert.Equal("high", model["variants"]!["deep"]!["reasoningEffort"]!.GetValue<string>());
+        Assert.Null(root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]![KestrelOpenCodeConfiguration.ModelId]!["options"]);
+    }
+
+    [Fact]
+    public void TryCreate_RecognizesOrnithFromTheActiveProfileLabel()
+    {
+        bool success = KestrelOpenCodeConfiguration.TryCreate(
+            "https://ai.axiominference.work/v1",
+            autoApprove: false,
+            out string json,
+            out string error,
+            activeModelId: "local-profile-9b",
+            activeModelLabel: "Ornith 1.5 9B");
+
+        Assert.True(success, error);
+        JsonNode root = JsonNode.Parse(json)!;
+        JsonNode model = root["provider"]![KestrelOpenCodeConfiguration.ProviderId]!["models"]!["local-profile-9b"]!;
+        Assert.Equal("none", model["options"]!["reasoningEffort"]!.GetValue<string>());
+        Assert.Equal(0.6, root["agent"]!["build"]!["temperature"]!.GetValue<double>());
+    }
+
+    [Fact]
     public void TryCreate_MarksOnlyTheVisionModelAsAttachmentCapable()
     {
         bool success = KestrelOpenCodeConfiguration.TryCreate(
