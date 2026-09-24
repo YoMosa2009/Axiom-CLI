@@ -71,7 +71,7 @@ jobs:
             git -C opencode-source apply --check "$GITHUB_WORKSPACE/$patch"
           done
 
-      - name: Test patched coverage and read behavior
+      - name: Test patched coverage, read, and provider behavior
         shell: bash
         run: |
           for patch in assets/opencode/*.patch; do
@@ -79,4 +79,4 @@ jobs:
           done
           bun install --cwd opencode-source --frozen-lockfile
           cd opencode-source/packages/opencode
-          bun test test/session/axiom-coverage.test.ts test/session/llm.test.ts test/tool/read.test.ts --timeout 30000
+          bun test test/session/axiom-coverage.test.ts test/session/llm.test.ts test/tool/read.test.ts test/provider/kestrel.test.ts --timeout 30000
