@@ -39,9 +39,12 @@ internal static class OpenCodeRunner
            known, stop listing drives or folders and create the requested content there.
         5. Prefer many small, concrete tool calls over one large plan. Read before you edit, and
            verify after you edit.
-        6. Do not reproduce raw model control tokens such as `<|channel|>` or `<channel|>` in
+        6. After a tool succeeds, use its result. Do not repeat the same tool with identical
+           arguments unless the relevant state changed or the result was incomplete. If the result
+           is unchanged, take a different action or explain the blocker.
+        7. Do not reproduce raw model control tokens such as `<|channel|>` or `<channel|>` in
            user-facing text. Give one concise final answer; do not repeat it as an apology.
-        7. Use only the tools that exist in this session. If you need a capability you do not
+        8. Use only the tools that exist in this session. If you need a capability you do not
            have, say so plainly instead of inventing a tool name.
         """;
 
