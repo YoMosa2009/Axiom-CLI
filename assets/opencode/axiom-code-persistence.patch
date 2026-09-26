@@ -1,3 +1,47 @@
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index 867ef2c..e895a3d 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -1804,6 +1804,8 @@ const layer = Layer.effect(
+         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
+           const fetchFn = customFetch ?? fetch
+           const opts = init ?? {}
++          if (model.providerID === "kestrel" && typeof opts.body === "string")
++            opts.body = ProviderTransform.kestrelThinkingRequestBody(model.providerID, opts.body)
+           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
+           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
+           const headerTimeoutCtl = typeof headerTimeoutMs === "number" ? timeoutController(headerTimeoutMs) : undefined
+diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
+index f0be2d1..3cb21d9 100644
+--- a/packages/opencode/src/provider/transform.ts
++++ b/packages/opencode/src/provider/transform.ts
+@@ -561,6 +561,7 @@ export function topP(model: Provider.Model) {
+ 
+ export function topK(model: Provider.Model) {
+   const id = model.api.id.toLowerCase()
++  if (model.providerID === "kestrel" && (id.includes("ornith") || model.name.toLowerCase().includes("ornith"))) return 20
+   if (id.includes("minimax-m2")) {
+     if (["m2.", "m25", "m21"].some((s) => id.includes(s))) return 40
+     return 20
+@@ -1907,3 +1908,18 @@ function reasoningBudget(model: Provider.Model, budget: number) {
+ }
+ 
+ export * as ProviderTransform from "./transform"
++export function kestrelThinkingRequestBody(providerID: string, bodyText: string) {
++  if (providerID !== "kestrel") return bodyText
++  try {
++    const body = JSON.parse(bodyText)
++    const effort = body.reasoning_effort
++    if (effort === undefined) return bodyText
++    const think = effort !== "none"
++    delete body.reasoning_effort
++    body.think = think
++    return JSON.stringify(body)
++  } catch {
++    return bodyText
++  }
++}
++
 diff --git a/packages/opencode/src/session/axiom-coverage.ts b/packages/opencode/src/session/axiom-coverage.ts
 new file mode 100644
 index 0000000..1e983af
@@ -102,6 +146,91 @@ index 0000000..1e983af
 +}
 +
 +export * as AxiomCoverage from "./axiom-coverage"
+diff --git a/packages/opencode/src/session/axiom-tool-loop.ts b/packages/opencode/src/session/axiom-tool-loop.ts
+new file mode 100644
+index 0000000..698a843
+--- /dev/null
++++ b/packages/opencode/src/session/axiom-tool-loop.ts
+@@ -0,0 +1,79 @@
++import { stable } from "./axiom-coverage"
++
++type Message = {
++  info: { id: string; role: string; parentID?: string; time?: { created?: number } }
++  parts: Array<{
++    id: string
++    type: string
++    tool?: string
++    callID?: string
++    state?: { status?: string; input?: unknown; output?: unknown; error?: unknown }
++  }>
++}
++
++type Call = {
++  id: string
++  created: number
++  messageID: string
++  partIndex: number
++  tool: string
++  key: string
++}
++
++const compare = (a: Call, b: Call) =>
++  a.created - b.created || a.messageID.localeCompare(b.messageID) || a.partIndex - b.partIndex
++
++// Tracks calls within one active run. OpenCode can append user messages while a run is busy, and
++// compacted message arrays are reordered. Keep seen call IDs and the recent call tail in memory so
++// neither a follow-up message nor compaction can reset a repeated-call streak.
++export class RepetitionTracker {
++  readonly #userIDs = new Set<string>()
++  readonly #seen = new Set<string>()
++  readonly #calls: Call[] = []
++
++  observe(messages: Message[], activeUserID: string) {
++    this.#userIDs.add(activeUserID)
++    const found: Call[] = []
++    for (const message of messages) {
++      if (message.info.role !== "assistant" || !message.info.parentID || !this.#userIDs.has(message.info.parentID))
++        continue
++      for (const [partIndex, part] of message.parts.entries()) {
++        if (
++          part.type !== "tool" ||
++          !part.tool ||
++          !part.callID ||
++          part.callID.startsWith("axiom-coverage-") ||
++          (!part.state || (part.state.status !== "completed" && part.state.status !== "error"))
++        )
++          continue
++        const id = `${message.info.id}:${part.id}`
++        if (this.#seen.has(id) || found.some((call) => call.id === id)) continue
++        const result = part.state.status === "completed" ? part.state.output : part.state.error
++        found.push({
++          id,
++          created: message.info.time?.created ?? 0,
++          messageID: message.info.id,
++          partIndex,
++          tool: part.tool,
++          key: `${part.tool} ${stable(part.state.input ?? {})} ${stable(result)}`,
++        })
++      }
++    }
++    found.sort(compare)
++    for (const call of found) {
++      this.#seen.add(call.id)
++      const index = this.#calls.findIndex((current) => compare(current, call) > 0)
++      if (index === -1) this.#calls.push(call)
++      else this.#calls.splice(index, 0, call)
++      if (this.#calls.length > 16) this.#calls.splice(0, this.#calls.length - 16)
++    }
++  }
++
++  repeatedTail() {
++    const last = this.#calls.at(-1)
++    if (!last) return undefined
++    let count = 1
++    for (let i = this.#calls.length - 2; i >= 0 && this.#calls[i].key === last.key; i--) count++
++    return { tool: last.tool, count }
++  }
++}
 diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
 index a99f8ac..468a50c 100644
 --- a/packages/opencode/src/session/llm.ts
@@ -158,19 +287,20 @@ index 13d427a..4aafe24 100644
          const id = currentReasoningID(state, event.id)
          state.currentReasoningID = undefined
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 0f85d44..5f7e8a2 100644
+index 0f85d44..55a7ae8 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -9,6 +9,8 @@ import { SessionRevert } from "./revert"
+@@ -9,6 +9,9 @@ import { SessionRevert } from "./revert"
  import { Session } from "./session"
  import { Agent } from "../agent/agent"
  import { Provider } from "@/provider/provider"
 +import { Ripgrep } from "@opencode-ai/core/ripgrep"
 +import { AxiomCoverage } from "./axiom-coverage"
++import { RepetitionTracker } from "./axiom-tool-loop"
  
  import { type Tool as AITool, tool, jsonSchema } from "ai"
  import type { JSONSchema7 } from "@ai-sdk/provider"
-@@ -99,6 +101,188 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
+@@ -99,6 +102,169 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
    return part.state.status === "error" && part.state.metadata?.interrupted === true
  }
  
@@ -269,25 +399,6 @@ index 0f85d44..5f7e8a2 100644
 +const AXIOM_REPEAT_WARN = 3
 +const AXIOM_REPEAT_ABORT = 4
 +
-+// Length of the trailing run of byte-identical tool calls (same tool, same input).
-+function axiomRepeatedTail(messages: SessionV1.WithParts[]): { tool: string; count: number } | undefined {
-+  const calls: { tool: string; key: string }[] = []
-+  for (const message of messages) {
-+    if (message.info.role !== "assistant") continue
-+    for (const part of message.parts) {
-+      if (part.type !== "tool" || part.callID.startsWith("axiom-coverage-")) continue
-+      if (part.state.status !== "completed" && part.state.status !== "error") continue
-+      calls.push({ tool: part.tool, key: part.tool + " " + AxiomCoverage.stable(part.state.input ?? {}) + " " + (part.state.status === "completed" ? part.state.output : part.state.error) })
-+    }
-+  }
-+  if (calls.length === 0) return undefined
-+  const last = calls[calls.length - 1]
-+  let count = 1
-+  for (let i = calls.length - 2; i >= 0 && calls[i].key === last.key; i--) count++
-+  count = Math.max(count, calls.slice(-16).filter((call) => call.key === last.key).length)
-+  return { tool: last.tool, count }
-+}
-+
 +function axiomRepeatText(tool: string, count: number): string {
 +  return [
 +    `You have now called \`${tool}\` ${count} times recently with exactly the same arguments, and`,
@@ -359,7 +470,7 @@ index 0f85d44..5f7e8a2 100644
  export interface Interface {
    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
    readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
-@@ -124,6 +308,7 @@ const layer = Layer.effect(
+@@ -124,6 +290,7 @@ const layer = Layer.effect(
      const config = yield* Config.Service
      const permission = yield* Permission.Service
      const fsys = yield* FSUtil.Service
@@ -367,7 +478,7 @@ index 0f85d44..5f7e8a2 100644
      const mcp = yield* MCP.Service
      const lsp = yield* LSP.Service
      const registry = yield* ToolRegistry.Service
-@@ -1083,6 +1268,12 @@ const layer = Layer.effect(
+@@ -1083,6 +1250,13 @@ const layer = Layer.effect(
          const ctx = yield* InstanceState.context
          let structured: unknown
          let step = 0
@@ -375,20 +486,22 @@ index 0f85d44..5f7e8a2 100644
 +        // Reset whenever the model does real work, so the budget is "N refusals in a row",
 +        // not N per session.
 +        let axiomNudges = 0
++        const axiomToolLoop = new RepetitionTracker()
 +        let axiomCoverage: AxiomCoverage.Coverage | undefined
 +        let axiomCoverageUser: string | undefined
          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
  
          while (true) {
-@@ -1096,6 +1287,7 @@ const layer = Layer.effect(
+@@ -1096,6 +1270,8 @@ const layer = Layer.effect(
            const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
  
            if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
++          axiomToolLoop.observe(msgs, lastUser.id)
 +          const axiomCurrentMessages = msgs.slice(msgs.findLastIndex((message) => message.info.role === "user"))
  
            const lastAssistantMsg = msgs.findLast(
              (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
-@@ -1105,13 +1297,14 @@ const layer = Layer.effect(
+@@ -1105,13 +1281,14 @@ const layer = Layer.effect(
            // the model, but ignore cleanup-marked interrupted orphans.
            const hasToolCalls =
              lastAssistantMsg?.parts.some(
@@ -404,7 +517,7 @@ index 0f85d44..5f7e8a2 100644
              lastAssistant.parentID === lastUser.id
            ) {
              const orphan = lastAssistantMsg?.parts.find(
-@@ -1125,8 +1318,102 @@ const layer = Layer.effect(
+@@ -1125,8 +1302,102 @@ const layer = Layer.effect(
                  callID: orphan.callID,
                })
              }
@@ -477,7 +590,7 @@ index 0f85d44..5f7e8a2 100644
 +          // AXIOM: the mirror image of the nudge above. That one refuses to stop too early; this
 +          // one refuses to spin forever. Every repeat is a legitimate tool call, so nothing in the
 +          // stock loop notices a model that has locked onto one. Tell it once, then stop.
-+          const axiomRepeat = axiomRepeatedTail(axiomCurrentMessages)
++          const axiomRepeat = axiomToolLoop.repeatedTail()
 +          if (axiomRepeat && axiomRepeat.count >= AXIOM_REPEAT_WARN) {
 +            if (axiomRepeat.count >= AXIOM_REPEAT_ABORT) {
 +              yield* events.publish(Session.Event.Error, {
@@ -509,7 +622,7 @@ index 0f85d44..5f7e8a2 100644
            }
  
            step++
-@@ -1240,6 +1527,56 @@ const layer = Layer.effect(
+@@ -1240,6 +1511,56 @@ const layer = Layer.effect(
                Effect.provideService(RuntimeFlags.Service, flags),
              )
  
@@ -566,7 +679,7 @@ index 0f85d44..5f7e8a2 100644
              if (lastUser.format?.type === "json_schema") {
                tools["StructuredOutput"] = createStructuredOutputTool({
                  schema: lastUser.format.schema,
-@@ -1280,7 +1617,7 @@ const layer = Layer.effect(
+@@ -1280,7 +1601,7 @@ const layer = Layer.effect(
                  ...modelMsgs,
                  ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
                ],
@@ -575,7 +688,7 @@ index 0f85d44..5f7e8a2 100644
                model,
                toolChoice: format.type === "json_schema" ? "required" : undefined,
              })
-@@ -1336,7 +1673,17 @@ const layer = Layer.effect(
+@@ -1336,7 +1657,17 @@ const layer = Layer.effect(
          }
  
          yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
@@ -594,7 +707,7 @@ index 0f85d44..5f7e8a2 100644
        },
      )
  
-@@ -1610,6 +1957,7 @@ export const node = LayerNode.make({
+@@ -1610,6 +1941,7 @@ export const node = LayerNode.make({
      Config.node,
      Permission.node,
      FSUtil.node,
@@ -628,6 +741,49 @@ index 678ed44..3d99be6 100644
        if (file.cut) {
          output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
        } else if (file.more) {
+diff --git a/packages/opencode/test/provider/kestrel.test.ts b/packages/opencode/test/provider/kestrel.test.ts
+new file mode 100644
+index 0000000..b7febf2
+--- /dev/null
++++ b/packages/opencode/test/provider/kestrel.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, test } from "bun:test"
++import { ProviderTransform } from "@/provider/transform"
++
++describe("Kestrel Ornith request controls", () => {
++  test.each([
++    ["none", false],
++    ["high", true],
++  ])("maps reasoning effort %s to Kestrel's think field", (reasoningEffort, think) => {
++    const bodyText = JSON.stringify({ model: "ornith-1.5:9b", reasoning_effort: reasoningEffort })
++    const transformed = ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)
++    expect(JSON.parse(transformed)).toEqual({
++      model: "ornith-1.5:9b",
++      think,
++    })
++  })
++
++  test("leaves non-Ornith request bodies unchanged", () => {
++    const bodyText = JSON.stringify({ model: "llama3.1:8b" })
++    expect(ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)).toBe(bodyText)
++  })
++
++  test("maps explicit profile controls when the runtime model ID is opaque", () => {
++    const bodyText = JSON.stringify({ model: "local-profile-9b", reasoning_effort: "none" })
++    const transformed = ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)
++    expect(JSON.parse(transformed)).toEqual({ model: "local-profile-9b", think: false })
++  })
++
++  test("does not change Ornith requests sent through another provider", () => {
++    const bodyText = JSON.stringify({ model: "ornith-1.5:9b", reasoning_effort: "none" })
++    expect(ProviderTransform.kestrelThinkingRequestBody("openai-compatible", bodyText)).toBe(bodyText)
++  })
++
++  test("uses the model card's top_k for Ornith", () => {
++    const model = { providerID: "kestrel", api: { id: "local-profile-9b" }, name: "Ornith 1.5 9B" } as any
++    expect(ProviderTransform.topK(model)).toBe(20)
++  })
++})
 diff --git a/packages/opencode/test/session/axiom-coverage.test.ts b/packages/opencode/test/session/axiom-coverage.test.ts
 new file mode 100644
 index 0000000..1d6b0f1
@@ -710,6 +866,78 @@ index 0000000..1d6b0f1
 +  expect(AxiomCoverage.stable({ b: { x: 1 }, a: 2 })).toBe(AxiomCoverage.stable({ a: 2, b: { x: 1 } }))
 +  expect(AxiomCoverage.stable({ b: { x: 1 } })).not.toBe(AxiomCoverage.stable({ b: { y: 1 } }))
 +})
+diff --git a/packages/opencode/test/session/axiom-tool-loop.test.ts b/packages/opencode/test/session/axiom-tool-loop.test.ts
+new file mode 100644
+index 0000000..cb99e12
+--- /dev/null
++++ b/packages/opencode/test/session/axiom-tool-loop.test.ts
+@@ -0,0 +1,66 @@
++import { expect, test } from "bun:test"
++import { RepetitionTracker } from "../../src/session/axiom-tool-loop"
++
++const command = 'Get-ChildItem -LiteralPath "C:\\Users\\user\\workspace-81953e07" -Filter *.js | ForEach-Object { node --check $_.FullName; Write-Output "OK: $($_.Name)" }'
++const output = "OK: character.js\nOK: engine.js\nOK: main.js\nOK: scenes-a.js\nOK: scenes-b.js\nOK: scenes-c.js\nOK: scenes-d.js"
++
++function call(id: string, parentID: string, created: number, result = output) {
++  return {
++    info: { id: `assistant-${id}`, role: "assistant", parentID, time: { created } },
++    parts: [
++      {
++        id: `part-${id}`,
++        type: "tool",
++        tool: "bash",
++        // The provider may reuse this ID on each generated assistant response.
++        callID: "call_0",
++        state: { status: "completed", input: { command }, output: result },
++      },
++    ],
++  }
++}
++
++test("repeat guard carries the streak across user follow-ups within one run", () => {
++  const tracker = new RepetitionTracker()
++  const oldCalls = [call("old-1", "old-user", 1), call("old-2", "old-user", 2), call("old-3", "old-user", 3)]
++  tracker.observe(oldCalls, "new-task")
++  expect(tracker.repeatedTail()).toBeUndefined()
++
++  const runCalls = [call("1", "new-task", 4)]
++  tracker.observe([...oldCalls, ...runCalls], "new-task")
++  expect(tracker.repeatedTail()?.count).toBe(1)
++
++  runCalls.push(call("2", "why-did-you-stop", 5))
++  tracker.observe([...oldCalls, ...runCalls], "why-did-you-stop")
++  expect(tracker.repeatedTail()?.count).toBe(2)
++
++  runCalls.push(call("3", "why-repeat", 6))
++  tracker.observe([...oldCalls, ...runCalls], "why-repeat")
++  expect(tracker.repeatedTail()?.count).toBe(3)
++
++  runCalls.push(call("4", "why-repeat", 7))
++  tracker.observe([...oldCalls, ...runCalls], "why-repeat")
++  expect(tracker.repeatedTail()).toEqual({ tool: "bash", count: 4 })
++})
++
++test("reordered compacted history does not lose calls or double-count them", () => {
++  const tracker = new RepetitionTracker()
++  const calls = [call("1", "root-user", 1), call("2", "root-user", 2), call("3", "root-user", 3)]
++  tracker.observe(calls, "root-user")
++  expect(tracker.repeatedTail()?.count).toBe(3)
++
++  const compactedOrder = [calls[2], { info: { id: "summary", role: "assistant", parentID: "compact-user", time: { created: 4 } }, parts: [] }, calls[0], calls[1]]
++  tracker.observe(compactedOrder, "continue-user")
++  expect(tracker.repeatedTail()?.count).toBe(3)
++
++  tracker.observe([...compactedOrder, call("4", "continue-user", 5)], "continue-user")
++  expect(tracker.repeatedTail()?.count).toBe(4)
++})
++
++test("a changed tool result resets the identical-call streak", () => {
++  const tracker = new RepetitionTracker()
++  const first = call("1", "root-user", 1)
++  tracker.observe([first], "root-user")
++  tracker.observe([first, call("2", "root-user", 2, "a different file list")], "root-user")
++  expect(tracker.repeatedTail()?.count).toBe(1)
++})
 diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
 index fcb536f..d099bfc 100644
 --- a/packages/opencode/test/session/llm.test.ts
@@ -770,82 +998,3 @@ index c1ef61b..2cf0e38 100644
  const glob = (p: string) =>
    process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
  const githubBase = <A, E, R>(url: string, self: Effect.Effect<A, E, R>) =>
-
-diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
---- a/packages/opencode/src/provider/transform.ts
-+++ b/packages/opencode/src/provider/transform.ts
-@@ -563,4 +563,5 @@ export function topK(model: Provider.Model) {
-   const id = model.api.id.toLowerCase()
-+  if (model.providerID === "kestrel" && (id.includes("ornith") || model.name.toLowerCase().includes("ornith"))) return 20
-   if (id.includes("minimax-m2")) {
-     if (["m2.", "m25", "m21"].some((s) => id.includes(s))) return 40
-     return 20
-@@ -1467,0 +1468,15 @@
-+export function kestrelThinkingRequestBody(providerID: string, bodyText: string) {
-+  if (providerID !== "kestrel") return bodyText
-+  try {
-+    const body = JSON.parse(bodyText)
-+    const effort = body.reasoning_effort
-+    if (effort === undefined) return bodyText
-+    const think = effort !== "none"
-+    delete body.reasoning_effort
-+    body.think = think
-+    return JSON.stringify(body)
-+  } catch {
-+    return bodyText
-+  }
-+}
-+
-diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
---- a/packages/opencode/src/provider/provider.ts
-+++ b/packages/opencode/src/provider/provider.ts
-@@ -1803,5 +1803,7 @@
-         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
-           const fetchFn = customFetch ?? fetch
-           const opts = init ?? {}
-+          if (model.providerID === "kestrel" && typeof opts.body === "string")
-+            opts.body = ProviderTransform.kestrelThinkingRequestBody(model.providerID, opts.body)
-           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
-           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
-diff --git a/packages/opencode/test/provider/kestrel.test.ts b/packages/opencode/test/provider/kestrel.test.ts
-new file mode 100644
---- /dev/null
-+++ b/packages/opencode/test/provider/kestrel.test.ts
-@@ -0,0 +1,37 @@
-+import { describe, expect, test } from "bun:test"
-+import { ProviderTransform } from "@/provider/transform"
-+
-+describe("Kestrel Ornith request controls", () => {
-+  test.each([
-+    ["none", false],
-+    ["high", true],
-+  ])("maps reasoning effort %s to Kestrel's think field", (reasoningEffort, think) => {
-+    const bodyText = JSON.stringify({ model: "ornith-1.5:9b", reasoning_effort: reasoningEffort })
-+    const transformed = ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)
-+    expect(JSON.parse(transformed)).toEqual({
-+      model: "ornith-1.5:9b",
-+      think,
-+    })
-+  })
-+
-+  test("leaves non-Ornith request bodies unchanged", () => {
-+    const bodyText = JSON.stringify({ model: "llama3.1:8b" })
-+    expect(ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)).toBe(bodyText)
-+  })
-+
-+  test("maps explicit profile controls when the runtime model ID is opaque", () => {
-+    const bodyText = JSON.stringify({ model: "local-profile-9b", reasoning_effort: "none" })
-+    const transformed = ProviderTransform.kestrelThinkingRequestBody("kestrel", bodyText)
-+    expect(JSON.parse(transformed)).toEqual({ model: "local-profile-9b", think: false })
-+  })
-+
-+  test("does not change Ornith requests sent through another provider", () => {
-+    const bodyText = JSON.stringify({ model: "ornith-1.5:9b", reasoning_effort: "none" })
-+    expect(ProviderTransform.kestrelThinkingRequestBody("openai-compatible", bodyText)).toBe(bodyText)
-+  })
-+
-+  test("uses the model card's top_k for Ornith", () => {
-+    const model = { providerID: "kestrel", api: { id: "local-profile-9b" }, name: "Ornith 1.5 9B" } as any
-+    expect(ProviderTransform.topK(model)).toBe(20)
-+  })
-+})
